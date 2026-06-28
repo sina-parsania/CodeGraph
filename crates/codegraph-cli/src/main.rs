@@ -46,6 +46,13 @@ enum Command {
     },
     /// Direct callees (outgoing CALLS) of a symbol.
     Callees { name: String, #[arg(long, default_value = ".")] path: PathBuf },
+    /// List the largest code communities (clusters) detected in the graph.
+    Communities {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 12)]
+        limit: usize,
+    },
     /// Most central symbols by PageRank.
     Important { #[arg(long, default_value = ".")] path: PathBuf, #[arg(long, default_value_t = 15)] limit: usize },
     /// Find functions that call a given function name (reverse CALLS edges).
@@ -168,6 +175,29 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 None => println!("symbol {:?} not found", name),
+            }
+        }
+        Command::Communities { path, limit } => {
+            use std::collections::BTreeMap;
+            let store = codegraph_store::Store::open(&index::db_path(&path))?;
+            let nodes = store.all_nodes()?;
+            let mut by: BTreeMap<u32, Vec<&codegraph_core::Node>> = BTreeMap::new();
+            for n in &nodes {
+                if n.label == codegraph_core::NodeLabel::File {
+                    continue;
+                }
+                if let Some(c) = n.community {
+                    by.entry(c).or_default().push(n);
+                }
+            }
+            let mut comms: Vec<_> = by.into_iter().collect();
+            comms.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+            for (c, members) in comms.into_iter().take(limit) {
+                let mut names: Vec<&str> = members.iter().map(|n| n.name.as_str()).collect();
+                names.sort();
+                names.dedup();
+                let sample: Vec<&str> = names.into_iter().take(8).collect();
+                println!("community {:<3} ({} symbols): {}", c, members.len(), sample.join(", "));
             }
         }
         Command::Important { path, limit } => {

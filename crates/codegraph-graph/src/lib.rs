@@ -247,6 +247,146 @@ impl LoadedGraph {
         scored.truncate(k);
         scored
     }
+
+    /// Per-node analytics: (community id, PageRank, betweenness). Computed once
+    /// over the whole graph; persisted onto each node at index time.
+    pub fn analyze(&self) -> HashMap<String, (u32, f64, f64)> {
+        let comm = self.communities();
+        let ranks = petgraph::algo::page_rank::page_rank(&self.graph, 0.85_f64, 50);
+        let betw = self.betweenness();
+        let mut out = HashMap::new();
+        for (i, id) in self.ids.iter().enumerate() {
+            out.insert(
+                id.clone(),
+                (
+                    comm.get(id).copied().unwrap_or(0),
+                    ranks.get(i).copied().unwrap_or(0.0),
+                    betw.get(id).copied().unwrap_or(0.0),
+                ),
+            );
+        }
+        out
+    }
+
+    /// Deterministic one-level Louvain (modularity local-moving); edges treated
+    /// as undirected, weight 1. Tie-break to the smaller community id.
+    pub fn communities(&self) -> HashMap<String, u32> {
+        let n = self.graph.node_count();
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for &ni in self.idx.values() {
+            let i = ni.index();
+            for d in [petgraph::Direction::Outgoing, petgraph::Direction::Incoming] {
+                for nb in self.graph.neighbors_directed(ni, d) {
+                    adj[i].push(nb.index());
+                }
+            }
+        }
+        let deg: Vec<f64> = adj.iter().map(|a| a.len() as f64).collect();
+        let m2: f64 = deg.iter().sum();
+        let mut comm: Vec<usize> = (0..n).collect();
+        if m2 > 0.0 {
+            let mut sigma_tot: Vec<f64> = deg.clone();
+            let mut improved = true;
+            let mut rounds = 0;
+            while improved && rounds < 20 {
+                improved = false;
+                rounds += 1;
+                for v in 0..n {
+                    if adj[v].is_empty() {
+                        continue;
+                    }
+                    let cv = comm[v];
+                    sigma_tot[cv] -= deg[v];
+                    let mut k_in: HashMap<usize, f64> = HashMap::new();
+                    for &u in &adj[v] {
+                        *k_in.entry(comm[u]).or_default() += 1.0;
+                    }
+                    let mut best_c = cv;
+                    let mut best_gain = k_in.get(&cv).copied().unwrap_or(0.0) - deg[v] * sigma_tot[cv] / m2;
+                    for (&c, &kin) in &k_in {
+                        let gain = kin - deg[v] * sigma_tot[c] / m2;
+                        if gain > best_gain + 1e-12 || ((gain - best_gain).abs() <= 1e-12 && c < best_c) {
+                            best_gain = gain;
+                            best_c = c;
+                        }
+                    }
+                    sigma_tot[best_c] += deg[v];
+                    if best_c != cv {
+                        comm[v] = best_c;
+                        improved = true;
+                    }
+                }
+            }
+        }
+        let mut remap: HashMap<usize, u32> = HashMap::new();
+        let mut next = 0u32;
+        let mut out = HashMap::new();
+        for (id, &cm) in self.ids.iter().zip(&comm) {
+            let c = *remap.entry(cm).or_insert_with(|| {
+                let x = next;
+                next += 1;
+                x
+            });
+            out.insert(id.clone(), c);
+        }
+        out
+    }
+
+    /// Brandes betweenness centrality (exact for graphs up to 1500 nodes,
+    /// else seeded evenly-spaced pivots for an approximation).
+    pub fn betweenness(&self) -> HashMap<String, f64> {
+        let n = self.graph.node_count();
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for &ni in self.idx.values() {
+            let i = ni.index();
+            for nb in self.graph.neighbors(ni) {
+                adj[i].push(nb.index());
+            }
+        }
+        let sources: Vec<usize> = if n <= 1500 {
+            (0..n).collect()
+        } else {
+            (0..n).step_by((n / 500).max(1)).collect()
+        };
+        let mut bc = vec![0.0f64; n];
+        for &s in &sources {
+            let mut stack = Vec::new();
+            let mut pred: Vec<Vec<usize>> = vec![Vec::new(); n];
+            let mut sigma = vec![0.0f64; n];
+            sigma[s] = 1.0;
+            let mut dist = vec![-1i64; n];
+            dist[s] = 0;
+            let mut q = std::collections::VecDeque::new();
+            q.push_back(s);
+            while let Some(v) = q.pop_front() {
+                stack.push(v);
+                for &w in &adj[v] {
+                    if dist[w] < 0 {
+                        dist[w] = dist[v] + 1;
+                        q.push_back(w);
+                    }
+                    if dist[w] == dist[v] + 1 {
+                        sigma[w] += sigma[v];
+                        pred[w].push(v);
+                    }
+                }
+            }
+            let mut delta = vec![0.0f64; n];
+            while let Some(w) = stack.pop() {
+                for &v in &pred[w] {
+                    delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w]);
+                }
+                if w != s {
+                    bc[w] += delta[w];
+                }
+            }
+        }
+        let mut out = HashMap::new();
+        for (id, &b) in self.ids.iter().zip(&bc) {
+            out.insert(id.clone(), b);
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -276,6 +416,28 @@ mod traversal_tests {
         let blast = lg.blast_radius(&c, 5);
         assert!(blast.iter().any(|id| id.ends_with(".b")));
         assert!(blast.iter().any(|id| id.ends_with(".a")));
+    }
+
+    #[test]
+    fn communities_and_betweenness() {
+        use codegraph_core::{Confidence, EdgeRelation, Metadata, NodeLabel, ResolutionTier};
+        let mk_n = |x: &str| Node {
+            id: x.into(), label: NodeLabel::Function, name: x.into(), file_path: "f".into(),
+            line_start: 1, line_end: 1, language: "rust".into(), metadata: Metadata::new(),
+            community: None, pagerank: 0.0, betweenness: 0.0,
+        };
+        let nodes: Vec<Node> = ["a", "b", "c", "d", "e", "f"].iter().map(|x| mk_n(x)).collect();
+        let mk_e = |s: &str, d: &str| Edge {
+            src: s.into(), dst: d.into(), relation: EdgeRelation::Calls, tier: ResolutionTier::TreeSitter,
+            confidence: Confidence::Inferred, src_file: "f".into(), src_line: 1, metadata: Metadata::new(),
+        };
+        // two triangles {a,b,c} and {d,e,f} bridged by c->d
+        let edges = vec![mk_e("a","b"), mk_e("b","c"), mk_e("c","a"), mk_e("c","d"), mk_e("d","e"), mk_e("e","f"), mk_e("f","d")];
+        let lg = LoadedGraph::load(&nodes, &edges);
+        let a = lg.analyze();
+        let comms: std::collections::HashSet<u32> = a.values().map(|v| v.0).collect();
+        assert!(comms.len() >= 2, "expected at least two communities");
+        assert!(a["c"].2 > 0.0 || a["d"].2 > 0.0, "bridge node should have betweenness");
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::Result;
-use codegraph_graph::build;
+use codegraph_graph::{build, LoadedGraph};
 use codegraph_parse::parse_file;
 use codegraph_store::Store;
 use sha2::{Digest, Sha256};
@@ -85,6 +85,19 @@ pub fn index_dir(root: &Path, db: &Path, full: bool) -> Result<IndexStats> {
     store.clear_edges()?;
     for e in &built.edges {
         store.upsert_edge(e)?;
+    }
+
+    // Community + centrality over the full graph, persisted onto each node.
+    let lg = LoadedGraph::load(&nodes, &built.edges);
+    let analytics = lg.analyze();
+    let mut nodes = nodes;
+    for nd in nodes.iter_mut() {
+        if let Some(&(c, pr, bw)) = analytics.get(&nd.id) {
+            nd.community = Some(c);
+            nd.pagerank = pr;
+            nd.betweenness = bw;
+        }
+        store.upsert_node(nd)?;
     }
     store.rebuild_fts()?;
 
