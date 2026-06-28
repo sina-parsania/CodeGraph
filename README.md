@@ -15,6 +15,9 @@ A single static binary that turns **any codebase** into a queryable code-knowled
 - **Search** — full-text (`search`, optional `--rerank`), **semantic** vector search (`semantic`, `--hyde`), and `ask` (NL answer over real source snippets).
 - **Ingest** — `ingest` pulls PDFs, text/markdown, web pages, and (with `--features media`) **images via OCR**.
 - **MCP server** — `search, semantic_search, get_node, callers, callees, trace_path, blast_radius, important, stats` over stdio.
+- **Arbitrary analytics** — `query` runs read-only SQL over the graph (a universal alternative to a graph query language).
+
+See **[docs/BENCHMARK.md](docs/BENCHMARK.md)** for a measured head-to-head vs qmd, graphify, codebase-memory, and codebase-index — feature parity matrix + perf + honest gaps.
 
 ## Install
 
@@ -40,6 +43,7 @@ codegraph ask "how does auth work?"
 codegraph important --limit 15        # most central symbols (PageRank)
 codegraph communities                 # detected code clusters (Louvain)
 codegraph routes                      # detected HTTP routes (NestJS/Express/Flask/Spring)
+codegraph query "SELECT label, COUNT(*) FROM nodes GROUP BY label"   # arbitrary read-only SQL analytics
 codegraph impact processPayment       # blast-radius
 codegraph callers handleLogin   /   codegraph callees parseFile
 codegraph implementers Repository     # who implements/extends it
