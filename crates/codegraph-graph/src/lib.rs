@@ -6,8 +6,42 @@ use std::collections::{HashMap, HashSet};
 
 use codegraph_core::{
     Confidence, Edge, EdgeRelation, Hyperedge, HyperedgeMember, HyperedgeRelation, InheritKind, Metadata,
-    Node, NodeLabel, RawCall, RawInherit, ResolutionTier,
+    Node, NodeLabel, RawCall, RawInherit, Receiver, ResolutionTier,
 };
+
+/// Class-Hierarchy-Analysis member resolution (docs/RESOLUTION.md): find the method
+/// `name` on `class_id` or its nearest ancestor; return Some iff exactly one such
+/// method exists at the nearest level, else None (DROP — never guess).
+fn resolve_member<'a>(
+    class_id: &str,
+    name: &str,
+    class_members: &HashMap<&'a str, HashMap<&'a str, Vec<&'a str>>>,
+    class_parents: &HashMap<&'a str, Vec<&'a str>>,
+) -> Option<&'a str> {
+    if let Some(ms) = class_members.get(class_id).and_then(|m| m.get(name)) {
+        return (ms.len() == 1).then(|| ms[0]);
+    }
+    let mut frontier: Vec<&str> = class_parents.get(class_id).cloned().unwrap_or_default();
+    let mut visited: HashSet<&str> = HashSet::new();
+    while !frontier.is_empty() {
+        let mut matches: Vec<&str> = Vec::new();
+        let mut next: Vec<&str> = Vec::new();
+        for p in &frontier {
+            if !visited.insert(p) {
+                continue;
+            }
+            if let Some(ms) = class_members.get(*p).and_then(|m| m.get(name)) {
+                matches.extend(ms.iter().copied());
+            }
+            next.extend(class_parents.get(*p).cloned().unwrap_or_default());
+        }
+        if !matches.is_empty() {
+            return (matches.len() == 1).then(|| matches[0]);
+        }
+        frontier = next;
+    }
+    None
+}
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 
 /// Directed graph of node-id → node-id, edge weight = relation name.
@@ -37,6 +71,43 @@ pub fn build(nodes: &[Node], calls: &[RawCall], inherits: &[RawInherit]) -> Buil
         fn_by_name.entry(n.name.as_str()).or_default().push(n.id.as_str());
     }
 
+    // Class-Hierarchy-Analysis tables for receiver-aware (self/this) resolution.
+    let class_nodes: Vec<&Node> = nodes
+        .iter()
+        .filter(|n| matches!(n.label, NodeLabel::Class | NodeLabel::Interface | NodeLabel::Enum))
+        .collect();
+    let mut class_by_name: HashMap<&str, Vec<&str>> = HashMap::new();
+    for c in &class_nodes {
+        class_by_name.entry(c.name.as_str()).or_default().push(c.id.as_str());
+    }
+    // class_members: class id -> method name -> method ids, by innermost containment.
+    let mut class_members: HashMap<&str, HashMap<&str, Vec<&str>>> = HashMap::new();
+    for m in nodes.iter().filter(|n| n.label == NodeLabel::Method) {
+        let owner = class_nodes
+            .iter()
+            .filter(|c| {
+                c.file_path == m.file_path
+                    && c.line_start <= m.line_start
+                    && m.line_end <= c.line_end
+                    && c.id != m.id
+            })
+            .min_by_key(|c| c.line_end - c.line_start);
+        if let Some(c) = owner {
+            class_members.entry(c.id.as_str()).or_default().entry(m.name.as_str()).or_default().push(m.id.as_str());
+        }
+    }
+    // class_parents: child class id -> parent class ids (resolved by unique name).
+    let mut class_parents: HashMap<&str, Vec<&str>> = HashMap::new();
+    for inh in inherits {
+        if let (Some(ch), Some(pa)) =
+            (class_by_name.get(inh.impl_name.as_str()), class_by_name.get(inh.super_name.as_str()))
+        {
+            if ch.len() == 1 && pa.len() == 1 {
+                class_parents.entry(ch[0]).or_default().push(pa[0]);
+            }
+        }
+    }
+
     let mut edges: Vec<Edge> = Vec::new();
     let mut seen: HashSet<(String, String, EdgeRelation)> = HashSet::new();
 
@@ -57,15 +128,26 @@ pub fn build(nodes: &[Node], calls: &[RawCall], inherits: &[RawInherit]) -> Buil
 
     for c in calls {
         let Some(caller) = by_id.get(c.caller_id.as_str()) else { continue };
-        // 1) same-file resolution wins; 2) else a project-wide UNIQUE name.
-        // Ambiguous names (defined in >1 place) are left unresolved - no phantom edge.
-        let resolved = fn_by_file_name
-            .get(&(caller.file_path.as_str(), c.callee_name.as_str()))
-            .copied()
-            .or_else(|| match fn_by_name.get(c.callee_name.as_str()) {
-                Some(cands) if cands.len() == 1 => Some(cands[0]),
-                _ => None,
-            });
+        // T1 (receiver-aware): self.foo()/this.foo() resolves to the enclosing
+        // class's foo (or an ancestor), unique-or-drop — provably correct because
+        // the receiver type IS the class. Falls back to the existing same-file /
+        // project-wide-unique path for everything else (no regression, no guess).
+        let t1 = if c.receiver == Receiver::SelfThis {
+            c.enclosing_class
+                .as_deref()
+                .and_then(|cls| resolve_member(cls, &c.callee_name, &class_members, &class_parents))
+        } else {
+            None
+        };
+        let resolved = t1.or_else(|| {
+            fn_by_file_name
+                .get(&(caller.file_path.as_str(), c.callee_name.as_str()))
+                .copied()
+                .or_else(|| match fn_by_name.get(c.callee_name.as_str()) {
+                    Some(cands) if cands.len() == 1 => Some(cands[0]),
+                    _ => None,
+                })
+        });
         if let Some(callee_id) = resolved {
             if callee_id == c.caller_id {
                 continue;
@@ -185,6 +267,53 @@ mod tests {
         assert!(calls[0].src.ends_with("main") && calls[0].dst.ends_with("helper"));
         assert!(built.edges.iter().any(|e| e.relation == EdgeRelation::Defines));
         assert_eq!(built.graph.node_count(), pf.nodes.len());
+    }
+
+    fn build_ts(files: &[(&str, &str)]) -> Built {
+        let (mut nodes, mut calls, mut inherits) = (Vec::new(), Vec::new(), Vec::new());
+        for (f, src) in files {
+            let pf = codegraph_parse::parse_ts("p", f, src);
+            nodes.extend(pf.nodes);
+            calls.extend(pf.calls);
+            inherits.extend(pf.inherits);
+        }
+        build(&nodes, &calls, &inherits)
+    }
+
+    #[test]
+    fn t1_resolves_inherited_self_call_that_was_dropped() {
+        // `bar` is project-ambiguous (Base.bar + Other.bar), so the old resolver
+        // DROPS `this.bar()`. T1 resolves it to Base.bar via A's INHERITS chain.
+        let built = build_ts(&[
+            ("base.ts", "class Base { bar() {} }"),
+            ("a.ts", "class A extends Base { foo() { this.bar(); } }"),
+            ("other.ts", "class Other { bar() {} }"),
+        ]);
+        let bar_calls: Vec<_> = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".bar"))
+            .collect();
+        assert_eq!(bar_calls.len(), 1, "exactly one resolved bar call");
+        assert!(bar_calls[0].src.ends_with(".foo"));
+        assert!(bar_calls[0].dst.contains("base"), "resolved to Base.bar, not Other.bar");
+    }
+
+    #[test]
+    fn t1_drops_self_call_with_no_hierarchy_match_no_guess() {
+        // `widget` is project-ambiguous and NOT on A or its ancestors: must DROP
+        // (T1 returns None; T4 drops the ambiguous name) — precision preserved.
+        let built = build_ts(&[
+            ("a.ts", "class A { foo() { this.widget(); } }"),
+            ("b.ts", "class B { widget() {} }"),
+            ("c.ts", "class C { widget() {} }"),
+        ]);
+        let widget_calls = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".widget"))
+            .count();
+        assert_eq!(widget_calls, 0, "ambiguous self-call must not produce a phantom edge");
     }
 
     #[test]

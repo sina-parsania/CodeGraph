@@ -17,7 +17,7 @@ pub enum StoreError {
 
 type Result<T> = std::result::Result<T, StoreError>;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManifestEntry {
@@ -95,7 +95,8 @@ impl Store {
              CREATE TABLE IF NOT EXISTS vectors(
                node_id TEXT PRIMARY KEY, vec BLOB NOT NULL);
              CREATE TABLE IF NOT EXISTS calls(
-               caller_id TEXT, callee_name TEXT, line INTEGER, file_path TEXT);
+               caller_id TEXT, callee_name TEXT, line INTEGER, file_path TEXT,
+               receiver TEXT, enclosing_class TEXT);
              CREATE INDEX IF NOT EXISTS idx_calls_file ON calls(file_path);
              CREATE TABLE IF NOT EXISTS inherits(
                impl_name TEXT, super_name TEXT, kind TEXT, file_path TEXT);
@@ -103,6 +104,14 @@ impl Store {
              CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
                id UNINDEXED, name, label, language);",
         )?;
+        // Additive column migrations for pre-existing DBs (best-effort; the next
+        // index rebuilds calls anyway). Ignore "duplicate column" on re-run.
+        for stmt in [
+            "ALTER TABLE calls ADD COLUMN receiver TEXT",
+            "ALTER TABLE calls ADD COLUMN enclosing_class TEXT",
+        ] {
+            let _ = self.conn.execute(stmt, []);
+        }
         let current: Option<i64> = self
             .conn
             .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0))
@@ -365,18 +374,30 @@ impl Store {
     pub fn save_calls(&self, file_path: &str, calls: &[RawCall]) -> Result<()> {
         self.conn.execute("DELETE FROM calls WHERE file_path = ?1", [file_path])?;
         let mut stmt = self.conn.prepare(
-            "INSERT INTO calls(caller_id, callee_name, line, file_path) VALUES(?1, ?2, ?3, ?4)",
+            "INSERT INTO calls(caller_id, callee_name, line, file_path, receiver, enclosing_class) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
         for c in calls {
-            stmt.execute(params![c.caller_id, c.callee_name, c.line, file_path])?;
+            let receiver = serde_json::to_string(&c.receiver)?;
+            stmt.execute(params![c.caller_id, c.callee_name, c.line, file_path, receiver, c.enclosing_class])?;
         }
         Ok(())
     }
 
     pub fn all_calls(&self) -> Result<Vec<RawCall>> {
-        let mut stmt = self.conn.prepare("SELECT caller_id, callee_name, line FROM calls")?;
+        let mut stmt =
+            self.conn.prepare("SELECT caller_id, callee_name, line, receiver, enclosing_class FROM calls")?;
         let rows = stmt.query_map([], |r| {
-            Ok(RawCall { caller_id: r.get(0)?, callee_name: r.get(1)?, line: r.get::<_, i64>(2)? as u32 })
+            let receiver = r
+                .get::<_, Option<String>>(3)?
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            Ok(RawCall {
+                caller_id: r.get(0)?,
+                callee_name: r.get(1)?,
+                line: r.get::<_, i64>(2)? as u32,
+                receiver,
+                enclosing_class: r.get(4)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -709,7 +730,7 @@ mod tests {
     fn calls_roundtrip_and_prune() {
         use codegraph_core::RawCall;
         let s = Store::open_in_memory().unwrap();
-        s.save_calls("a.rs", &[RawCall { caller_id: "a.main".into(), callee_name: "helper".into(), line: 2 }]).unwrap();
+        s.save_calls("a.rs", &[RawCall { caller_id: "a.main".into(), callee_name: "helper".into(), line: 2, receiver: Default::default(), enclosing_class: None }]).unwrap();
         assert_eq!(s.all_calls().unwrap().len(), 1);
         s.delete_file_data("a.rs").unwrap();
         assert_eq!(s.all_calls().unwrap().len(), 0);

@@ -2,7 +2,7 @@
 //! per-language `LangSpec` (label map, call-node kinds, callee fields, name
 //! extraction mode). Adding a language = one grammar dep + one `LangSpec`.
 
-use codegraph_core::{InheritKind, Metadata, Node, NodeLabel, QualifiedName, RawCall, RawInherit};
+use codegraph_core::{InheritKind, Metadata, Node, NodeLabel, QualifiedName, RawCall, RawInherit, Receiver};
 use tree_sitter::{Language, Node as TsNode, Parser};
 
 pub struct ParsedFile {
@@ -268,7 +268,7 @@ fn parse_with(spec: &LangSpec, project: &str, rel_path: &str, source: &str) -> P
     let mut calls = Vec::new();
     let mut inherits = Vec::new();
     let ctx = Ctx { spec, project, segs: &file_segs, rel_path, file_id: &file_id };
-    collect(tree.root_node(), bytes, &ctx, None, &mut nodes, &mut calls, &mut inherits);
+    collect(tree.root_node(), bytes, &ctx, None, None, &mut nodes, &mut calls, &mut inherits);
     ParsedFile { nodes, calls, inherits }
 }
 
@@ -280,15 +280,19 @@ struct Ctx<'a> {
     file_id: &'a str,
 }
 
-fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, nodes: &mut Vec<Node>, calls: &mut Vec<RawCall>, inherits: &mut Vec<RawInherit>) {
+#[allow(clippy::too_many_arguments)]
+fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_class: Option<&str>, nodes: &mut Vec<Node>, calls: &mut Vec<RawCall>, inherits: &mut Vec<RawInherit>) {
     let mut my_fn_id: Option<String> = None;
+    let mut my_class_id: Option<String> = None;
 
     if let Some(label) = (ctx.spec.label_for)(node.kind()) {
         if let Some(name) = name_of(node, src, ctx.spec.name_mode) {
             if !name.is_empty() {
                 let id = QualifiedName::build(ctx.project, ctx.segs, &name);
-                if matches!(label, NodeLabel::Function | NodeLabel::Method) {
-                    my_fn_id = Some(id.clone());
+                match label {
+                    NodeLabel::Function | NodeLabel::Method => my_fn_id = Some(id.clone()),
+                    NodeLabel::Class | NodeLabel::Interface | NodeLabel::Enum => my_class_id = Some(id.clone()),
+                    _ => {}
                 }
                 nodes.push(Node {
                     id,
@@ -336,10 +340,19 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, nodes:
                     }
                 }
             }
+            // Receiver-aware capture (TS only for now): self/this binds to the
+            // enclosing class so the resolver can do Class-Hierarchy-Analysis.
+            let receiver = if ctx.spec.name == "typescript" { ts_receiver(node) } else { Receiver::Bare };
+            let enclosing_class = match receiver {
+                Receiver::SelfThis | Receiver::Super => this_class.map(str::to_string),
+                _ => None,
+            };
             calls.push(RawCall {
                 caller_id: current_fn.unwrap_or(ctx.file_id).to_string(),
                 callee_name: callee,
                 line: node.start_position().row as u32 + 1,
+                receiver,
+                enclosing_class,
             });
         }
     }
@@ -349,10 +362,38 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, nodes:
     }
 
     let next_fn = my_fn_id.as_deref().or(current_fn);
+    // `this` binds to the nearest enclosing class, EXCEPT inside a non-arrow
+    // function literal which rebinds it (arrow fns / methods preserve it).
+    let next_this_class = match my_class_id.as_deref() {
+        Some(c) => Some(c),
+        None if rebinds_this(node.kind()) => None,
+        None => this_class,
+    };
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect(child, src, ctx, next_fn, nodes, calls, inherits);
+        collect(child, src, ctx, next_fn, next_this_class, nodes, calls, inherits);
     }
+}
+
+/// Classify a TS call's receiver: `this.x()` / `super.x()` vs everything else.
+fn ts_receiver(call: TsNode) -> Receiver {
+    let Some(func) = call.child_by_field_name("function") else { return Receiver::Bare };
+    if func.kind() != "member_expression" {
+        return Receiver::Bare;
+    }
+    match func.child_by_field_name("object").map(|o| o.kind()) {
+        Some("this") => Receiver::SelfThis,
+        Some("super") => Receiver::Super,
+        _ => Receiver::Bare,
+    }
+}
+
+/// A non-arrow function literal rebinds `this` (arrow functions / methods do not).
+fn rebinds_this(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function_declaration" | "function_expression" | "generator_function" | "generator_function_declaration"
+    )
 }
 
 fn name_of(node: TsNode, src: &[u8], mode: NameMode) -> Option<String> {

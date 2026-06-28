@@ -130,14 +130,30 @@ pub struct RawInherit {
     pub kind: InheritKind,
 }
 
+/// What a call is invoked on. Drives tiered Class-Hierarchy-Analysis resolution
+/// (see docs/RESOLUTION.md). `enclosing_class` says which class node `self`/`this`
+/// is statically bound to at the call site (None if rebound by a nested function).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Receiver {
+    #[default]
+    Bare,
+    SelfThis,
+    Super,
+    Named(String),
+}
+
 /// An unresolved call reference captured by the parser: the enclosing caller's
-/// node id, the called name, and the line. The graph builder resolves
-/// `callee_name` to a node id (intra-language, intra-file) into a CALLS edge.
+/// node id, the called name, the line, plus the receiver kind + the node id of
+/// the class `self`/`this` is bound to (for receiver-aware resolution).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawCall {
     pub caller_id: String,
     pub callee_name: String,
     pub line: u32,
+    #[serde(default)]
+    pub receiver: Receiver,
+    #[serde(default)]
+    pub enclosing_class: Option<String>,
 }
 
 #[cfg(test)]
