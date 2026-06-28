@@ -393,6 +393,15 @@ impl Store {
         Ok(())
     }
 
+    /// All manifest rows (path + sha + mtime) — for the staleness probe.
+    pub fn manifest_map(&self) -> Result<Vec<ManifestEntry>> {
+        let mut stmt = self.conn.prepare("SELECT file_path,sha256,mtime FROM manifest")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ManifestEntry { file_path: r.get(0)?, sha256: r.get(1)?, mtime: r.get(2)? })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn manifest_files(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare("SELECT file_path FROM manifest")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;

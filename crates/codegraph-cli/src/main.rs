@@ -15,6 +15,9 @@ use codegraph_core::{Config, LlmClient};
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    /// Don't auto-reindex before a query (serve the current snapshot as-is).
+    #[arg(long, global = true)]
+    no_autoheal: bool,
 }
 
 #[derive(Subcommand)]
@@ -160,8 +163,20 @@ fn project_path(cmd: &Command) -> Option<PathBuf> {
     }
 }
 
+/// Read-only query commands that must see a fresh graph (auto-heal before serving).
+fn needs_fresh(cmd: &Command) -> bool {
+    use Command::*;
+    matches!(
+        cmd,
+        Search { .. } | Callers { .. } | Callees { .. } | Impact { .. } | Trace { .. }
+            | Important { .. } | Communities { .. } | Routes { .. } | Query { .. }
+            | Implementers { .. } | Ask { .. } | Semantic { .. }
+    )
+}
+
 fn main() -> anyhow::Result<()> {
-    let cmd = Cli::parse().command;
+    let cli = Cli::parse();
+    let cmd = cli.command;
     // Opportunistic TTL housekeeping: stamp this project as used + reclaim graphs
     // of projects untouched within CODEGRAPH_TTL_DAYS. Best-effort, never blocks.
     let root = project_path(&cmd);
@@ -171,6 +186,16 @@ fn main() -> anyhow::Result<()> {
             .zip(db.as_deref())
             .map(|(r, d)| (r, d, matches!(cmd, Command::Index { .. }))),
     );
+
+    // Freshness gate: reindex before serving so a query never returns a result
+    // that disagrees with the working tree (edits / add / delete / git checkout).
+    if !cli.no_autoheal && needs_fresh(&cmd) {
+        if let Some(r) = &root {
+            if let Err(e) = index::ensure_fresh(r) {
+                eprintln!("warning: auto-reindex failed ({e}); serving last snapshot");
+            }
+        }
+    }
 
     match cmd {
         Command::Status => {
@@ -490,8 +515,9 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Mcp { path } => {
             let db = index::db_path(&path);
+            let refresh = if cli.no_autoheal { None } else { Some(index::ensure_fresh as fn(&std::path::Path) -> anyhow::Result<()>) };
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(codegraph_mcp::serve_stdio(db))?;
+            rt.block_on(codegraph_mcp::serve_stdio(path, db, refresh))?;
         }
     }
     Ok(())

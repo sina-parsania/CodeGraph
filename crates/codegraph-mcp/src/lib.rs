@@ -2,7 +2,7 @@
 //! `search`, `get_node`, `callers`, `stats`. The whole CLI is the standalone
 //! package; `codegraph mcp` runs this server as one subcommand.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -20,6 +20,12 @@ pub fn mcp_ready() -> bool {
 #[derive(Clone)]
 pub struct CodeGraphServer {
     db_path: PathBuf,
+    root: PathBuf,
+    /// Injected freshness gate (CLI passes `index::ensure_fresh`) so live MCP
+    /// queries never serve a graph that disagrees with the working tree.
+    refresh: Option<fn(&Path) -> anyhow::Result<()>>,
+    /// Debounce so a burst of tool calls in one agent turn re-checks at most once/sec.
+    last_fresh: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     tool_router: ToolRouter<CodeGraphServer>,
 }
 
@@ -62,10 +68,40 @@ pub struct LimitArgs {
 #[tool_router]
 impl CodeGraphServer {
     pub fn new(db_path: PathBuf) -> Self {
-        Self { db_path, tool_router: Self::tool_router() }
+        Self::with_refresh(db_path.clone(), db_path, None)
+    }
+
+    pub fn with_refresh(
+        root: PathBuf,
+        db_path: PathBuf,
+        refresh: Option<fn(&Path) -> anyhow::Result<()>>,
+    ) -> Self {
+        Self {
+            db_path,
+            root,
+            refresh,
+            last_fresh: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Reindex-before-serve, debounced to once per second. Best-effort — a failed
+    /// refresh logs and serves the last snapshot rather than failing the query.
+    fn maybe_refresh(&self) {
+        let Some(f) = self.refresh else { return };
+        if let Ok(mut last) = self.last_fresh.lock() {
+            let due = last.map(|t| t.elapsed().as_millis() > 1000).unwrap_or(true);
+            if due {
+                if let Err(e) = f(&self.root) {
+                    eprintln!("codegraph: auto-reindex failed ({e}); serving last snapshot");
+                }
+                *last = Some(std::time::Instant::now());
+            }
+        }
     }
 
     fn open(&self) -> Result<codegraph_store::Store, McpError> {
+        self.maybe_refresh();
         codegraph_store::Store::open(&self.db_path)
             .map_err(|e| McpError::internal_error(e.to_string(), None))
     }
@@ -106,6 +142,7 @@ impl CodeGraphServer {
 
     #[tool(description = "Semantic (vector) search over embedded symbols by meaning. Requires a local embedding model and a prior `codegraph semantic-index`.")]
     async fn semantic_search(&self, args: Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
+        self.maybe_refresh();
         let db = self.db_path.clone();
         let q = args.0.query.clone();
         let limit = args.0.limit.unwrap_or(15);
@@ -196,9 +233,14 @@ impl ServerHandler for CodeGraphServer {
     }
 }
 
-/// Run the MCP server over stdio until the client disconnects.
-pub async fn serve_stdio(db_path: PathBuf) -> anyhow::Result<()> {
-    let service = CodeGraphServer::new(db_path).serve(stdio()).await?;
+/// Run the MCP server over stdio until the client disconnects. `refresh` is the
+/// freshness gate (the CLI passes `index::ensure_fresh`); pass `None` to disable.
+pub async fn serve_stdio(
+    root: PathBuf,
+    db_path: PathBuf,
+    refresh: Option<fn(&Path) -> anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    let service = CodeGraphServer::with_refresh(root, db_path, refresh).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }

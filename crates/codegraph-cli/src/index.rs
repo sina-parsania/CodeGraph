@@ -78,6 +78,96 @@ pub fn db_path(root: &Path) -> PathBuf {
     cache_root().join(&id[..16]).join("graph.db")
 }
 
+/// The ignore-aware walker shared by the indexer AND the staleness probe — they
+/// MUST use the same file set or they disagree and reintroduce false positives.
+fn build_walker(root: &Path) -> ignore::Walk {
+    WalkBuilder::new(root)
+        .git_ignore(true)
+        .git_global(true)
+        .add_custom_ignore_filename(".codegraphignore")
+        .filter_entry(|e| {
+            !e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                || !EXCLUDE_DIRS.contains(&e.file_name().to_str().unwrap_or(""))
+        })
+        .build()
+}
+
+/// Some(is_doc) if a walked entry is indexable, None to skip. Shared predicate.
+fn classify(entry: &ignore::DirEntry) -> Option<bool> {
+    if entry.file_type().map(|t| t.is_dir()).unwrap_or(true) {
+        return None;
+    }
+    let path = entry.path();
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    let is_code = EXTS.contains(&ext);
+    let is_doc = DOC_EXTS.contains(&ext);
+    if !is_code && !is_doc {
+        return None;
+    }
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    if SKIP_NAMES.iter().any(|s| s.eq_ignore_ascii_case(name)) {
+        return None;
+    }
+    if entry.metadata().map(|m| m.len() > MAX_FILE_BYTES).unwrap_or(false) {
+        return None;
+    }
+    Some(is_doc)
+}
+
+fn rel_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
+}
+
+/// File mtime as nanoseconds since epoch (0 if unavailable). The cheap staleness signal.
+fn file_mtime(entry: &ignore::DirEntry) -> i64 {
+    entry
+        .metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0)
+}
+
+/// Read-only staleness probe: does the graph match the working tree right now?
+/// Walks with the indexer's exact filters and compares mtimes against the
+/// manifest (add/delete via set membership). ANY difference => stale. Cheap
+/// (stat-only, no file reads). This is what makes "auto-heal before query" viable.
+pub fn is_stale(root: &Path) -> bool {
+    let db = db_path(root);
+    if !db.exists() {
+        return true;
+    }
+    let Ok(store) = Store::open(&db) else { return true };
+    let Ok(rows) = store.manifest_map() else { return true };
+    let mut prev: std::collections::HashMap<String, i64> =
+        rows.into_iter().map(|m| (m.file_path, m.mtime)).collect();
+    for entry in build_walker(root).filter_map(|e| e.ok()) {
+        if classify(&entry).is_none() {
+            continue;
+        }
+        let rel = rel_path(root, entry.path());
+        match prev.remove(&rel) {
+            None => return true,                                   // added file
+            Some(prev_mtime) if prev_mtime != file_mtime(&entry) => return true, // changed/touched
+            Some(_) => {}
+        }
+    }
+    !prev.is_empty() // anything left in the manifest was deleted on disk
+}
+
+/// Make the graph match the working tree before serving a query: build it if
+/// missing, incrementally reindex if anything changed. The clean path is the
+/// stat-only probe above. This is the guarantee that queries never serve stale
+/// results (no false positives after edits / add / delete / git checkout).
+pub fn ensure_fresh(root: &Path) -> Result<()> {
+    if is_stale(root) {
+        let db = db_path(root);
+        index_dir(root, &db, false, None)?;
+    }
+    Ok(())
+}
+
 pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>) -> Result<IndexStats> {
     if let Some(parent) = db.parent() {
         std::fs::create_dir_all(parent)?;
@@ -98,56 +188,40 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>) -> Res
     let mut seen: HashSet<String> = HashSet::new();
     let mut files = 0usize;
 
-    let walker = WalkBuilder::new(root)
-        .git_ignore(true)
-        .git_global(true)
-        .add_custom_ignore_filename(".codegraphignore")
-        .filter_entry(|e| {
-            !e.file_type().map(|t| t.is_dir()).unwrap_or(false)
-                || !EXCLUDE_DIRS.contains(&e.file_name().to_str().unwrap_or(""))
-        })
-        .build();
-
-    // Phase 1: walk + read; decide which files actually need (re)parsing.
-    let mut to_parse: Vec<(String, String, String, bool)> = Vec::new();
-    for entry in walker.filter_map(|e| e.ok()) {
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(true) {
-            continue;
-        }
+    // Phase 1: stat-first. Skip unchanged files by mtime (no read); for files
+    // whose mtime moved, hash and reparse only if the content actually changed
+    // (mtime can move with identical content, e.g. git checkout — refresh the
+    // stored mtime so it isn't re-flagged, but don't rebuild).
+    let mut to_parse: Vec<(String, String, String, i64, bool)> = Vec::new();
+    for entry in build_walker(root).filter_map(|e| e.ok()) {
+        let Some(is_doc) = classify(&entry) else { continue };
         let path = entry.path();
-        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        let is_code = EXTS.contains(&ext);
-        let is_doc = DOC_EXTS.contains(&ext);
-        if !is_code && !is_doc {
-            continue;
-        }
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if SKIP_NAMES.iter().any(|s| s.eq_ignore_ascii_case(name)) {
-            continue;
-        }
-        if entry.metadata().map(|m| m.len() > MAX_FILE_BYTES).unwrap_or(false) {
-            continue;
-        }
-        let Ok(source) = std::fs::read_to_string(path) else { continue };
-        let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/");
+        let rel = rel_path(root, path);
+        let mtime = file_mtime(&entry);
         files += 1;
         seen.insert(rel.clone());
-        let sha = sha256(&source);
-        if !full {
-            if let Some(m) = store.manifest_for(&rel)? {
-                if m.sha256 == sha {
-                    continue; // unchanged
-                }
+        let manifest = if full { None } else { store.manifest_for(&rel)? };
+        if let Some(m) = &manifest {
+            if m.mtime == mtime && mtime != 0 {
+                continue; // unchanged — stat fast-path, no read
             }
         }
-        to_parse.push((rel, source, sha, is_doc));
+        let Ok(source) = std::fs::read_to_string(path) else { continue };
+        let sha = sha256(&source);
+        if let Some(m) = &manifest {
+            if m.sha256 == sha {
+                store.save_manifest(&rel, &sha, mtime)?; // touched but identical: refresh mtime only
+                continue;
+            }
+        }
+        to_parse.push((rel, source, sha, mtime, is_doc));
     }
 
     // Phase 2: process changed files in parallel — code → tree-sitter parse,
     // docs → Document chunks (CPU-bound, no shared state).
-    let parsed: Vec<(String, String, ParsedFile)> = to_parse
+    let parsed: Vec<(String, String, i64, ParsedFile)> = to_parse
         .par_iter()
-        .map(|(rel, source, sha, is_doc)| {
+        .map(|(rel, source, sha, mtime, is_doc)| {
             let pf = if *is_doc {
                 let ctype = rel.rsplit('.').next().unwrap_or("text");
                 ParsedFile {
@@ -158,18 +232,18 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>) -> Res
             } else {
                 parse_file(&project, rel, source)
             };
-            (rel.clone(), sha.clone(), pf)
+            (rel.clone(), sha.clone(), *mtime, pf)
         })
         .collect();
     let changed = parsed.len();
 
     // Phase 3: persist sequentially (SQLite writes are serial).
     let mut changed_nodes: Vec<Node> = Vec::new();
-    for (rel, sha, pf) in parsed {
+    for (rel, sha, mtime, pf) in parsed {
         store.delete_file_data(&rel)?;
         store.save_calls(&rel, &pf.calls)?;
         store.save_inherits(&rel, &pf.inherits)?;
-        store.save_manifest(&rel, &sha, 0)?;
+        store.save_manifest(&rel, &sha, mtime)?;
         changed_nodes.extend(pf.nodes);
     }
     store.bulk_upsert_nodes(&changed_nodes)?;
@@ -317,4 +391,38 @@ fn project_name(root: &Path) -> String {
         .ok()
         .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
         .unwrap_or_else(|| "project".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_fresh_detects_every_change_class() {
+        let tmp = std::env::temp_dir().join(format!("cg_fresh_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // isolate the cache so the test never touches the real ~/.cache
+        std::env::set_var("CODEGRAPH_CACHE_DIR", tmp.join("cache"));
+        std::fs::write(tmp.join("a.py"), "def foo():\n    return 1\n").unwrap();
+
+        assert!(is_stale(&tmp), "never-indexed project is stale");
+        ensure_fresh(&tmp).unwrap();
+        assert!(!is_stale(&tmp), "clean right after index");
+
+        std::fs::write(tmp.join("a.py"), "def bar():\n    return 2\n").unwrap();
+        assert!(is_stale(&tmp), "edit detected");
+        ensure_fresh(&tmp).unwrap();
+        assert!(!is_stale(&tmp), "clean after heal");
+
+        std::fs::write(tmp.join("b.py"), "def baz():\n    pass\n").unwrap();
+        assert!(is_stale(&tmp), "added file detected");
+        ensure_fresh(&tmp).unwrap();
+
+        std::fs::remove_file(tmp.join("b.py")).unwrap();
+        assert!(is_stale(&tmp), "deleted file detected");
+
+        std::env::remove_var("CODEGRAPH_CACHE_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
