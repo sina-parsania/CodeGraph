@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use codegraph_graph::{build, LoadedGraph};
-use codegraph_parse::parse_file;
-use codegraph_core::{Edge, EdgeRelation, Node};
+use codegraph_parse::{parse_file, ParsedFile};
+use codegraph_core::{Edge, EdgeRelation, Metadata, Node, NodeLabel};
 use codegraph_store::Store;
 use sha2::{Digest, Sha256};
 use ignore::WalkBuilder;
@@ -16,6 +16,21 @@ use rayon::prelude::*;
 const EXTS: &[&str] = &[
     "rs", "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "mts", "cts", "tsx", "go", "swift", "java",
     "c", "h", "cpp", "cc", "cxx", "hpp", "hh", "hxx", "rb", "cs", "sh", "bash", "kt", "kts",
+];
+
+/// Documentation/prose files auto-ingested as searchable Document nodes during
+/// `index` (READMEs, docs, changelogs). Data/log files (json, jsonl, log, csv, …)
+/// are NOT auto-indexed — ingest them explicitly with `codegraph ingest` to avoid noise.
+const DOC_EXTS: &[&str] = &[
+    "md", "markdown", "mdx", "rst", "adoc", "asciidoc", "txt",
+    // localization keys are commonly searched ("which file has this UI string?")
+    "strings", "stringsdict", "po", "xliff", "xlf", "arb",
+];
+
+/// Lockfiles / generated manifests we never ingest even if they match an extension.
+const SKIP_NAMES: &[&str] = &[
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "composer.lock", "poetry.lock",
+    "Cargo.lock", "Gemfile.lock", "go.sum", "podfile.lock",
 ];
 
 /// Directories never indexed (dependencies, build output, caches, VCS).
@@ -64,14 +79,20 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>) -> Res
         .build();
 
     // Phase 1: walk + read; decide which files actually need (re)parsing.
-    let mut to_parse: Vec<(String, String, String)> = Vec::new();
+    let mut to_parse: Vec<(String, String, String, bool)> = Vec::new();
     for entry in walker.filter_map(|e| e.ok()) {
         if entry.file_type().map(|t| t.is_dir()).unwrap_or(true) {
             continue;
         }
         let path = entry.path();
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        if !EXTS.contains(&ext) {
+        let is_code = EXTS.contains(&ext);
+        let is_doc = DOC_EXTS.contains(&ext);
+        if !is_code && !is_doc {
+            continue;
+        }
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if SKIP_NAMES.iter().any(|s| s.eq_ignore_ascii_case(name)) {
             continue;
         }
         if entry.metadata().map(|m| m.len() > MAX_FILE_BYTES).unwrap_or(false) {
@@ -89,13 +110,26 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>) -> Res
                 }
             }
         }
-        to_parse.push((rel, source, sha));
+        to_parse.push((rel, source, sha, is_doc));
     }
 
-    // Phase 2: parse changed files in parallel (CPU-bound, no shared state).
-    let parsed: Vec<(String, String, codegraph_parse::ParsedFile)> = to_parse
+    // Phase 2: process changed files in parallel — code → tree-sitter parse,
+    // docs → Document chunks (CPU-bound, no shared state).
+    let parsed: Vec<(String, String, ParsedFile)> = to_parse
         .par_iter()
-        .map(|(rel, source, sha)| (rel.clone(), sha.clone(), parse_file(&project, rel, source)))
+        .map(|(rel, source, sha, is_doc)| {
+            let pf = if *is_doc {
+                let ctype = rel.rsplit('.').next().unwrap_or("text");
+                ParsedFile {
+                    nodes: document_nodes(rel, ctype, source),
+                    calls: Vec::new(),
+                    inherits: Vec::new(),
+                }
+            } else {
+                parse_file(&project, rel, source)
+            };
+            (rel.clone(), sha.clone(), pf)
+        })
         .collect();
     let changed = parsed.len();
 
@@ -197,6 +231,49 @@ fn merge_scip_edges(root: &Path, explicit: Option<&Path>, nodes: &[Node], edges:
     let n = scip.len();
     edges.extend(scip);
     n
+}
+
+/// Build one searchable Document node from an ingested chunk. Shared by `index`
+/// (doc auto-ingest) and the explicit `ingest` command so the shape stays identical.
+pub fn document_node_from_chunk(ch: &codegraph_ingest::DocChunk, i: usize) -> Node {
+    let safe: String = ch
+        .source
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let title: String = ch
+        .text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(&ch.source)
+        .chars()
+        .take(60)
+        .collect();
+    let mut meta = Metadata::new();
+    meta.insert("text".to_string(), serde_json::Value::String(ch.text.clone()));
+    meta.insert("content_type".to_string(), serde_json::Value::String(ch.content_type.clone()));
+    Node {
+        id: format!("doc.{safe}.{i}"),
+        label: NodeLabel::Document,
+        name: if title.trim().is_empty() { format!("{} #{i}", ch.source) } else { title },
+        file_path: ch.source.clone(),
+        line_start: 1,
+        line_end: 1,
+        language: ch.content_type.clone(),
+        metadata: meta,
+        community: None,
+        pagerank: 0.0,
+        betweenness: 0.0,
+    }
+}
+
+/// Chunk a text document and build its Document nodes (used by the index walk).
+pub fn document_nodes(source: &str, content_type: &str, text: &str) -> Vec<Node> {
+    codegraph_ingest::chunk_text(text, content_type, source)
+        .iter()
+        .enumerate()
+        .map(|(i, ch)| document_node_from_chunk(ch, i))
+        .collect()
 }
 
 fn sha256(s: &str) -> String {

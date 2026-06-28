@@ -17,11 +17,12 @@ pub fn ingest(arg: &str) -> Result<Vec<DocChunk>, String> {
         return ingest_web(arg);
     }
     let p = Path::new(arg);
-    match p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase()).as_deref() {
+    let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
+    match ext.as_deref() {
         Some("pdf") => ingest_pdf(p),
-        Some("txt") | Some("md") | Some("markdown") | Some("rst") => {
+        Some(e) if is_text_ext(e) => {
             let text = std::fs::read_to_string(p).map_err(|e| e.to_string())?;
-            Ok(chunk(&text, "text", arg))
+            Ok(chunk(&text, e, arg))
         }
         Some("png") | Some("jpg") | Some("jpeg") | Some("webp") | Some("bmp") | Some("tiff")
         | Some("tif") | Some("gif") => ingest_image_arm(p),
@@ -29,8 +30,30 @@ pub fn ingest(arg: &str) -> Result<Vec<DocChunk>, String> {
             "audio/video ingest ({}) requires a build with `--features media` (ffmpeg/whisper) - roadmap",
             arg
         )),
-        _ => Err(format!("unsupported ingest input: {} (pdf, txt/md, or http(s) url)", arg)),
+        _ => Err(format!(
+            "unsupported ingest input: {} (pdf, text/data files: md, txt, json, jsonl, log, yaml, toml, csv, xml, html, …, or an http(s) url)",
+            arg
+        )),
     }
+}
+
+/// Plain-text and structured-text formats we ingest as Document chunks.
+pub fn is_text_ext(ext: &str) -> bool {
+    matches!(
+        ext,
+        "txt" | "text" | "md" | "markdown" | "mdx" | "rst" | "adoc" | "asciidoc" | "org"
+            | "json" | "jsonl" | "ndjson" | "log" | "yaml" | "yml" | "toml" | "csv" | "tsv"
+            | "xml" | "html" | "htm" | "ini" | "conf" | "cfg" | "properties" | "env" | "sql"
+            | "tex" | "srt" | "vtt"
+            // localization / i18n
+            | "strings" | "stringsdict" | "po" | "pot" | "xliff" | "xlf" | "resx" | "resw"
+            | "arb" | "ftl"
+    )
+}
+
+/// Public entry to chunk arbitrary text into Document chunks (used by the indexer).
+pub fn chunk_text(text: &str, content_type: &str, source: &str) -> Vec<DocChunk> {
+    chunk(text, content_type, source)
 }
 
 #[cfg(feature = "media")]
@@ -90,4 +113,27 @@ fn chunk(text: &str, ctype: &str, source: &str) -> Vec<DocChunk> {
         out.push(DocChunk { content_type: ctype.into(), source: source.into(), text: buf.trim().to_string() });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_ext_coverage() {
+        for e in ["md", "txt", "json", "jsonl", "log", "yaml", "csv", "xml", "strings", "po", "xliff"] {
+            assert!(is_text_ext(e), "{e} should be ingestable text");
+        }
+        for e in ["png", "jpg", "pdf", "mp4", "rs"] {
+            assert!(!is_text_ext(e), "{e} should not be plain text");
+        }
+    }
+
+    #[test]
+    fn chunk_text_preserves_content_and_type() {
+        let chunks = chunk_text("alpha line\n\nbeta line", "json", "a.json");
+        assert!(!chunks.is_empty());
+        assert_eq!(chunks[0].content_type, "json");
+        assert!(chunks.iter().any(|c| c.text.contains("alpha")));
+    }
 }
