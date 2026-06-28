@@ -2,6 +2,7 @@
 //! a real standalone package.
 
 mod index;
+mod init;
 mod query;
 mod registry;
 
@@ -22,6 +23,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// First-run setup: index, wire the MCP into Claude Code, add an agent nudge,
+    /// and write a commented .codegraph.toml. AI is opt-in; core needs no model.
+    Init {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+        /// Accept every default, no prompts (CI-friendly).
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Skip indexing.
+        #[arg(long)]
+        no_index: bool,
+        /// Skip MCP wiring + agent nudge.
+        #[arg(long)]
+        no_mcp: bool,
+        /// Overwrite an existing .codegraph.toml.
+        #[arg(long)]
+        force: bool,
+        /// Print the MCP snippet instead of writing ~/.claude.json.
+        #[arg(long)]
+        print: bool,
+        /// Remove the agent nudge (CLAUDE.md block + SessionStart hook).
+        #[arg(long)]
+        uninstall: bool,
+    },
     /// Print version, config defaults, and a readiness check.
     Status,
     /// Index a repository into a local graph (.codegraph/graph.db).
@@ -159,6 +184,7 @@ fn project_path(cmd: &Command) -> Option<PathBuf> {
         | SemanticIndex { path, .. } | Semantic { path, .. } | Ingest { path, .. } | Mcp { path, .. } => {
             Some(path.clone())
         }
+        Init { repo, .. } => Some(repo.clone()),
         Install { .. } | Status | Doctor | Gc { .. } | Projects => None,
     }
 }
@@ -468,11 +494,27 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Doctor => {
             println!("codegraph {}", codegraph_core::VERSION);
-            println!("languages:  rust, python, javascript, typescript, go");
-            match codegraph_llm::OpenAiCompatBackend::detect() {
-                Some(llm) => println!("local LLM:  available  ({} / {})", llm.provider(), llm.model()),
-                None => println!("local LLM:  not detected  (search + graph work fully offline; LM Studio/Ollama enables `ask`)"),
+            println!("languages:  13 (rust, python, js, ts, go, swift, kotlin, java, c, c++, ruby, c#, bash)");
+            println!("core graph + search:  ✓ always available offline (no model needed)");
+            let backend = codegraph_llm::OpenAiCompatBackend::detect();
+            match &backend {
+                Some(llm) => {
+                    println!("chat model (ask/rerank/HyDE):  ✓ {} / {}", llm.provider(), llm.model());
+                    match llm.embed_model() {
+                        Some(m) => println!("embedding model (semantic):    ✓ {m}  — run `codegraph semantic-index`"),
+                        None => {
+                            println!("embedding model (semantic):    ✗ none — `ollama pull nomic-embed-text` (or `lms get`), then `codegraph semantic-index`");
+                        }
+                    }
+                }
+                None => {
+                    println!("chat model (ask/rerank/HyDE):  ✗ no local provider (start LM Studio/Ollama, or set an API key)");
+                    println!("embedding model (semantic):    ✗ none");
+                }
             }
+            #[cfg(feature = "local-embed")]
+            println!("local embeddings:  ✓ compiled in (--features local-embed)");
+            println!("\nsetup:  codegraph init   |   config: .codegraph.toml (env CODEGRAPH_* overrides)");
         }
         Command::Ingest { input, path } => {
             let chunks = codegraph_ingest::ingest(&input).map_err(anyhow::Error::msg)?;
@@ -483,35 +525,13 @@ fn main() -> anyhow::Result<()> {
             store.rebuild_fts()?;
             println!("ingested {} chunk(s) from {} as Document nodes (searchable by title; semantic over content)", chunks.len(), input);
         }
+        Command::Init { repo, yes, no_index, no_mcp, force, print, uninstall } => {
+            init::run_init(&repo, yes, no_index, no_mcp, force, print, uninstall)?;
+        }
         Command::Install { print, repo } => {
-            let repo = repo.canonicalize().unwrap_or(repo);
-            let entry = serde_json::json!({"command": "codegraph", "args": ["mcp", "--path", repo.to_string_lossy()]});
-            let snippet = serde_json::to_string_pretty(&serde_json::json!({"mcpServers": {"codegraph": entry.clone()}}))?;
-            if print {
-                println!("Add to your agent's MCP config:\n{}", snippet);
-                return Ok(());
-            }
-            let home = std::env::var("HOME").unwrap_or_default();
-            let path = std::path::Path::new(&home).join(".claude.json");
-            let mut root: serde_json::Value = if path.exists() {
-                serde_json::from_str(&std::fs::read_to_string(&path)?).unwrap_or_else(|_| serde_json::json!({}))
-            } else {
-                serde_json::json!({})
-            };
-            if !root.is_object() {
-                root = serde_json::json!({});
-            }
-            let obj = root.as_object_mut().unwrap();
-            let servers = obj.entry("mcpServers").or_insert_with(|| serde_json::json!({}));
-            if let Some(sm) = servers.as_object_mut() {
-                sm.insert("codegraph".to_string(), entry);
-            }
-            if path.exists() {
-                let _ = std::fs::copy(&path, path.with_extension("json.bak"));
-            }
-            std::fs::write(&path, serde_json::to_string_pretty(&root)?)?;
-            println!("configured Claude Code MCP at {} (backup .bak written)", path.display());
-            println!("for other agents, add:\n{}", snippet);
+            // Back-compat thin alias: just the MCP wiring (init does the full setup).
+            init::wire_mcp(&repo, print)?;
+            println!("(tip: `codegraph init` also indexes + adds an agent nudge.)");
         }
         Command::Mcp { path } => {
             let db = index::db_path(&path);

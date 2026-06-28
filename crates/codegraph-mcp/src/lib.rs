@@ -106,7 +106,7 @@ impl CodeGraphServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))
     }
 
-    #[tool(description = "Full-text search the code graph for a symbol by name. Returns matching nodes with file:line.")]
+    #[tool(description = "Find where a symbol (function/class/type) is defined or referenced, by name. PREFER over Grep/ripgrep for code navigation: indexed, returns exact file:line + the node kind, no matches inside comments/strings. Use before reading files.")]
     async fn search(&self, args: Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let hits = store
@@ -115,7 +115,7 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(hits)?]))
     }
 
-    #[tool(description = "Get a single node by its fully-qualified id.")]
+    #[tool(description = "Get full details of one symbol by its fully-qualified id (from a prior search/callers result): kind, file:line, language, metadata.")]
     async fn get_node(&self, args: Parameters<IdArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let node = store
@@ -124,7 +124,7 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(node)?]))
     }
 
-    #[tool(description = "Find functions that call a given function name (reverse CALLS edges).")]
+    #[tool(description = "List the functions that CALL a given function (reverse call edges). PREFER over grepping the name: resolved and exact, no false hits in comments/strings.")]
     async fn callers(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let callers = store
@@ -140,7 +140,7 @@ impl CodeGraphServer {
         Ok((codegraph_graph::LoadedGraph::load(&nodes, &edges), nodes))
     }
 
-    #[tool(description = "Semantic (vector) search over embedded symbols by meaning. Requires a local embedding model and a prior `codegraph semantic-index`.")]
+    #[tool(description = "Find symbols by MEANING rather than exact name (vector search). Use when you do not know the symbol name. Needs a local embedding model + a prior `codegraph semantic-index`; degrades gracefully if unavailable.")]
     async fn semantic_search(&self, args: Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
         self.maybe_refresh();
         let db = self.db_path.clone();
@@ -152,7 +152,7 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(results)?]))
     }
 
-    #[tool(description = "Shortest dependency path between two symbols (by name).")]
+    #[tool(description = "Shortest dependency/call path between two symbols by name: how A reaches B through the call graph.")]
     async fn trace_path(&self, args: Parameters<TwoNamesArgs>) -> Result<CallToolResult, McpError> {
         let (lg, nodes) = self.load_graph()?;
         let find = |name: &str| nodes.iter().find(|n| n.name == name).map(|n| n.id.clone());
@@ -163,7 +163,7 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(path)?]))
     }
 
-    #[tool(description = "Impact / blast-radius: which symbols depend on the given symbol (reverse reachability).")]
+    #[tool(description = "Impact / blast-radius: every symbol that (transitively) depends on the given one. Use BEFORE changing or renaming a symbol to see what could break.")]
     async fn blast_radius(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let (lg, nodes) = self.load_graph()?;
         let affected = match nodes.iter().find(|n| n.name == args.0.name) {
@@ -173,7 +173,7 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(affected)?]))
     }
 
-    #[tool(description = "Direct callees (outgoing CALLS) of a symbol.")]
+    #[tool(description = "List the functions a given function CALLS (outgoing call edges). PREFER over reading the body to enumerate its calls.")]
     async fn callees(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let (lg, nodes) = self.load_graph()?;
         let out = match nodes.iter().find(|n| n.name == args.0.name) {
@@ -183,14 +183,14 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(out)?]))
     }
 
-    #[tool(description = "Most central symbols by PageRank (importance ranking).")]
+    #[tool(description = "The most central/important symbols by PageRank: a fast way to map the core of an unfamiliar codebase.")]
     async fn important(&self, args: Parameters<LimitArgs>) -> Result<CallToolResult, McpError> {
         let (lg, _) = self.load_graph()?;
         let top = lg.pagerank_top(args.0.limit.unwrap_or(15));
         Ok(CallToolResult::success(vec![Content::json(top)?]))
     }
 
-    #[tool(description = "Graph statistics (total node count).")]
+    #[tool(description = "Graph size (node/edge counts): a quick check that the repository is indexed and how big it is.")]
     async fn stats(&self) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let n = store
@@ -226,7 +226,7 @@ impl ServerHandler for CodeGraphServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
         info.instructions = Some(
-            "CodeGraph: a project-agnostic code knowledge graph. Use `search` to find symbols,              `get_node` for details, `callers` for reverse call edges, `stats` for counts."
+            "CodeGraph indexes this repository into a live code knowledge graph (auto-reindexed before each query). Its tools return exact file:line and resolved call edges, so they beat text search for code navigation: `search` to locate a symbol, `callers`/`callees` to trace call edges, `blast_radius` before a refactor, `trace_path` between two symbols, `important` to map an unfamiliar repo, `semantic_search` to find code by meaning, `get_node` for one symbol's details, `stats` for counts."
                 .to_string(),
         );
         info

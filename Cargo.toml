@@ -4,7 +4,7 @@ members = ["crates/*"]
 exclude = ["_probe"]
 
 [workspace.package]
-version = "1.7.0"
+version = "1.8.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
@@ -14,7 +14,6 @@ codegraph-store   = { path = "crates/codegraph-store" }
 codegraph-parse   = { path = "crates/codegraph-parse" }
 codegraph-graph   = { path = "crates/codegraph-graph" }
 codegraph-resolve = { path = "crates/codegraph-resolve" }
-codegraph-query   = { path = "crates/codegraph-query" }
 codegraph-mcp     = { path = "crates/codegraph-mcp" }
 codegraph-embed   = { path = "crates/codegraph-embed" }
 codegraph-ingest  = { path = "crates/codegraph-ingest" }

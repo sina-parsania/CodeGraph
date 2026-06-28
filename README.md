@@ -37,6 +37,7 @@ Prebuilt binaries (macOS arm64/x64, Linux x64/arm64, Windows x64) are built by C
 ## Usage
 
 ```bash
+codegraph init                       # one-time setup: index + wire the Claude Code MCP + agent nudge + .codegraph.toml
 codegraph index .                    # incremental index → central cache  (--full to force)
 codegraph projects                   # list indexed projects + their cache sizes
 codegraph index . --scip index.scip  # + merge compiler-grade SCIP edges (Tier-A; auto-detected if present)
@@ -85,6 +86,23 @@ Beyond `.gitignore`, drop a **`.codegraphignore`** (same gitignore syntax) in a 
   }
 }
 ```
+
+## Configuration
+
+`codegraph init` writes a commented **`.codegraph.toml`** (walked up from the cwd); any
+**`CODEGRAPH_*`** env var overrides it. Everything here is optional — core works with no model.
+
+| Setting          | `.codegraph.toml`            | Env                                      | Default              |
+| ---------------- | ---------------------------- | ---------------------------------------- | -------------------- |
+| graph cache dir  | `cache_dir`                  | `CODEGRAPH_CACHE_DIR` / `XDG_CACHE_HOME` | `~/.cache/codegraph` |
+| auto-reclaim TTL | —                            | `CODEGRAPH_TTL_DAYS` (`0`=off)           | 30 days              |
+| LLM provider     | `llm.provider`               | `CODEGRAPH_LLM_PROVIDER`                 | `auto`               |
+| LLM url / model  | `llm.base_url` / `llm.model` | `CODEGRAPH_LLM_URL` / `_MODEL`           | Qwen2.5-Coder-1.5B   |
+| embedding model  | `embed_model`                | `CODEGRAPH_EMBED_MODEL`                  | —                    |
+| rerank / HyDE    | `llm.rerank` / `llm.hyde`    | `CODEGRAPH_RERANK` / `_HYDE`             | off                  |
+| media ingest     | `ingest.media`               | `CODEGRAPH_MEDIA`                        | off                  |
+
+`codegraph doctor` shows what's available (core / chat model / embedding model) and how to enable each.
 
 ## Optional LLM (local-first, no key)
 
