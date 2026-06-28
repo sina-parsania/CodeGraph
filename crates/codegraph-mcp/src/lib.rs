@@ -124,13 +124,19 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(node)?]))
     }
 
-    #[tool(description = "List the functions that CALL a given function (reverse call edges). PREFER over grepping the name: resolved and exact, no false hits in comments/strings.")]
+    #[tool(description = "List the functions that CALL a given function (reverse call edges). PREFER over grepping the name: resolved and exact, no false hits in comments/strings. The result includes a `coverage` object — if `coverage.may_be_incomplete` is true, some calls to this name were dropped (ambiguous/external); fall back to text search to be sure.")]
     async fn callers(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let callers = store
             .callers_of(&args.0.name)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::json(callers)?]))
+        let coverage = store
+            .coverage_for_callers(&args.0.name)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "callers": callers,
+            "coverage": coverage,
+        }))?]))
     }
 
     fn load_graph(&self) -> Result<(codegraph_graph::LoadedGraph, Vec<codegraph_core::Node>), McpError> {
@@ -163,24 +169,42 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(path)?]))
     }
 
-    #[tool(description = "Impact / blast-radius: every symbol that (transitively) depends on the given one. Use BEFORE changing or renaming a symbol to see what could break.")]
+    #[tool(description = "Impact / blast-radius: every symbol that (transitively) depends on the given one. Use BEFORE changing or renaming a symbol to see what could break. Includes a `coverage` object — if `may_be_incomplete` is true the radius may miss callers whose calls were dropped; corroborate with text search.")]
     async fn blast_radius(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let (lg, nodes) = self.load_graph()?;
-        let affected = match nodes.iter().find(|n| n.name == args.0.name) {
-            Some(n) => lg.blast_radius(&n.id, 5),
-            None => Vec::new(),
+        let store = self.open()?;
+        let (affected, coverage) = match nodes.iter().find(|n| n.name == args.0.name) {
+            Some(n) => (
+                lg.blast_radius(&n.id, 5),
+                store
+                    .coverage_for_callers(&n.name)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+            ),
+            None => (Vec::new(), codegraph_core::Coverage::callers(&args.0.name, 0, 0)),
         };
-        Ok(CallToolResult::success(vec![Content::json(affected)?]))
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "affected": affected,
+            "coverage": coverage,
+        }))?]))
     }
 
-    #[tool(description = "List the functions a given function CALLS (outgoing call edges). PREFER over reading the body to enumerate its calls.")]
+    #[tool(description = "List the functions a given function CALLS (outgoing call edges). PREFER over reading the body to enumerate its calls. Includes a `coverage` object — `dropped` counts external/unresolved calls absent from the list.")]
     async fn callees(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let (lg, nodes) = self.load_graph()?;
-        let out = match nodes.iter().find(|n| n.name == args.0.name) {
-            Some(n) => lg.callees(&n.id),
-            None => Vec::new(),
+        let store = self.open()?;
+        let (out, coverage) = match nodes.iter().find(|n| n.name == args.0.name) {
+            Some(n) => (
+                lg.callees(&n.id),
+                store
+                    .coverage_for_callees(&n.id)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+            ),
+            None => (Vec::new(), codegraph_core::Coverage::callees(0, 0)),
         };
-        Ok(CallToolResult::success(vec![Content::json(out)?]))
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "callees": out,
+            "coverage": coverage,
+        }))?]))
     }
 
     #[tool(description = "The most central/important symbols by PageRank: a fast way to map the core of an unfamiliar codebase.")]
@@ -226,7 +250,8 @@ impl ServerHandler for CodeGraphServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
         info.instructions = Some(
-            "CodeGraph indexes this repository into a live code knowledge graph (auto-reindexed before each query). Its tools return exact file:line and resolved call edges, so they beat text search for code navigation: `search` to locate a symbol, `callers`/`callees` to trace call edges, `blast_radius` before a refactor, `trace_path` between two symbols, `important` to map an unfamiliar repo, `semantic_search` to find code by meaning, `get_node` for one symbol's details, `stats` for counts."
+            "CodeGraph indexes this repository into a live code knowledge graph (auto-reindexed before each query). Its tools return exact file:line and resolved call edges, so they beat text search for code navigation: `search` to locate a symbol, `callers`/`callees` to trace call edges, `blast_radius` before a refactor, `trace_path` between two symbols, `important` to map an unfamiliar repo, `semantic_search` to find code by meaning, `get_node` for one symbol's details, `stats` for counts. \
+             IMPORTANT — coverage: `callers`/`callees`/`blast_radius` resolve calls precisely but NOT exhaustively (ambiguous or external calls are dropped, never guessed). Each result carries a `coverage` object with `resolved`/`dropped`/`may_be_incomplete`. When `may_be_incomplete` is true, treat the list as a precise LOWER BOUND, not the complete set — fall back to text search (grep the name) before concluding 'nothing else calls this'."
                 .to_string(),
         );
         info

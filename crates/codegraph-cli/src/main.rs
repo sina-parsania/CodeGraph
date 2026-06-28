@@ -216,6 +216,13 @@ enum ConfigAction {
 /// use (cache_root, detect, ...), so editing config actually takes effect. The
 /// user's env is already folded into the resolved Config (env wins), so this is
 /// idempotent and preserves precedence.
+/// Print a one-line coverage signal under a call-graph result so the agent (or
+/// human) knows when the precise list may be incomplete and should grep instead.
+fn print_coverage(c: &codegraph_core::Coverage) {
+    let mark = if c.may_be_incomplete { "⚠" } else { "✓" };
+    println!("{mark} {}", c.note);
+}
+
 fn apply_config_env(cfg: &codegraph_core::Config) {
     if let Some(c) = &cfg.cache_dir {
         std::env::set_var("CODEGRAPH_CACHE_DIR", c);
@@ -345,6 +352,7 @@ fn main() -> anyhow::Result<()> {
             for n in callers {
                 println!("{:<24} {:?}  {}:{}", n.name, n.label, n.file_path, n.line_start);
             }
+            print_coverage(&store.coverage_for_callers(&name)?);
         }
         Command::Trace { from, to, path } => {
             let l = query::Loaded::open(&index::db_path(&path))?;
@@ -371,6 +379,10 @@ fn main() -> anyhow::Result<()> {
                     for id in affected {
                         println!("{}", l.fmt(&id));
                     }
+                    // Impact is built from inbound Calls edges, so it inherits the
+                    // incompleteness of the direct callers (transitively more so).
+                    let store = codegraph_store::Store::open(&index::db_path(&path))?;
+                    print_coverage(&store.coverage_for_callers(&n.name)?);
                 }
                 None => println!("symbol {:?} not found", name),
             }
@@ -382,6 +394,8 @@ fn main() -> anyhow::Result<()> {
                     for id in l.lg.callees(&n.id) {
                         println!("{}", l.fmt(&id));
                     }
+                    let store = codegraph_store::Store::open(&index::db_path(&path))?;
+                    print_coverage(&store.coverage_for_callees(&n.id)?);
                 }
                 None => println!("symbol {:?} not found", name),
             }

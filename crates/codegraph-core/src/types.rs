@@ -168,6 +168,57 @@ pub struct RawCall {
     pub enclosing_class: Option<String>,
 }
 
+/// A coverage signal attached to call-graph results (callers/callees/impact).
+/// Derived from REAL counters: raw call sites in the `calls` table vs resolved
+/// `Calls` edges. Tells an agent when a precise-but-sparse result may be missing
+/// entries, so it falls back to text search instead of trusting it as complete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Coverage {
+    /// Call sites that resolved into the graph.
+    pub resolved: usize,
+    /// Total raw textual call sites considered for this query.
+    pub total_call_sites: usize,
+    /// Call sites that did NOT resolve (ambiguous / external / unresolved).
+    pub dropped: usize,
+    /// True when `dropped > 0` — the precise result may be incomplete.
+    pub may_be_incomplete: bool,
+    /// One-line, agent-facing explanation + fallback instruction.
+    pub note: String,
+}
+
+impl Coverage {
+    pub fn callers(name: &str, resolved: usize, total: usize) -> Self {
+        let dropped = total.saturating_sub(resolved);
+        let note = if total == 0 {
+            "No call sites reference this name in the indexed sources.".to_string()
+        } else if dropped > 0 {
+            format!(
+                "Coverage: {resolved}/{total} call sites naming '{name}' resolved into the graph; \
+                 {dropped} were dropped (ambiguous, external, or unresolved). This callers list may be \
+                 INCOMPLETE — fall back to text search for '{name}(' to be sure."
+            )
+        } else {
+            format!("Coverage: all {total} call sites naming '{name}' resolved — this callers list is complete.")
+        };
+        Coverage { resolved, total_call_sites: total, dropped, may_be_incomplete: dropped > 0, note }
+    }
+
+    pub fn callees(resolved: usize, total: usize) -> Self {
+        let dropped = total.saturating_sub(resolved);
+        let note = if total == 0 {
+            "This symbol makes no calls in the indexed sources.".to_string()
+        } else if dropped > 0 {
+            format!(
+                "Coverage: {resolved}/{total} outbound call sites resolved to internal definitions; \
+                 {dropped} are external (library) or unresolved and are NOT in this list — read the body or grep for those."
+            )
+        } else {
+            format!("Coverage: all {total} outbound call sites resolved — this callees list is complete.")
+        };
+        Coverage { resolved, total_call_sites: total, dropped, may_be_incomplete: dropped > 0, note }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +241,14 @@ mod tests {
         let j = serde_json::to_string(&n).unwrap();
         let back: Node = serde_json::from_str(&j).unwrap();
         assert_eq!(n, back);
+    }
+
+    #[test]
+    fn coverage_incomplete_flag() {
+        let c = Coverage::callers("foo", 3, 10);
+        assert_eq!(c.dropped, 7);
+        assert!(c.may_be_incomplete && c.note.contains("INCOMPLETE"));
+        assert!(!Coverage::callers("foo", 5, 5).may_be_incomplete);
+        assert!(!Coverage::callees(0, 0).may_be_incomplete);
     }
 }

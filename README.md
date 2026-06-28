@@ -6,23 +6,25 @@
 
 ---
 
-## ⚡ Why it matters: 332× fewer tokens per code question
+## ⚡ Why it matters: ~20–100× fewer tokens per code question
 
-When an AI agent answers _"who calls this function?"_ without CodeGraph, it greps, gets ambiguous hits, then **reads whole files into its context** to disambiguate — burning thousands of tokens and many tool round-trips. With CodeGraph it gets one compact, resolved `file:line` answer.
+When an AI agent answers _"who calls this function?"_ without CodeGraph, it greps the name and **reads context around every hit** to disambiguate real call sites from comments/strings/defs — burning tokens and tool round-trips. With CodeGraph it gets one compact, resolved `file:line` answer.
+
+The baseline here is a **competent agent**: grep, then a **bounded read** sized to the task (read the one definition region for "where defined"; read ±5 lines around each hit for "who calls"). It is **not** reading whole files — that naive number is ~5× larger and we don't headline it.
 
 Measured on **CodeGraph's own repo** (reproduce: `python3 scripts/benchmark.py`):
 
-| Real navigation question        | grep + read files         | **CodeGraph**         |
-| ------------------------------- | ------------------------- | --------------------- |
-| Where is `index_dir` defined?   | 5,166 tok · 3 calls       | **18 tok · 1 call**   |
-| Who calls `ensure_fresh`?       | 14,081 tok · 5 calls      | **22 tok · 1 call**   |
-| What does `run_init` call?      | 3,957 tok · 3 calls       | **71 tok · 1 call**   |
-| Where is `OpenAiCompatBackend`? | 15,900 tok · 8 calls      | **16 tok · 1 call**   |
-| Who calls `db_path`?            | 19,547 tok · 7 calls      | **36 tok · 1 call**   |
-| Where is `Store` defined?       | 8,154 tok · 3 calls       | **39 tok · 1 call**   |
-| **Total**                       | **66,967 tok · 29 calls** | **202 tok · 6 calls** |
+| Real navigation question        | task | grep + bounded reads | **CodeGraph** |
+| ------------------------------- | ---- | -------------------- | ------------- |
+| Where is `index_dir` defined?   | def  | 1,654 tok            | **18 tok**    |
+| Who calls `ensure_fresh`?       | refs | 3,116 tok            | **45 tok**    |
+| What does `run_init` call?      | body | 847 tok              | **114 tok**   |
+| Where is `OpenAiCompatBackend`? | refs | 5,550 tok            | **16 tok**    |
+| Who calls `db_path`?            | refs | 10,318 tok           | **58 tok**    |
+| Where is `Store` defined?       | def  | 3,337 tok            | **39 tok**    |
+| **Total**                       |      | **24,822 tok**       | **290 tok**   |
 
-→ **332× fewer context tokens, ~5× fewer tool round-trips** — so the agent is **faster and cheaper** on every code-navigation step. And that's only the questions grep _can_ answer; **impact/blast-radius, shortest-path trace, importance (PageRank), and communities** grep can't answer at all without reading half the tree.
+→ **86× fewer context tokens** on this repo. Across external repos with the same honest methodology: **21× (Python · requests), 29× (Go · cobra), 100× (TypeScript · zod)** — so a realistic range of **~20–100×**, lowest for simple definition lookups, highest for call-graph / who-calls questions on large repos. And that's only the questions grep _can_ answer; **impact/blast-radius, shortest-path trace, importance (PageRank), and communities** grep can't answer at all without reading half the tree.
 
 ---
 

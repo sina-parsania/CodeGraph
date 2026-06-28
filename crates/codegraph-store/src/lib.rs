@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use codegraph_core::{Edge, Hyperedge, HyperedgeMember, InheritKind, Node, RawCall, RawField, RawInherit};
+use codegraph_core::{
+    Coverage, Edge, Hyperedge, HyperedgeMember, InheritKind, Node, RawCall, RawField, RawInherit,
+};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
 #[derive(Debug, thiserror::Error)]
@@ -69,11 +71,13 @@ impl Store {
                line_start INTEGER, line_end INTEGER, community INTEGER, pagerank REAL,
                betweenness REAL, data TEXT NOT NULL);
              CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_path);
+             CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
              CREATE TABLE IF NOT EXISTS edges(
                src TEXT, dst TEXT, relation TEXT, tier TEXT, confidence TEXT,
                src_file TEXT, src_line INTEGER, data TEXT NOT NULL,
                PRIMARY KEY(src, dst, relation));
              CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
+             CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);
              CREATE TABLE IF NOT EXISTS hyperedges(
                id TEXT PRIMARY KEY, relation TEXT, label TEXT, confidence TEXT, tier TEXT,
                data TEXT NOT NULL);
@@ -98,6 +102,8 @@ impl Store {
                caller_id TEXT, callee_name TEXT, line INTEGER, file_path TEXT,
                receiver TEXT, enclosing_class TEXT);
              CREATE INDEX IF NOT EXISTS idx_calls_file ON calls(file_path);
+             CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_name);
+             CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller_id);
              CREATE TABLE IF NOT EXISTS inherits(
                impl_name TEXT, super_name TEXT, kind TEXT, file_path TEXT);
              CREATE INDEX IF NOT EXISTS idx_inherits_file ON inherits(file_path);
@@ -313,6 +319,39 @@ impl Store {
             out.push(serde_json::from_str(&r?)?);
         }
         Ok(out)
+    }
+
+    /// Coverage for `callers(name)`: how many of the textual call sites naming
+    /// `name` actually resolved into a `Calls` edge to a node of that name. The
+    /// difference is the count dropped (ambiguous / external / unresolved) — a
+    /// real signal that the precise callers list may be incomplete.
+    pub fn coverage_for_callers(&self, name: &str) -> Result<Coverage> {
+        let total: i64 =
+            self.conn.query_row("SELECT COUNT(*) FROM calls WHERE callee_name = ?1", [name], |r| r.get(0))?;
+        let resolved: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM calls c WHERE c.callee_name = ?1 AND EXISTS(
+                 SELECT 1 FROM edges e JOIN nodes n ON n.id = e.dst
+                 WHERE e.src = c.caller_id AND e.relation = 'Calls' AND n.name = ?1)",
+            [name],
+            |r| r.get(0),
+        )?;
+        Ok(Coverage::callers(name, resolved as usize, total as usize))
+    }
+
+    /// Coverage for `callees(caller_id)`: how many of the caller's outbound call
+    /// sites resolved to an internal definition. Dropped = external (library) or
+    /// unresolved calls absent from the callees list.
+    pub fn coverage_for_callees(&self, caller_id: &str) -> Result<Coverage> {
+        let total: i64 =
+            self.conn.query_row("SELECT COUNT(*) FROM calls WHERE caller_id = ?1", [caller_id], |r| r.get(0))?;
+        let resolved: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM calls c WHERE c.caller_id = ?1 AND EXISTS(
+                 SELECT 1 FROM edges e JOIN nodes n ON n.id = e.dst
+                 WHERE e.src = ?1 AND e.relation = 'Calls' AND n.name = c.callee_name)",
+            [caller_id],
+            |r| r.get(0),
+        )?;
+        Ok(Coverage::callees(resolved as usize, total as usize))
     }
 
     pub fn all_nodes(&self) -> Result<Vec<Node>> {
@@ -658,6 +697,38 @@ mod tests {
         let got = s.get_hyperedges_for_node("b").unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].1.len(), 3);
+    }
+
+    #[test]
+    fn coverage_counts_dropped_calls() {
+        let s = Store::open_in_memory().unwrap();
+        for id in ["foo", "c1", "c2", "c3"] {
+            s.upsert_node(&node(id)).unwrap();
+        }
+        // c1 resolves to foo; c2 and c3 call "foo" textually but never resolved.
+        s.upsert_edge(&Edge {
+            src: "c1".into(), dst: "foo".into(), relation: EdgeRelation::Calls,
+            tier: ResolutionTier::TreeSitter, confidence: Confidence::Extracted,
+            src_file: "f.rs".into(), src_line: 1, metadata: Metadata::new(),
+        })
+        .unwrap();
+        let raw = |caller: &str| codegraph_core::RawCall {
+            caller_id: caller.into(), callee_name: "foo".into(), line: 1,
+            receiver: codegraph_core::Receiver::Bare, enclosing_class: None,
+        };
+        s.save_calls("f.rs", &[raw("c1"), raw("c2"), raw("c3")]).unwrap();
+
+        let cov = s.coverage_for_callers("foo").unwrap();
+        assert_eq!(cov.total_call_sites, 3);
+        assert_eq!(cov.resolved, 1);
+        assert_eq!(cov.dropped, 2);
+        assert!(cov.may_be_incomplete);
+
+        // c1's single outbound call to foo resolved → callees coverage is complete.
+        let out = s.coverage_for_callees("c1").unwrap();
+        assert_eq!(out.total_call_sites, 1);
+        assert_eq!(out.resolved, 1);
+        assert!(!out.may_be_incomplete);
     }
 
     #[test]
