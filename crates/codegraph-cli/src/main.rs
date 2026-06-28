@@ -81,6 +81,9 @@ enum Command {
         path: PathBuf,
         #[arg(long, default_value_t = 15)]
         limit: usize,
+        /// HyDE: have the LLM write a hypothetical answer, then embed THAT for search.
+        #[arg(long)]
+        hyde: bool,
     },
     /// Health check: languages, schema, and local-LLM availability.
     Doctor,
@@ -278,13 +281,19 @@ fn main() -> anyhow::Result<()> {
                 None => println!("no embedding model loaded - load one (LM Studio: `lms load <embed-model>`; Ollama: `ollama pull nomic-embed-text`)"),
             }
         }
-        Command::Semantic { query: q, path, limit } => {
+        Command::Semantic { query: q, path, limit, hyde } => {
             let store = codegraph_store::Store::open(&index::db_path(&path))?;
             let Some(b) = codegraph_llm::OpenAiCompatBackend::detect().filter(|b| b.embed_model().is_some()) else {
                 println!("no embedding model available (load one in LM Studio / Ollama)");
                 return Ok(());
             };
-            let Some(qv) = b.embed(&q) else {
+            let query_text = if hyde {
+                b.generate(&format!("Write a short code documentation snippet that would answer this query (no preamble): {}", q), 200)
+                    .unwrap_or_else(|| q.clone())
+            } else {
+                q.clone()
+            };
+            let Some(qv) = b.embed(&query_text) else {
                 println!("embedding request failed - is an embedding model LOADED? (LM Studio: lms load <embed-model>; only downloaded != loaded)");
                 return Ok(());
             };

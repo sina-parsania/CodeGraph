@@ -8,6 +8,7 @@ license.workspace = true
 codegraph-core.workspace = true
 codegraph-store.workspace = true
 codegraph-graph.workspace = true
+codegraph-llm.workspace = true
 rmcp = { workspace = true, features = ["server", "macros", "transport-io"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std"] }
 serde.workspace = true

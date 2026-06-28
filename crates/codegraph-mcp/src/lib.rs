@@ -104,6 +104,17 @@ impl CodeGraphServer {
         Ok((codegraph_graph::LoadedGraph::load(&nodes, &edges), nodes))
     }
 
+    #[tool(description = "Semantic (vector) search over embedded symbols by meaning. Requires a local embedding model and a prior `codegraph semantic-index`.")]
+    async fn semantic_search(&self, args: Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
+        let db = self.db_path.clone();
+        let q = args.0.query.clone();
+        let limit = args.0.limit.unwrap_or(15);
+        let results = tokio::task::spawn_blocking(move || semantic_blocking(&db, &q, limit))
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::json(results)?]))
+    }
+
     #[tool(description = "Shortest dependency path between two symbols (by name).")]
     async fn trace_path(&self, args: Parameters<TwoNamesArgs>) -> Result<CallToolResult, McpError> {
         let (lg, nodes) = self.load_graph()?;
@@ -150,6 +161,27 @@ impl CodeGraphServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::json(serde_json::json!({ "nodes": n }))?]))
     }
+}
+
+fn semantic_blocking(db: &std::path::Path, q: &str, limit: usize) -> Vec<serde_json::Value> {
+    let Ok(store) = codegraph_store::Store::open(db) else { return Vec::new() };
+    let Some(backend) = codegraph_llm::OpenAiCompatBackend::detect().filter(|b| b.embed_model().is_some()) else {
+        return Vec::new();
+    };
+    let Some(qv) = backend.embed(q) else { return Vec::new() };
+    let Ok(vectors) = store.all_vectors() else { return Vec::new() };
+    let mut scored: Vec<(f32, String)> =
+        vectors.iter().map(|(id, v)| (codegraph_core::cosine(&qv, v), id.clone())).collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(limit);
+    scored
+        .into_iter()
+        .filter_map(|(score, id)| {
+            store.get_node(&id).ok().flatten().map(|n| {
+                serde_json::json!({"name": n.name, "label": format!("{:?}", n.label), "file": n.file_path, "line": n.line_start, "score": score})
+            })
+        })
+        .collect()
 }
 
 #[tool_handler(router = self.tool_router)]
