@@ -59,7 +59,9 @@ enum Command {
         #[arg(long, default_value = ".")]
         path: PathBuf,
     },
-    /// Reclaim disk: delete `.codegraph/` graphs of projects idle past the TTL
+    /// List indexed projects + their cache sizes (graphs live in the central cache).
+    Projects,
+    /// Reclaim disk: delete graphs of projects idle past the TTL
     /// (CODEGRAPH_TTL_DAYS, default 30). Runs opportunistically on every command;
     /// this forces it now.
     Gc {
@@ -154,7 +156,7 @@ fn project_path(cmd: &Command) -> Option<PathBuf> {
         | SemanticIndex { path, .. } | Semantic { path, .. } | Ingest { path, .. } | Mcp { path, .. } => {
             Some(path.clone())
         }
-        Install { .. } | Status | Doctor | Gc { .. } => None,
+        Install { .. } | Status | Doctor | Gc { .. } | Projects => None,
     }
 }
 
@@ -282,6 +284,23 @@ fn main() -> anyhow::Result<()> {
             }
             for n in routes {
                 println!("{:<28} {}:{}", n.name, n.file_path, n.line_start);
+            }
+        }
+        Command::Projects => {
+            let projects = registry::list_projects();
+            if projects.is_empty() {
+                println!("no indexed projects yet — run `codegraph index <dir>`");
+            }
+            for p in projects {
+                let age = if p.idle_secs < 3600 {
+                    format!("{}m", p.idle_secs / 60)
+                } else if p.idle_secs < 86_400 {
+                    format!("{}h", p.idle_secs / 3600)
+                } else {
+                    format!("{}d", p.idle_secs / 86_400)
+                };
+                let size = if p.exists { registry::human_bytes(p.bytes) } else { "(missing)".to_string() };
+                println!("{:>10}  idle {:>4}  {}", size, age, p.root);
             }
         }
         Command::Gc { ttl_days, all, dry_run } => {

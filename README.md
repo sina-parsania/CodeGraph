@@ -16,7 +16,7 @@ A single static binary that turns **any codebase** into a queryable code-knowled
 - **Any-input** — `index` auto-ingests prose docs + localization (md/rst/txt/`.strings`/po/xliff/…) as searchable **Document** nodes in the same pass as code. `ingest` additionally pulls PDFs, web pages, and any text/data file (json/jsonl/yaml/toml/csv/xml/html/log/sql/…), plus (with `--features media`) **images via OCR**. One graph holds code + docs + config + localization.
 - **MCP server** — `search, semantic_search, get_node, callers, callees, trace_path, blast_radius, important, stats` over stdio.
 - **Arbitrary analytics** — `query` runs read-only SQL over the graph (a universal alternative to a graph query language).
-- **Team-safe** — the build is **deterministic** (same commit → byte-identical graph, community ids included) and the index is **per-checkout** (auto-gitignored, never shared), so a 20-dev project never serves stale or false-positive results. WAL snapshot reads + atomic single-transaction indexing. Storage rationale: [docs/STORAGE.md](docs/STORAGE.md).
+- **Team-safe** — the build is **deterministic** (same commit → byte-identical graph, community ids included) and graphs live in a **per-user central cache** (`~/.cache/codegraph/`), never inside the repo, so a 20-dev project never commits or shares a graph and never serves stale/false-positive results. WAL snapshot reads + atomic single-transaction indexing. Storage rationale: [docs/STORAGE.md](docs/STORAGE.md).
 
 See **[docs/BENCHMARK.md](docs/BENCHMARK.md)** for a measured head-to-head vs qmd, graphify, codebase-memory, and codebase-index — feature parity matrix + perf + honest gaps.
 
@@ -36,7 +36,8 @@ Prebuilt binaries (macOS arm64/x64, Linux x64/arm64, Windows x64) are built by C
 ## Usage
 
 ```bash
-codegraph index .                    # incremental index → .codegraph/graph.db  (--full to force)
+codegraph index .                    # incremental index → central cache  (--full to force)
+codegraph projects                   # list indexed projects + their cache sizes
 codegraph index . --scip index.scip  # + merge compiler-grade SCIP edges (Tier-A; auto-detected if present)
 codegraph search UserService --rerank
 codegraph semantic "retry with backoff" --hyde
@@ -57,11 +58,13 @@ codegraph doctor      /   codegraph install   /   codegraph mcp
 
 ### Auto-reclaim (TTL)
 
-The graph is a rebuildable cache. CodeGraph keeps a tiny registry of indexed projects
-(`~/.config/codegraph/registry.json`) and, opportunistically on each run (at most hourly),
-deletes the `.codegraph/` graph of any project **not used within the TTL** — so abandoned
-indexes don't pile up. "Used" = indexed **or** queried, so an active project is never reclaimed.
-Default **30 days**; set `CODEGRAPH_TTL_DAYS` (`0` disables). Force it with `codegraph gc`.
+The graph is a rebuildable cache, stored in a **per-user central cache** (`~/.cache/codegraph/`,
+or `$XDG_CACHE_HOME`/`$CODEGRAPH_CACHE_DIR`) keyed by project path — **source repos stay pristine**.
+CodeGraph keeps a tiny registry of indexed projects (`~/.config/codegraph/registry.json`) and,
+opportunistically on each run (at most hourly), deletes the cached graph of any project **not used
+within the TTL** — so abandoned indexes don't pile up. "Used" = indexed **or** queried, so an active
+project is never reclaimed. Default **30 days**; set `CODEGRAPH_TTL_DAYS` (`0` disables). Force it
+with `codegraph gc`; inspect with `codegraph projects`.
 
 ### Custom ignore file
 

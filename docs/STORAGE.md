@@ -4,7 +4,7 @@ A deep-research pass (four independent analyses + synthesis, grounded in the sou
 asked: should the graph be a **DB, JSON, or another format**? One store or many?
 The verdict is unanimous and decisive.
 
-## Verdict: keep SQLite, one `.codegraph/graph.db` per project
+## Verdict: keep SQLite, one graph DB per project (in a central cache)
 
 SQLite (rusqlite, bundled, FTS5, WAL) is the correct engine — **no alternative survives
 this tool's constraints**: single static binary, no daemon, FTS5 + arbitrary read-only
@@ -51,10 +51,10 @@ independent mechanisms guarantee this:
    node + **community-id** + edge hashes. Parsing order is stable (rayon `collect` preserves
    input order), and Louvain / PageRank / betweenness iterate in node-index order with no
    RNG. → 20 devs indexing the same commit get the same graph.
-2. **Per-checkout, never shared** — `index` auto-writes `.codegraph/.gitignore` (`*`), so the
-   graph is never committed. A teammate on another branch can't query a graph that doesn't
-   match their tree. Each dev (or CI job) indexes their own checkout; the sha-256 incremental
-   keeps that ~0.15s.
+2. **Central cache, never in the repo** — graphs live under `~/.cache/codegraph/<hash>/graph.db`
+   (per-user), so they're never committed or shared. A teammate on another branch can't query a
+   graph that doesn't match their tree. Each dev (or CI job) indexes their own checkout; the
+   sha-256 incremental keeps that ~0.15s. `codegraph projects` lists them; `codegraph gc` reclaims.
 3. **Snapshot-isolated reads** — WAL means a query during a reindex sees a consistent old
    snapshot until the writer commits, then the new one. Never a torn/partial state, because
    the entire index (parse → edges → analytics → FTS) runs in **one transaction**.
@@ -68,7 +68,8 @@ independent mechanisms guarantee this:
 - **Pragmas**: `busy_timeout=5000`, `temp_store=MEMORY`, `cache_size=-65536` (64 MiB).
 - **Bug fix**: `delete_file_data` now prunes the `vectors` table for a file's nodes — previously
   renamed/removed symbols left orphaned embeddings that polluted semantic search and grew the DB.
-- **Auto-gitignore** of `.codegraph/` (team-safety, above).
+- **Central cache** (`~/.cache/codegraph/`, keyed by project path) so repos stay pristine and a
+  graph is never committed/shared (team-safety, above); legacy in-repo `.codegraph/` is auto-migrated.
 
 ## Roadmap (research-backed, deferred with concrete triggers)
 

@@ -54,20 +54,43 @@ pub struct IndexStats {
     pub scip_edges: usize,
 }
 
-pub fn db_path(root: &Path) -> std::path::PathBuf {
-    root.join(".codegraph").join("graph.db")
+/// Root of the central graph cache: `$CODEGRAPH_CACHE_DIR`, else
+/// `$XDG_CACHE_HOME/codegraph`, else `~/.cache/codegraph`. Graphs live here keyed
+/// by project path, so source repos stay pristine (no in-repo artifact to commit).
+pub fn cache_root() -> PathBuf {
+    if let Some(d) = std::env::var_os("CODEGRAPH_CACHE_DIR") {
+        return PathBuf::from(d);
+    }
+    if let Some(x) = std::env::var_os("XDG_CACHE_HOME") {
+        return PathBuf::from(x).join("codegraph");
+    }
+    if let Some(h) = std::env::var_os("HOME") {
+        return PathBuf::from(h).join(".cache").join("codegraph");
+    }
+    PathBuf::from(".codegraph-cache")
+}
+
+/// Absolute path of a project's graph DB inside the central cache, keyed by a
+/// hash of the project's absolute path.
+pub fn db_path(root: &Path) -> PathBuf {
+    let abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let id = sha256(abs.to_string_lossy().as_ref());
+    cache_root().join(&id[..16]).join("graph.db")
 }
 
 pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>) -> Result<IndexStats> {
     if let Some(parent) = db.parent() {
         std::fs::create_dir_all(parent)?;
-        // The graph is a per-checkout artifact: never commit/share it, or a
-        // teammate on another branch queries a graph that doesn't match their
-        // tree (false positives). Self-ignore the whole .codegraph/ dir.
-        let gitignore = parent.join(".gitignore");
-        if !gitignore.exists() {
-            let _ = std::fs::write(&gitignore, "# CodeGraph index — per-checkout, do not commit\n*\n");
-        }
+        // Self-describe the cache entry (which project it belongs to) for
+        // discoverability + `codegraph projects`.
+        let abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let _ = std::fs::write(parent.join("source"), abs.to_string_lossy().as_bytes());
+    }
+    // Migration: graphs now live in the central cache. Remove any legacy in-repo
+    // `.codegraph/` we created so source trees go back to pristine.
+    let legacy = root.join(".codegraph");
+    if legacy.join("graph.db").exists() {
+        let _ = std::fs::remove_dir_all(&legacy);
     }
     let store = Store::open(db)?;
     store.begin()?;

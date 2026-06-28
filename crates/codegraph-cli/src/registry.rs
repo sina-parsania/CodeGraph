@@ -78,6 +78,35 @@ pub fn ttl_secs() -> u64 {
         .saturating_mul(SECS_PER_DAY)
 }
 
+fn is_owned_graph_dir(d: &Path) -> bool {
+    d.starts_with(crate::index::cache_root()) || d.file_name().is_some_and(|n| n == ".codegraph")
+}
+
+/// A registered project for `codegraph projects`: (root, db dir size, idle secs, exists).
+pub struct ProjectInfo {
+    pub root: String,
+    pub bytes: u64,
+    pub idle_secs: u64,
+    pub exists: bool,
+}
+
+pub fn list_projects() -> Vec<ProjectInfo> {
+    let reg = load();
+    let t = now();
+    let mut out: Vec<ProjectInfo> = reg
+        .projects
+        .into_iter()
+        .map(|(root, e)| {
+            let db = PathBuf::from(&e.db);
+            let exists = db.exists();
+            let bytes = db.parent().filter(|_| exists).map(dir_size).unwrap_or(0);
+            ProjectInfo { root, bytes, idle_secs: t.saturating_sub(e.last_touch), exists }
+        })
+        .collect();
+    out.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    out
+}
+
 fn dir_size(dir: &Path) -> u64 {
     let mut total = 0;
     if let Ok(rd) = std::fs::read_dir(dir) {
@@ -107,8 +136,9 @@ fn sweep(reg: &mut Registry, ttl_secs: u64, force_all: bool, dry_run: bool) -> G
         }
         let idle = t.saturating_sub(e.last_touch);
         let expired = force_all || (ttl_secs > 0 && idle > ttl_secs);
-        // Only ever delete a directory literally named ".codegraph".
-        let safe_dir = cg_dir.filter(|d| d.file_name().is_some_and(|n| n == ".codegraph"));
+        // Only ever delete a graph dir we own: one under the central cache, or a
+        // legacy in-repo dir literally named ".codegraph".
+        let safe_dir = cg_dir.filter(|d| is_owned_graph_dir(d));
         if let (true, Some(dir)) = (expired, safe_dir) {
             let bytes = dir_size(&dir);
             if !dry_run {
