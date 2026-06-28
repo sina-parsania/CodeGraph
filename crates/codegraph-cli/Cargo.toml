@@ -1,0 +1,21 @@
+[package]
+name = "codegraph-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "codegraph"
+path = "src/main.rs"
+
+[dependencies]
+codegraph-core.workspace = true
+codegraph-store.workspace = true
+codegraph-graph.workspace = true
+codegraph-parse.workspace = true
+codegraph-mcp.workspace = true
+codegraph-llm.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+walkdir.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }

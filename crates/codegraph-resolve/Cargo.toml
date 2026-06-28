@@ -1,0 +1,8 @@
+[package]
+name = "codegraph-resolve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+codegraph-core.workspace = true

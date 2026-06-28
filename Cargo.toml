@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+exclude = ["_probe"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+codegraph-core    = { path = "crates/codegraph-core" }
+codegraph-store   = { path = "crates/codegraph-store" }
+codegraph-parse   = { path = "crates/codegraph-parse" }
+codegraph-graph   = { path = "crates/codegraph-graph" }
+codegraph-resolve = { path = "crates/codegraph-resolve" }
+codegraph-query   = { path = "crates/codegraph-query" }
+codegraph-mcp     = { path = "crates/codegraph-mcp" }
+codegraph-embed   = { path = "crates/codegraph-embed" }
+codegraph-ingest  = { path = "crates/codegraph-ingest" }
+codegraph-llm     = { path = "crates/codegraph-llm" }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror  = "2"
+anyhow     = "1"
+clap       = { version = "4", features = ["derive"] }
+tokio      = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util"] }
+rusqlite   = { version = "0.37", features = ["bundled"] }
+petgraph   = "0.8"
+rayon      = "1"
+rmcp       = "1.8"
+toml       = "0.8"
+zstd       = "0.13"
+tempfile   = "3"
+walkdir    = "2"
+reqwest    = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+[profile.release]
+lto = "thin"
+strip = true
