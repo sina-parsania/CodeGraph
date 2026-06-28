@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+serde_json.workspace = true
 codegraph-core.workspace = true
 tree-sitter = "0.26.9"
 tree-sitter-bash = "0.25.1"

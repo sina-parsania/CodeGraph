@@ -377,6 +377,7 @@ name = "codegraph-parse"
 version = "1.1.0"
 dependencies = [
  "codegraph-core",
+ "serde_json",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-c",

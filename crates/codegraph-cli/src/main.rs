@@ -46,6 +46,11 @@ enum Command {
     },
     /// Direct callees (outgoing CALLS) of a symbol.
     Callees { name: String, #[arg(long, default_value = ".")] path: PathBuf },
+    /// List detected HTTP routes (NestJS/Express/Flask/Spring patterns).
+    Routes {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
     /// List the largest code communities (clusters) detected in the graph.
     Communities {
         #[arg(long, default_value = ".")]
@@ -205,6 +210,17 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 None => println!("symbol {:?} not found", name),
+            }
+        }
+        Command::Routes { path } => {
+            let store = codegraph_store::Store::open(&index::db_path(&path))?;
+            let mut routes = store.nodes_by_label("Route")?;
+            routes.sort_by(|a, b| a.name.cmp(&b.name));
+            if routes.is_empty() {
+                println!("no routes detected");
+            }
+            for n in routes {
+                println!("{:<28} {}:{}", n.name, n.file_path, n.line_start);
             }
         }
         Command::Communities { path, limit } => {

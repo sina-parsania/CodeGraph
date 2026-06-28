@@ -309,6 +309,33 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, nodes:
 
     if ctx.spec.call_kinds.contains(&node.kind()) {
         if let Some(callee) = callee_name(node, src, ctx.spec.callee_fields) {
+            if is_http_method(&callee) {
+                if let Some(path) = first_string_arg(node, src) {
+                    if path.starts_with('/') && path.len() <= 200 {
+                        let method = callee.to_ascii_uppercase();
+                        let line = node.start_position().row as u32 + 1;
+                        let mut md = Metadata::new();
+                        md.insert("path".to_string(), serde_json::Value::String(path.clone()));
+                        md.insert("method".to_string(), serde_json::Value::String(method.clone()));
+                        if let Some(h) = current_fn {
+                            md.insert("handler".to_string(), serde_json::Value::String(h.to_string()));
+                        }
+                        nodes.push(Node {
+                            id: format!("route.{}.{}", normalize_path(&path), method),
+                            label: NodeLabel::Route,
+                            name: format!("{} {}", method, path),
+                            file_path: ctx.rel_path.to_string(),
+                            line_start: line,
+                            line_end: line,
+                            language: ctx.spec.name.to_string(),
+                            metadata: md,
+                            community: None,
+                            pagerank: 0.0,
+                            betweenness: 0.0,
+                        });
+                    }
+                }
+            }
             calls.push(RawCall {
                 caller_id: current_fn.unwrap_or(ctx.file_id).to_string(),
                 callee_name: callee,
@@ -351,6 +378,31 @@ fn name_of(node: TsNode, src: &[u8], mode: NameMode) -> Option<String> {
 
 fn field_text(node: TsNode, field: &str, src: &[u8]) -> Option<String> {
     std::str::from_utf8(&src[node.child_by_field_name(field)?.byte_range()]).ok().map(|s| s.to_string())
+}
+
+fn is_http_method(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "get" | "post" | "put" | "delete" | "patch" | "all" | "head" | "options" | "route"
+            | "getmapping" | "postmapping" | "putmapping" | "deletemapping" | "patchmapping"
+            | "requestmapping"
+    )
+}
+
+fn normalize_path(p: &str) -> String {
+    p.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
+}
+
+fn first_string_arg(call: TsNode, src: &[u8]) -> Option<String> {
+    let args = call.child_by_field_name("arguments")?;
+    let mut c = args.walk();
+    for a in args.named_children(&mut c) {
+        if a.kind().contains("string") {
+            let t = std::str::from_utf8(&src[a.byte_range()]).ok()?;
+            return Some(t.trim_matches(|ch| ch == '"' || ch == '\'' || ch == '`').to_string());
+        }
+    }
+    None
 }
 
 fn callee_name(call: TsNode, src: &[u8], fields: &[&str]) -> Option<String> {
@@ -467,6 +519,17 @@ mod tests {
         assert!(has(&pf, "Singleton", NodeLabel::Class));
         assert!(pf.calls.iter().any(|c| c.callee_name == "say" && c.caller_id.ends_with("greet")));
     }
+
+    #[test]
+    fn http_route_extraction() {
+        let ts = parse_ts("p", "r.ts", "class C { @Get('/users') list() {} }\napp.post('/login', handler);\n");
+        assert!(ts.nodes.iter().any(|n| n.label == NodeLabel::Route && n.name == "GET /users"));
+        assert!(ts.nodes.iter().any(|n| n.label == NodeLabel::Route && n.name == "POST /login"));
+        let py = parse_python("p", "r.py", "@app.route('/health')\ndef health():\n    pass\n");
+        assert!(py.nodes.iter().any(|n| n.label == NodeLabel::Route && n.name.contains("/health")));
+    }
+
+
 
     #[test]
     fn unknown_extension_is_empty() {

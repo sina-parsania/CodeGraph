@@ -479,6 +479,16 @@ impl Store {
         Ok(self.conn.query_row("SELECT count(*) FROM edges", [], |r| r.get(0))?)
     }
 
+    pub fn nodes_by_label(&self, label: &str) -> Result<Vec<Node>> {
+        let mut stmt = self.conn.prepare("SELECT data FROM nodes WHERE label = ?1")?;
+        let rows = stmt.query_map([label], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(serde_json::from_str(&r?)?);
+        }
+        Ok(out)
+    }
+
     pub fn node_count(&self) -> Result<i64> {
         Ok(self.conn.query_row("SELECT count(*) FROM nodes", [], |r| r.get(0))?)
     }
