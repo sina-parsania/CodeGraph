@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use codegraph_core::{Edge, Hyperedge, HyperedgeMember, Node};
+use codegraph_core::{Edge, Hyperedge, HyperedgeMember, Node, RawCall};
 use rusqlite::{params, Connection, OptionalExtension};
 
 #[derive(Debug, thiserror::Error)]
@@ -88,6 +88,9 @@ impl Store {
                path TEXT, summary TEXT, added_at INTEGER, PRIMARY KEY(path, summary));
              CREATE TABLE IF NOT EXISTS vectors(
                node_id TEXT PRIMARY KEY, vec BLOB NOT NULL);
+             CREATE TABLE IF NOT EXISTS calls(
+               caller_id TEXT, callee_name TEXT, line INTEGER, file_path TEXT);
+             CREATE INDEX IF NOT EXISTS idx_calls_file ON calls(file_path);
              CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
                id UNINDEXED, name, label, language);",
         )?;
@@ -348,6 +351,47 @@ impl Store {
         Ok(out)
     }
 
+    pub fn save_calls(&self, file_path: &str, calls: &[RawCall]) -> Result<()> {
+        self.conn.execute("DELETE FROM calls WHERE file_path = ?1", [file_path])?;
+        for c in calls {
+            self.conn.execute(
+                "INSERT INTO calls(caller_id, callee_name, line, file_path) VALUES(?1, ?2, ?3, ?4)",
+                params![c.caller_id, c.callee_name, c.line, file_path],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn all_calls(&self) -> Result<Vec<RawCall>> {
+        let mut stmt = self.conn.prepare("SELECT caller_id, callee_name, line FROM calls")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(RawCall { caller_id: r.get(0)?, callee_name: r.get(1)?, line: r.get::<_, i64>(2)? as u32 })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn delete_file_data(&self, file_path: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM nodes WHERE file_path = ?1", [file_path])?;
+        self.conn.execute("DELETE FROM calls WHERE file_path = ?1", [file_path])?;
+        Ok(())
+    }
+
+    pub fn manifest_files(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT file_path FROM manifest")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn delete_manifest(&self, file_path: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM manifest WHERE file_path = ?1", [file_path])?;
+        Ok(())
+    }
+
+    pub fn clear_edges(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM edges", [])?;
+        Ok(())
+    }
+
     pub fn node_count(&self) -> Result<i64> {
         Ok(self.conn.query_row("SELECT count(*) FROM nodes", [], |r| r.get(0))?)
     }
@@ -481,5 +525,15 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].1.len(), 3);
         assert!((all[0].1[1] - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn calls_roundtrip_and_prune() {
+        use codegraph_core::RawCall;
+        let s = Store::open_in_memory().unwrap();
+        s.save_calls("a.rs", &[RawCall { caller_id: "a.main".into(), callee_name: "helper".into(), line: 2 }]).unwrap();
+        assert_eq!(s.all_calls().unwrap().len(), 1);
+        s.delete_file_data("a.rs").unwrap();
+        assert_eq!(s.all_calls().unwrap().len(), 0);
     }
 }

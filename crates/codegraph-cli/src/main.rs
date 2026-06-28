@@ -24,6 +24,9 @@ enum Command {
     Index {
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Force a full re-index (ignore the sha256 manifest).
+        #[arg(long)]
+        full: bool,
     },
     /// Full-text search the indexed graph for a term.
     Search {
@@ -93,12 +96,14 @@ fn main() -> anyhow::Result<()> {
                 cfg.llm.model,
             );
         }
-        Command::Index { path } => {
+        Command::Index { path, full } => {
             let db = index::db_path(&path);
-            let stats = index::index_dir(&path, &db)?;
+            let stats = index::index_dir(&path, &db, full)?;
             println!(
-                "indexed {} files → {} nodes, {} edges  ({})",
+                "indexed {} files ({} changed{}) → {} nodes, {} edges  ({})",
                 stats.files,
+                stats.changed,
+                if stats.pruned > 0 { format!(", {} pruned", stats.pruned) } else { String::new() },
                 stats.nodes,
                 stats.edges,
                 db.display()
