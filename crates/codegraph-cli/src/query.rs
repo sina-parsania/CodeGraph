@@ -45,21 +45,6 @@ pub fn fts_query_from(q: &str) -> String {
         .join(" OR ")
 }
 
-/// Cosine similarity of two equal-ish-length vectors.
-pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let n = a.len().min(b.len());
-    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
-    for i in 0..n {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
-    }
-    if na == 0.0 || nb == 0.0 {
-        0.0
-    } else {
-        dot / (na.sqrt() * nb.sqrt())
-    }
-}
 
 /// Read up to ~12 source lines for a node, for richer `ask` context.
 pub fn read_snippet(root: &std::path::Path, file_path: &str, start: u32, end: u32) -> Option<String> {

@@ -98,7 +98,9 @@ codegraph doctor                      # what's available + how to enable AI feat
 | Always fresh (auto-reindex)     |       ✅       | ✅  |         ❌         |      ✅       |
 | Tokens per agent question       |      huge      | n/a |       medium       |   **tiny**    |
 
-Full measured head-to-head vs qmd / graphify / codebase-memory / codebase-index: **[docs/BENCHMARK.md](docs/BENCHMARK.md)**. Storage + freshness design: **[docs/STORAGE.md](docs/STORAGE.md)**.
+Comparison vs qmd / graphify / codebase-memory / codebase-index — **qmd + codebase-index were run live**, the other two from their documented capabilities (each row is labelled): **[docs/BENCHMARK.md](docs/BENCHMARK.md)**. Storage + freshness design: **[docs/STORAGE.md](docs/STORAGE.md)**.
+
+> The token benchmark above runs on CodeGraph's own repo by default; run it on **any** repo with `python3 scripts/benchmark.py --repo /path/to/repo` to verify on your own code.
 
 ## Architecture
 

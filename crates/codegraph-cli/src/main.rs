@@ -542,13 +542,15 @@ fn main() -> anyhow::Result<()> {
                 println!("embedding request failed - is an embedding model LOADED? (LM Studio: lms load <embed-model>; only downloaded != loaded)");
                 return Ok(());
             };
+            let qv = codegraph_core::normalize(&qv);
             let vectors = store.all_vectors()?;
             if vectors.is_empty() {
                 println!("no vectors yet - run `codegraph semantic-index` first");
                 return Ok(());
             }
+            // Stored vectors are L2-normalized, so dot == cosine (cheaper).
             let mut scored: Vec<(f32, String)> =
-                vectors.iter().map(|(id, v)| (query::cosine(&qv, v), id.clone())).collect();
+                vectors.iter().map(|(id, v)| (codegraph_core::dot(&qv, v), id.clone())).collect();
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             scored.truncate(limit);
             for (score, id) in scored {

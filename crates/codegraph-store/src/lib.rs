@@ -334,8 +334,10 @@ impl Store {
     }
 
     pub fn upsert_vector(&self, node_id: &str, v: &[f32]) -> Result<()> {
+        // Store L2-normalized so semantic scoring is a plain dot product (== cosine).
+        let v = codegraph_core::normalize(v);
         let mut bytes = Vec::with_capacity(v.len() * 4);
-        for f in v {
+        for f in &v {
             bytes.extend_from_slice(&f.to_le_bytes());
         }
         self.conn.execute(
@@ -690,14 +692,17 @@ mod tests {
     }
 
     #[test]
-    fn vector_roundtrip() {
+    fn vector_roundtrip_stores_normalized() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_node(&node("v")).unwrap();
         s.upsert_vector("v", &[0.1, 0.2, 0.3]).unwrap();
         let all = s.all_vectors().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].1.len(), 3);
-        assert!((all[0].1[1] - 0.2).abs() < 1e-6);
+        // Stored L2-normalized: unit magnitude, direction preserved (v[1]/v[0] == 2.0).
+        let mag: f32 = all[0].1.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((mag - 1.0).abs() < 1e-5, "vector stored normalized");
+        assert!((all[0].1[1] / all[0].1[0] - 2.0).abs() < 1e-5, "direction preserved");
     }
 
     #[test]

@@ -71,32 +71,36 @@ Every query opens the DB fresh and still returns in well under a tenth of a seco
 
 ✅ first-class · ➖ partial/indirect · ❌ absent
 
-| Capability                            |   CodeGraph    | codebase-memory | graphify |    qmd    |   codebase-index   |
-| ------------------------------------- | :------------: | :-------------: | :------: | :-------: | :----------------: |
-| Multi-language code parsing           |   ✅ **13**    |       ✅        |    ➖    |    ❌     |    ➖ (3, grep)    |
-| AST-precise symbol defs               |       ✅       |       ✅        |    ❌    |    ❌     |     ❌ (grep)      |
-| Compiler-grade SCIP resolution        |       ✅       |       ❌        |    ❌    |    ❌     |         ❌         |
-| Call graph (callers/callees)          |       ✅       |       ✅        |    ❌    |    ❌     |   ➖ (grep refs)   |
-| Blast radius / impact                 |       ✅       |       ➖        |    ❌    |    ❌     |         ❌         |
-| Shortest-path trace                   |       ✅       |       ✅        |    ❌    |    ❌     |         ❌         |
-| Community detection (Louvain)         |       ✅       |       ❌        |    ❌    |    ❌     |         ❌         |
-| Centrality (PageRank + betweenness)   |       ✅       |       ❌        |    ❌    |    ❌     |         ❌         |
-| Inheritance / implements + hyperedges |       ✅       |       ➖        |    ❌    |    ❌     |         ❌         |
-| HTTP route extraction                 |       ✅       |       ❌        |    ❌    |    ❌     |         ✅         |
-| Arbitrary query language              |    ✅ (SQL)    |   ✅ (Cypher)   |    ❌    |    ❌     |         ❌         |
-| Full-text search                      |   ✅ (FTS5)    |       ➖        |    ➖    | ✅ (BM25) |    ✅ (ripgrep)    |
-| Semantic / vector search              |       ✅       |       ➖        |    ✅    |    ✅     |         ❌         |
-| HyDE search                           |       ✅       |       ❌        |    ➖    |    ✅     |         ❌         |
-| LLM rerank                            |       ✅       |       ❌        |    ➖    |    ✅     |         ❌         |
-| NL Q&A over source                    |       ✅       |       ❌        |    ➖    |    ❌     |         ❌         |
-| Doc ingest (PDF / web / text)         |       ✅       |       ❌        |    ✅    |  ➖ (md)  |         ❌         |
-| Image OCR ingest                      |       ✅       |       ❌        |    ✅    |    ❌     |         ❌         |
-| **Audio / video media ingest**        | ❌ _(roadmap)_ |       ❌        |    ✅    |    ❌     |         ❌         |
-| Optional local LLM (no key)           |       ✅       |       ❌        |    ✅    |    ➖     |         ❌         |
-| Incremental indexing (sha256)         |       ✅       |       ➖        |    ➖    |    ✅     |        n/a         |
-| Single static binary (no server)      |       ✅       |   ❌ (Neo4j)    |    ❌    |    ❌     |    ❌ (Python)     |
-| Standalone CLI **and** MCP            |       ✅       |    ➖ (MCP)     |    ➖    |    ✅     |      ➖ (MCP)      |
-| Project-agnostic                      |       ✅       |       ✅        |    ✅    |    ✅     | ❌ (repo-specific) |
+> **Live vs documented:** `qmd` and `codebase-index` were run **live, head-to-head** in the same session
+> (Section 1 shows their real output). `codebase-memory` and `graphify` rows below are from their
+> **documented capabilities**, not a live run — treat them as claims to verify, not measurements.
+
+| Capability                            |   CodeGraph    | codebase-memory **(documented)** | graphify **(documented)** | qmd **(live)** | codebase-index **(live)** |
+| ------------------------------------- | :------------: | :------------------------------: | :-----------------------: | :------------: | :-----------------------: |
+| Multi-language code parsing           |   ✅ **13**    |                ✅                |            ➖             |       ❌       |       ➖ (3, grep)        |
+| AST-precise symbol defs               |       ✅       |                ✅                |            ❌             |       ❌       |         ❌ (grep)         |
+| Compiler-grade SCIP resolution        |       ✅       |                ❌                |            ❌             |       ❌       |            ❌             |
+| Call graph (callers/callees)          |       ✅       |                ✅                |            ❌             |       ❌       |      ➖ (grep refs)       |
+| Blast radius / impact                 |       ✅       |                ➖                |            ❌             |       ❌       |            ❌             |
+| Shortest-path trace                   |       ✅       |                ✅                |            ❌             |       ❌       |            ❌             |
+| Community detection (Louvain)         |       ✅       |                ❌                |            ❌             |       ❌       |            ❌             |
+| Centrality (PageRank + betweenness)   |       ✅       |                ❌                |            ❌             |       ❌       |            ❌             |
+| Inheritance / implements + hyperedges |       ✅       |                ➖                |            ❌             |       ❌       |            ❌             |
+| HTTP route extraction                 |       ✅       |                ❌                |            ❌             |       ❌       |            ✅             |
+| Arbitrary query language              |    ✅ (SQL)    |           ✅ (Cypher)            |            ❌             |       ❌       |            ❌             |
+| Full-text search                      |   ✅ (FTS5)    |                ➖                |            ➖             |   ✅ (BM25)    |       ✅ (ripgrep)        |
+| Semantic / vector search              |       ✅       |                ➖                |            ✅             |       ✅       |            ❌             |
+| HyDE search                           |       ✅       |                ❌                |            ➖             |       ✅       |            ❌             |
+| LLM rerank                            |       ✅       |                ❌                |            ➖             |       ✅       |            ❌             |
+| NL Q&A over source                    |       ✅       |                ❌                |            ➖             |       ❌       |            ❌             |
+| Doc ingest (PDF / web / text)         |       ✅       |                ❌                |            ✅             |    ➖ (md)     |            ❌             |
+| Image OCR ingest                      |       ✅       |                ❌                |            ✅             |       ❌       |            ❌             |
+| **Audio / video media ingest**        | ❌ _(roadmap)_ |                ❌                |            ✅             |       ❌       |            ❌             |
+| Optional local LLM (no key)           |       ✅       |                ❌                |            ✅             |       ➖       |            ❌             |
+| Incremental indexing (sha256)         |       ✅       |                ➖                |            ➖             |       ✅       |            n/a            |
+| Single static binary (no server)      |       ✅       |            ❌ (Neo4j)            |            ❌             |       ❌       |        ❌ (Python)        |
+| Standalone CLI **and** MCP            |       ✅       |             ➖ (MCP)             |            ➖             |       ✅       |         ➖ (MCP)          |
+| Project-agnostic                      |       ✅       |                ✅                |            ✅             |       ✅       |    ❌ (repo-specific)     |
 
 ## 4. Where CodeGraph is #1
 

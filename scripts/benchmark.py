@@ -14,6 +14,8 @@ import subprocess, os, sys, json
 
 CG = os.environ.get("CODEGRAPH_BIN", "./target/release/codegraph")
 TOK = lambda s: max(1, len(s) // 4)
+REPO = os.path.abspath(next((a.split("=", 1)[1] if "=" in a else sys.argv[sys.argv.index(a) + 1]
+                             for a in sys.argv if a.startswith("--repo")), "."))
 
 
 def run(cmd):
@@ -22,7 +24,7 @@ def run(cmd):
 
 def rg_files(pattern):
     """Files an agent would open after grepping for `pattern` (unique hit files)."""
-    out = run(["rg", "-n", "--no-heading", pattern, "."])
+    out = run(["rg", "-n", "--no-heading", pattern, REPO])
     files = []
     for line in out.splitlines():
         p = line.split(":", 1)[0]
@@ -41,7 +43,21 @@ def read_tokens(files):
     return t
 
 
-# (question, grep pattern, codegraph argv) — real symbols in this repo.
+def discover_tasks():
+    """For an external --repo, auto-pick real symbols (most central by PageRank)."""
+    run([CG, "index", REPO])
+    out = run([CG, "important", "--path", REPO, "--limit", "8", "--no-autoheal"])
+    tasks = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1].isidentifier():
+            n = parts[1]
+            tasks.append((f"Where is `{n}`?", n, ["search", n]))
+    return tasks[:6]
+
+
+# Default: fixed real symbols in CodeGraph's own repo (stable, reproducible numbers).
+# With `--repo <path>`: auto-discovered from that repo, so anyone can verify on their code.
 TASKS = [
     ("Where is `index_dir` defined?", "fn index_dir", ["search", "index_dir"]),
     ("Who calls `ensure_fresh`?", "ensure_fresh", ["callers", "ensure_fresh"]),
@@ -49,14 +65,14 @@ TASKS = [
     ("Where is `OpenAiCompatBackend` used?", "OpenAiCompatBackend", ["search", "OpenAiCompatBackend"]),
     ("Who calls `db_path`?", "db_path", ["callers", "db_path"]),
     ("Where is `Store` defined?", "struct Store", ["search", "Store"]),
-]
+] if REPO == os.path.abspath(".") else discover_tasks()
 
 rows, tot_grep_only, tot_grep_read, tot_cg, tot_calls_grep, tot_calls_cg = [], 0, 0, 0, 0, 0
 for q, pat, cg in TASKS:
     rg_out, files = rg_files(pat)
     grep_only = TOK(rg_out)                     # grep output alone (often ambiguous → wrong)
     grep_read = grep_only + read_tokens(files)  # realistic: grep + read hit files (correct answer)
-    cg_out = run([CG, *cg, "--path", ".", "--no-autoheal"])
+    cg_out = run([CG, *cg, "--path", REPO, "--no-autoheal"])
     cg_tok = TOK(cg_out)
     grep_calls = 1 + len(files)                 # 1 grep + N reads
     rows.append((q, grep_only, grep_read, cg_tok, grep_calls, len(files)))

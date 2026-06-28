@@ -205,10 +205,10 @@ fn semantic_blocking(db: &std::path::Path, q: &str, limit: usize) -> Vec<serde_j
     let Some(backend) = codegraph_llm::OpenAiCompatBackend::detect().filter(|b| b.embed_model().is_some()) else {
         return Vec::new();
     };
-    let Some(qv) = backend.embed(q) else { return Vec::new() };
+    let Some(qv) = backend.embed(q).map(|v| codegraph_core::normalize(&v)) else { return Vec::new() };
     let Ok(vectors) = store.all_vectors() else { return Vec::new() };
     let mut scored: Vec<(f32, String)> =
-        vectors.iter().map(|(id, v)| (codegraph_core::cosine(&qv, v), id.clone())).collect();
+        vectors.iter().map(|(id, v)| (codegraph_core::dot(&qv, v), id.clone())).collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(limit);
     scored
