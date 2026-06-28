@@ -69,7 +69,19 @@ Anything a tier can't resolve uniquely **drops** to T4 or is left unlinked — e
 - **Phase 4** — Java, Kotlin, C#, Python.
 - **Phase 5** — Go, Rust (receiver-typed methods). C/C++/Bash stay on T0/T4. Optional: a bare-call import table (ES-module/Python/Go/Rust) as a precision-safe tier between T3 and T4.
 
-## Expected recall (RANGES — confirm with per-tier counters, not call-site counts)
+## Measured (TypeScript T1 + T3, on a real NestJS backend)
+
+|                      | resolved CALLS edges | raw recall (incl. external libs) | **addressable recall** (calls that _could_ hit an internal def) |
+| -------------------- | -------------------- | -------------------------------- | --------------------------------------------------------------- |
+| baseline (name-only) | 8,751                | 10.2%                            | 43.1%                                                           |
+| + T1 (self/this)     | 8,863                | 10.4%                            | 43.7%                                                           |
+| **+ T3 (DI fields)** | **10,624**           | **12.4%**                        | **52.3%**                                                       |
+
++1,873 **provably-correct** edges (3,013 typed DI fields extracted); a Swift corpus stayed byte-for-byte
+identical (TS-only tiers — no regression). Reproduce: `codegraph index <repo> --full` then
+`SELECT COUNT(*) FROM edges WHERE relation='Calls'` vs `… FROM calls`.
+
+## Expected recall for the remaining phases (RANGES — confirm with counters)
 
 Against the **addressable** bucket (calls whose name matches an internal def but is dropped for
 ambiguity — 687/1646 internal names ambiguous; NOT the raw total that includes external libs):

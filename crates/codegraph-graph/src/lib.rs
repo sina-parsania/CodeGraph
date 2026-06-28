@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use codegraph_core::{
     Confidence, Edge, EdgeRelation, Hyperedge, HyperedgeMember, HyperedgeRelation, InheritKind, Metadata,
-    Node, NodeLabel, RawCall, RawInherit, Receiver, ResolutionTier,
+    Node, NodeLabel, RawCall, RawField, RawInherit, Receiver, ResolutionTier,
 };
 
 /// Class-Hierarchy-Analysis member resolution (docs/RESOLUTION.md): find the method
@@ -57,7 +57,7 @@ pub struct Built {
 /// - Pass 1 (structural): each File DEFINES every definition in the same file.
 /// - Pass 2 (calls): resolve each `RawCall` to a Function in the caller's file
 ///   by name (intra-language, intra-file) → CALLS edge tagged Tier B.
-pub fn build(nodes: &[Node], calls: &[RawCall], inherits: &[RawInherit]) -> Built {
+pub fn build(nodes: &[Node], calls: &[RawCall], inherits: &[RawInherit], fields: &[RawField]) -> Built {
     let by_id: HashMap<&str, &Node> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let file_by_path: HashMap<&str, &str> = nodes
         .iter()
@@ -107,6 +107,14 @@ pub fn build(nodes: &[Node], calls: &[RawCall], inherits: &[RawInherit]) -> Buil
             }
         }
     }
+    // field_types: class id -> field name -> declared type name (for T3 / DI).
+    let mut field_types: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
+    for f in fields {
+        field_types
+            .entry(f.class_id.as_str())
+            .or_default()
+            .insert(f.field_name.as_str(), f.type_name.as_str());
+    }
 
     let mut edges: Vec<Edge> = Vec::new();
     let mut seen: HashSet<(String, String, EdgeRelation)> = HashSet::new();
@@ -128,18 +136,27 @@ pub fn build(nodes: &[Node], calls: &[RawCall], inherits: &[RawInherit]) -> Buil
 
     for c in calls {
         let Some(caller) = by_id.get(c.caller_id.as_str()) else { continue };
-        // T1 (receiver-aware): self.foo()/this.foo() resolves to the enclosing
-        // class's foo (or an ancestor), unique-or-drop — provably correct because
-        // the receiver type IS the class. Falls back to the existing same-file /
-        // project-wide-unique path for everything else (no regression, no guess).
-        let t1 = if c.receiver == Receiver::SelfThis {
-            c.enclosing_class
+        // Receiver-aware tiers (provably correct, unique-or-drop, never a guess):
+        // T1 self/this -> enclosing class; T3 this.field.method() -> the field's
+        // declared type's class. Everything else falls back to the existing
+        // same-file / project-wide-unique path (no regression).
+        let receiver_resolved = match &c.receiver {
+            Receiver::SelfThis => c
+                .enclosing_class
                 .as_deref()
-                .and_then(|cls| resolve_member(cls, &c.callee_name, &class_members, &class_parents))
-        } else {
-            None
+                .and_then(|cls| resolve_member(cls, &c.callee_name, &class_members, &class_parents)),
+            Receiver::Field(field) => c
+                .enclosing_class
+                .as_deref()
+                .and_then(|cls| field_types.get(cls).and_then(|m| m.get(field.as_str())).copied())
+                .and_then(|ty| match class_by_name.get(ty) {
+                    Some(ids) if ids.len() == 1 => Some(ids[0]),
+                    _ => None,
+                })
+                .and_then(|type_cls| resolve_member(type_cls, &c.callee_name, &class_members, &class_parents)),
+            _ => None,
         };
-        let resolved = t1.or_else(|| {
+        let resolved = receiver_resolved.or_else(|| {
             fn_by_file_name
                 .get(&(caller.file_path.as_str(), c.callee_name.as_str()))
                 .copied()
@@ -260,7 +277,7 @@ mod tests {
     #[test]
     fn structural_and_call_edges() {
         let pf = codegraph_parse::parse_rust("proj", "src/main.rs", "fn helper() {}\nfn main() { helper(); helper(); }\n");
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields);
 
         let calls: Vec<_> = built.edges.iter().filter(|e| e.relation == EdgeRelation::Calls).collect();
         assert_eq!(calls.len(), 1, "duplicate calls should dedupe to one edge");
@@ -270,14 +287,16 @@ mod tests {
     }
 
     fn build_ts(files: &[(&str, &str)]) -> Built {
-        let (mut nodes, mut calls, mut inherits) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut nodes, mut calls, mut inherits, mut fields) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (f, src) in files {
             let pf = codegraph_parse::parse_ts("p", f, src);
             nodes.extend(pf.nodes);
             calls.extend(pf.calls);
             inherits.extend(pf.inherits);
+            fields.extend(pf.fields);
         }
-        build(&nodes, &calls, &inherits)
+        build(&nodes, &calls, &inherits, &fields)
     }
 
     #[test]
@@ -317,12 +336,48 @@ mod tests {
     }
 
     #[test]
+    fn t3_resolves_field_typed_di_call() {
+        // `find` is project-ambiguous; this.userService.find() resolves to
+        // UserService.find via the constructor parameter-property's declared type.
+        let built = build_ts(&[
+            ("user.service.ts", "class UserService { find() {} }"),
+            ("other.service.ts", "class OtherService { find() {} }"),
+            ("app.ts", "class App { constructor(private userService: UserService) {} go() { this.userService.find(); } }"),
+        ]);
+        let find_calls: Vec<_> = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".find"))
+            .collect();
+        assert_eq!(find_calls.len(), 1, "exactly one resolved find call");
+        assert!(find_calls[0].src.ends_with(".go"));
+        assert!(find_calls[0].dst.contains("user_service"), "resolved to UserService.find, not OtherService");
+    }
+
+    #[test]
+    fn t3_drops_when_field_type_unknown_no_guess() {
+        // `svc` has no typed declaration -> T3 can't resolve -> the ambiguous name
+        // drops (no phantom edge).
+        let built = build_ts(&[
+            ("a.ts", "class UserService { find() {} }"),
+            ("b.ts", "class OtherService { find() {} }"),
+            ("app.ts", "class App { go() { this.svc.find(); } }"),
+        ]);
+        let find_calls = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".find"))
+            .count();
+        assert_eq!(find_calls, 0, "unknown field type must not guess");
+    }
+
+    #[test]
     fn implements_hyperedge_materializes() {
         let pf = codegraph_parse::parse_ts(
             "p", "a.ts",
             "interface Repo {}\nclass SqlRepo implements Repo {}\nclass MemRepo implements Repo {}\n",
         );
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields);
         assert!(built.edges.iter().any(|e| e.relation == EdgeRelation::Implements));
         let he = built.hyperedges.iter().find(|(h, _)| h.label.contains("Repo")).expect("hyperedge");
         // 2 implementers + the interface = 3 members
@@ -332,7 +387,7 @@ mod tests {
     #[test]
     fn end_to_end_persist_and_query() {
         let pf = codegraph_parse::parse_rust("proj", "src/main.rs", "fn helper() {}\nfn main() { helper(); }\n");
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields);
         let store = Store::open_in_memory().unwrap();
         for n in &pf.nodes {
             store.upsert_node(n).unwrap();
@@ -352,7 +407,7 @@ mod tests {
         let other = codegraph_parse::parse_rust("proj", "b.rs", "fn ghost() {}\n");
         pf.nodes.extend(other.nodes);
         pf.calls.extend(other.calls);
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields);
         assert!(built.edges.iter().any(|e| e.relation == EdgeRelation::Calls
             && e.src.ends_with(".main") && e.dst.ends_with(".ghost")));
     }
@@ -366,7 +421,7 @@ mod tests {
         a.nodes.extend(b.nodes);
         a.nodes.extend(c.nodes);
         a.calls.extend(c.calls);
-        let built = build(&a.nodes, &a.calls, &a.inherits);
+        let built = build(&a.nodes, &a.calls, &a.inherits, &a.fields);
         assert!(!built.edges.iter().any(|e| e.relation == EdgeRelation::Calls));
     }
 }
@@ -664,7 +719,7 @@ mod traversal_tests {
             "src/lib.rs",
             "fn a() { b(); }\nfn b() { c(); }\nfn c() {}\nfn lonely() {}\n",
         );
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields);
         (pf.nodes, built.edges)
     }
 

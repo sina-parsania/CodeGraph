@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use codegraph_core::{Edge, Hyperedge, HyperedgeMember, InheritKind, Node, RawCall, RawInherit};
+use codegraph_core::{Edge, Hyperedge, HyperedgeMember, InheritKind, Node, RawCall, RawField, RawInherit};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
 #[derive(Debug, thiserror::Error)]
@@ -101,6 +101,9 @@ impl Store {
              CREATE TABLE IF NOT EXISTS inherits(
                impl_name TEXT, super_name TEXT, kind TEXT, file_path TEXT);
              CREATE INDEX IF NOT EXISTS idx_inherits_file ON inherits(file_path);
+             CREATE TABLE IF NOT EXISTS fields(
+               class_id TEXT, field_name TEXT, type_name TEXT, file_path TEXT);
+             CREATE INDEX IF NOT EXISTS idx_fields_file ON fields(file_path);
              CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
                id UNINDEXED, name, label, language);",
         )?;
@@ -413,6 +416,7 @@ impl Store {
         self.conn.execute("DELETE FROM nodes WHERE file_path = ?1", [file_path])?;
         self.conn.execute("DELETE FROM calls WHERE file_path = ?1", [file_path])?;
         self.conn.execute("DELETE FROM inherits WHERE file_path = ?1", [file_path])?;
+        self.conn.execute("DELETE FROM fields WHERE file_path = ?1", [file_path])?;
         Ok(())
     }
 
@@ -458,6 +462,25 @@ impl Store {
         let rows = stmt.query_map([], |r| {
             let kind = if r.get::<_, String>(2)? == "Implements" { InheritKind::Implements } else { InheritKind::Extends };
             Ok(RawInherit { impl_name: r.get(0)?, super_name: r.get(1)?, kind })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn save_fields(&self, file_path: &str, items: &[RawField]) -> Result<()> {
+        self.conn.execute("DELETE FROM fields WHERE file_path = ?1", [file_path])?;
+        let mut stmt = self
+            .conn
+            .prepare("INSERT INTO fields(class_id, field_name, type_name, file_path) VALUES(?1, ?2, ?3, ?4)")?;
+        for f in items {
+            stmt.execute(params![f.class_id, f.field_name, f.type_name, file_path])?;
+        }
+        Ok(())
+    }
+
+    pub fn all_fields(&self) -> Result<Vec<RawField>> {
+        let mut stmt = self.conn.prepare("SELECT class_id, field_name, type_name FROM fields")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(RawField { class_id: r.get(0)?, field_name: r.get(1)?, type_name: r.get(2)? })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }

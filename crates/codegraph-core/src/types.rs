@@ -140,6 +140,18 @@ pub enum Receiver {
     SelfThis,
     Super,
     Named(String),
+    /// `this.field.method()` — `field` is looked up in the enclosing class's
+    /// field→type map, and the method resolved on that type (T3 / DI).
+    Field(String),
+}
+
+/// A typed field/property of a class: `field_name: TypeName`. Powers T3 resolution
+/// of `this.field.method()` without type inference (the type is a literal token).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawField {
+    pub class_id: String,
+    pub field_name: String,
+    pub type_name: String,
 }
 
 /// An unresolved call reference captured by the parser: the enclosing caller's

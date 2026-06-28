@@ -2,18 +2,19 @@
 //! per-language `LangSpec` (label map, call-node kinds, callee fields, name
 //! extraction mode). Adding a language = one grammar dep + one `LangSpec`.
 
-use codegraph_core::{InheritKind, Metadata, Node, NodeLabel, QualifiedName, RawCall, RawInherit, Receiver};
+use codegraph_core::{InheritKind, Metadata, Node, NodeLabel, QualifiedName, RawCall, RawField, RawInherit, Receiver};
 use tree_sitter::{Language, Node as TsNode, Parser};
 
 pub struct ParsedFile {
     pub nodes: Vec<Node>,
     pub calls: Vec<RawCall>,
     pub inherits: Vec<RawInherit>,
+    pub fields: Vec<RawField>,
 }
 
 impl ParsedFile {
     fn empty() -> Self {
-        ParsedFile { nodes: Vec::new(), calls: Vec::new(), inherits: Vec::new() }
+        ParsedFile { nodes: Vec::new(), calls: Vec::new(), inherits: Vec::new(), fields: Vec::new() }
     }
 }
 
@@ -267,9 +268,10 @@ fn parse_with(spec: &LangSpec, project: &str, rel_path: &str, source: &str) -> P
     }];
     let mut calls = Vec::new();
     let mut inherits = Vec::new();
+    let mut fields = Vec::new();
     let ctx = Ctx { spec, project, segs: &file_segs, rel_path, file_id: &file_id };
-    collect(tree.root_node(), bytes, &ctx, None, None, &mut nodes, &mut calls, &mut inherits);
-    ParsedFile { nodes, calls, inherits }
+    collect(tree.root_node(), bytes, &ctx, None, None, &mut nodes, &mut calls, &mut inherits, &mut fields);
+    ParsedFile { nodes, calls, inherits, fields }
 }
 
 struct Ctx<'a> {
@@ -281,7 +283,7 @@ struct Ctx<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_class: Option<&str>, nodes: &mut Vec<Node>, calls: &mut Vec<RawCall>, inherits: &mut Vec<RawInherit>) {
+fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_class: Option<&str>, nodes: &mut Vec<Node>, calls: &mut Vec<RawCall>, inherits: &mut Vec<RawInherit>, fields: &mut Vec<RawField>) {
     let mut my_fn_id: Option<String> = None;
     let mut my_class_id: Option<String> = None;
 
@@ -308,6 +310,13 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
                     betweenness: 0.0,
                 });
             }
+        }
+    }
+
+    // At a TS class, capture its typed fields for T3 (this.field.method()) resolution.
+    if let Some(cls_id) = my_class_id.as_deref() {
+        if ctx.spec.name == "typescript" {
+            ts_extract_fields(node, src, cls_id, fields);
         }
     }
 
@@ -342,9 +351,9 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
             }
             // Receiver-aware capture (TS only for now): self/this binds to the
             // enclosing class so the resolver can do Class-Hierarchy-Analysis.
-            let receiver = if ctx.spec.name == "typescript" { ts_receiver(node) } else { Receiver::Bare };
+            let receiver = if ctx.spec.name == "typescript" { ts_receiver(node, src) } else { Receiver::Bare };
             let enclosing_class = match receiver {
-                Receiver::SelfThis | Receiver::Super => this_class.map(str::to_string),
+                Receiver::SelfThis | Receiver::Super | Receiver::Field(_) => this_class.map(str::to_string),
                 _ => None,
             };
             calls.push(RawCall {
@@ -371,20 +380,70 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
     };
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect(child, src, ctx, next_fn, next_this_class, nodes, calls, inherits);
+        collect(child, src, ctx, next_fn, next_this_class, nodes, calls, inherits, fields);
     }
 }
 
-/// Classify a TS call's receiver: `this.x()` / `super.x()` vs everything else.
-fn ts_receiver(call: TsNode) -> Receiver {
+/// Classify a TS call's receiver: `this.x()` (SelfThis), `super.x()` (Super),
+/// `this.field.x()` (Field — DI), else Bare.
+fn ts_receiver(call: TsNode, src: &[u8]) -> Receiver {
     let Some(func) = call.child_by_field_name("function") else { return Receiver::Bare };
     if func.kind() != "member_expression" {
         return Receiver::Bare;
     }
-    match func.child_by_field_name("object").map(|o| o.kind()) {
-        Some("this") => Receiver::SelfThis,
-        Some("super") => Receiver::Super,
+    let Some(obj) = func.child_by_field_name("object") else { return Receiver::Bare };
+    match obj.kind() {
+        "this" => Receiver::SelfThis,
+        "super" => Receiver::Super,
+        // this.field.method() — only when the inner receiver is `this`.
+        "member_expression" if obj.child_by_field_name("object").map(|o| o.kind()) == Some("this") => {
+            match obj.child_by_field_name("property").and_then(|f| std::str::from_utf8(&src[f.byte_range()]).ok()) {
+                Some(field) => Receiver::Field(field.to_string()),
+                None => Receiver::Bare,
+            }
+        }
         _ => Receiver::Bare,
+    }
+}
+
+/// Extract a TS class's typed fields → `RawField`s: `public foo: T` and constructor
+/// parameter-properties `constructor(private foo: T)`. Only simple `type_identifier`
+/// types (no generics/unions) so T3 resolution stays precise. Skips nested classes.
+fn ts_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Vec<RawField>) {
+    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let type_in = |n: TsNode| -> Option<String> {
+        let mut c = n.walk();
+        let ann = n.named_children(&mut c).find(|ch| ch.kind() == "type_annotation")?;
+        let mut c2 = ann.walk();
+        let ty = ann.named_children(&mut c2).find(|t| t.kind() == "type_identifier")?;
+        text(ty)
+    };
+    let mut stack = vec![class];
+    while let Some(n) = stack.pop() {
+        // a nested class owns its own fields — don't attribute them here
+        if n.id() != class.id() && matches!(n.kind(), "class_declaration" | "abstract_class_declaration") {
+            continue;
+        }
+        match n.kind() {
+            "public_field_definition" => {
+                if let (Some(name), Some(ty)) = (n.child_by_field_name("name").and_then(text), type_in(n)) {
+                    out.push(RawField { class_id: class_id.into(), field_name: name, type_name: ty });
+                }
+            }
+            "required_parameter" | "optional_parameter" => {
+                let mut c = n.walk();
+                let is_property = n.children(&mut c).any(|ch| ch.kind() == "accessibility_modifier");
+                let name = n.child_by_field_name("pattern").filter(|p| p.kind() == "identifier").and_then(text);
+                if let (true, Some(name), Some(ty)) = (is_property, name, type_in(n)) {
+                    out.push(RawField { class_id: class_id.into(), field_name: name, type_name: ty });
+                }
+            }
+            _ => {}
+        }
+        let mut c = n.walk();
+        for ch in n.children(&mut c) {
+            stack.push(ch);
+        }
     }
 }
 
