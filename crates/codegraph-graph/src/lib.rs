@@ -81,8 +81,9 @@ pub fn build(nodes: &[Node], calls: &[RawCall], inherits: &[RawInherit], fields:
         class_by_name.entry(c.name.as_str()).or_default().push(c.id.as_str());
     }
     // class_members: class id -> method name -> method ids, by innermost containment.
+    // Includes Function nodes too (Swift/Python/Rust/Kotlin label methods Function).
     let mut class_members: HashMap<&str, HashMap<&str, Vec<&str>>> = HashMap::new();
-    for m in nodes.iter().filter(|n| n.label == NodeLabel::Method) {
+    for m in nodes.iter().filter(|n| matches!(n.label, NodeLabel::Method | NodeLabel::Function)) {
         let owner = class_nodes
             .iter()
             .filter(|c| {
@@ -156,14 +157,20 @@ pub fn build(nodes: &[Node], calls: &[RawCall], inherits: &[RawInherit], fields:
                 .and_then(|type_cls| resolve_member(type_cls, &c.callee_name, &class_members, &class_parents)),
             _ => None,
         };
-        let resolved = receiver_resolved.or_else(|| {
-            fn_by_file_name
+        let global_unique = || match fn_by_name.get(c.callee_name.as_str()) {
+            Some(cands) if cands.len() == 1 => Some(cands[0]),
+            _ => None,
+        };
+        let resolved = receiver_resolved.or_else(|| match &c.receiver {
+            // Unqualified `foo()`: same-file scope is reasonable, then global-unique.
+            Receiver::Bare => fn_by_file_name
                 .get(&(caller.file_path.as_str(), c.callee_name.as_str()))
                 .copied()
-                .or_else(|| match fn_by_name.get(c.callee_name.as_str()) {
-                    Some(cands) if cands.len() == 1 => Some(cands[0]),
-                    _ => None,
-                })
+                .or_else(global_unique),
+            // Qualified call we couldn't type (named var / super / dropped self or
+            // field): only a globally-unique name is provably correct — never guess
+            // a same-file member of an unknown receiver type.
+            _ => global_unique(),
         });
         if let Some(callee_id) = resolved {
             if callee_id == c.caller_id {
@@ -297,6 +304,67 @@ mod tests {
             fields.extend(pf.fields);
         }
         build(&nodes, &calls, &inherits, &fields)
+    }
+
+    fn build_swift(files: &[(&str, &str)]) -> Built {
+        let (mut nodes, mut calls, mut inherits, mut fields) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for (f, src) in files {
+            let pf = codegraph_parse::parse_swift("p", f, src);
+            nodes.extend(pf.nodes);
+            calls.extend(pf.calls);
+            inherits.extend(pf.inherits);
+            fields.extend(pf.fields);
+        }
+        build(&nodes, &calls, &inherits, &fields)
+    }
+
+    #[test]
+    fn swift_self_call_resolves_to_class_method() {
+        // `save` is project-ambiguous (A.save + B.save); self.save() in A must
+        // resolve to A.save via T1 (the receiver type IS the enclosing class).
+        let built = build_swift(&[
+            ("a.swift", "class A {\n  func go() { self.save() }\n  func save() {}\n}"),
+            ("b.swift", "class B {\n  func save() {}\n}"),
+        ]);
+        let save: Vec<_> = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".save"))
+            .collect();
+        assert_eq!(save.len(), 1, "self.save() resolves to exactly one method");
+        assert!(save[0].dst.contains("a_swift"), "must be A.save, not B.save");
+    }
+
+    #[test]
+    fn qualified_named_receiver_ambiguous_name_drops_no_guess() {
+        // obj.save() with an ambiguous `save` must NOT resolve to a same-file
+        // `save` — the receiver's type is unknown, so it drops (precision guard).
+        let built = build_swift(&[
+            ("a.swift", "class A {\n  func go() { let obj = vm; obj.save() }\n  func save() {}\n}"),
+            ("b.swift", "class B {\n  func save() {}\n}"),
+        ]);
+        let save_edges = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".save"))
+            .count();
+        assert_eq!(save_edges, 0, "ambiguous qualified obj.save() must drop, not guess a same-file member");
+    }
+
+    #[test]
+    fn qualified_named_receiver_globally_unique_resolves() {
+        // obj.persistUniquely() — globally-unique name → provably correct via T4.
+        let built = build_swift(&[
+            ("a.swift", "class A {\n  func go() { let obj = repo; obj.persistUniquely() }\n}"),
+            ("b.swift", "class B {\n  func persistUniquely() {}\n}"),
+        ]);
+        let resolved = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".persistuniquely"))
+            .count();
+        assert_eq!(resolved, 1, "globally-unique qualified call resolves");
     }
 
     #[test]

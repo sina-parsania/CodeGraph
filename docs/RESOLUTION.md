@@ -69,17 +69,30 @@ Anything a tier can't resolve uniquely **drops** to T4 or is left unlinked — e
 - **Phase 4** — Java, Kotlin, C#, Python.
 - **Phase 5** — Go, Rust (receiver-typed methods). C/C++/Bash stay on T0/T4. Optional: a bare-call import table (ES-module/Python/Go/Rust) as a precision-safe tier between T3 and T4.
 
-## Measured (TypeScript T1 + T3, on a real NestJS backend)
+## Measured — language-agnostic receiver resolution
 
-|                      | resolved CALLS edges | raw recall (incl. external libs) | **addressable recall** (calls that _could_ hit an internal def) |
-| -------------------- | -------------------- | -------------------------------- | --------------------------------------------------------------- |
-| baseline (name-only) | 8,751                | 10.2%                            | 43.1%                                                           |
-| + T1 (self/this)     | 8,863                | 10.4%                            | 43.7%                                                           |
-| **+ T3 (DI fields)** | **10,624**           | **12.4%**                        | **52.3%**                                                       |
+Receiver detection is **language-agnostic** (the receiver is read from the callee's text — `self`/`this`/
+`self.field`/named — so the same tiers fire for every grammar). Two real corpora, full re-index, isolated
+caches, same metric (`… FROM edges WHERE relation='Calls'`):
 
-+1,873 **provably-correct** edges (3,013 typed DI fields extracted); a Swift corpus stayed byte-for-byte
-identical (TS-only tiers — no regression). Reproduce: `codegraph index <repo> --full` then
-`SELECT COUNT(*) FROM edges WHERE relation='Calls'` vs `… FROM calls`.
+| Corpus               | resolved CALLS edges (before → after) | what carried it                                            |
+| -------------------- | ------------------------------------- | ---------------------------------------------------------- |
+| NestJS backend (TS)  | 8,751 → **10,667**                    | T1 self/this + T3 DI fields (`this.service.method()`)      |
+| iOS app (Swift)      | 9,711 → **18,244** (+88%)             | a dropped-call parse fix + T1 self/this + T4 global-unique |
+| Android app (Kotlin) | 3,199 → **4,112**                     | same parse fix + T1 this                                   |
+
+Every new edge is **provably correct**: T1 (`self.m()` → the enclosing class's `m`, unique-or-drop),
+T3 (`this.field.m()` → the field's declared type, unique-or-drop), or T4 (globally-unique name). A
+**qualified call on a named variable never guesses a same-file member** — it resolves only if the name is
+globally unique, else it drops. Determinism holds (two full builds byte-identical).
+
+### The Swift parse fix (why +88%)
+
+tree-sitter-swift exposes a method call's callee (`navigation_expression` holding `self.foo`) as an
+**unnamed** child, and the callee extractor only scanned _named_ children — so `self.method()` /
+`obj.method()` calls were **dropped at parse time** and never entered the graph. Scanning all children +
+a rightmost-identifier fallback recovered them (the iOS corpus went 38k → 115k captured calls), and the
+receiver-aware tiers then resolved them precisely. This was a latent recall bug, not just a missing tier.
 
 ## Expected recall for the remaining phases (RANGES — confirm with counters)
 

@@ -349,9 +349,9 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
                     }
                 }
             }
-            // Receiver-aware capture (TS only for now): self/this binds to the
+            // Receiver-aware capture (all languages): self/this binds to the
             // enclosing class so the resolver can do Class-Hierarchy-Analysis.
-            let receiver = if ctx.spec.name == "typescript" { ts_receiver(node, src) } else { Receiver::Bare };
+            let receiver = detect_receiver(node, src);
             let enclosing_class = match receiver {
                 Receiver::SelfThis | Receiver::Super | Receiver::Field(_) => this_class.map(str::to_string),
                 _ => None,
@@ -375,7 +375,7 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
     // function literal which rebinds it (arrow fns / methods preserve it).
     let next_this_class = match my_class_id.as_deref() {
         Some(c) => Some(c),
-        None if rebinds_this(node.kind()) => None,
+        None if rebinds_this(ctx.spec.name, node.kind()) => None,
         None => this_class,
     };
     let mut cursor = node.walk();
@@ -384,25 +384,68 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
     }
 }
 
-/// Classify a TS call's receiver: `this.x()` (SelfThis), `super.x()` (Super),
-/// `this.field.x()` (Field — DI), else Bare.
-fn ts_receiver(call: TsNode, src: &[u8]) -> Receiver {
-    let Some(func) = call.child_by_field_name("function") else { return Receiver::Bare };
-    if func.kind() != "member_expression" {
+fn node_str<'a>(n: TsNode, src: &'a [u8]) -> Option<&'a str> {
+    std::str::from_utf8(&src[n.byte_range()]).ok()
+}
+
+/// `self`/`this` → SelfThis; `self.field`/`this.field` (one identifier) → Field;
+/// `super` → Super; anything else → Bare. The receiver text is validated, so a
+/// complex receiver (`(a).x`, `arr[0]`, generics) never becomes a guess.
+fn classify_receiver(recv: &str) -> Receiver {
+    let recv = recv.trim();
+    if recv.is_empty() {
         return Receiver::Bare;
     }
-    let Some(obj) = func.child_by_field_name("object") else { return Receiver::Bare };
-    match obj.kind() {
-        "this" => Receiver::SelfThis,
-        "super" => Receiver::Super,
-        // this.field.method() — only when the inner receiver is `this`.
-        "member_expression" if obj.child_by_field_name("object").map(|o| o.kind()) == Some("this") => {
-            match obj.child_by_field_name("property").and_then(|f| std::str::from_utf8(&src[f.byte_range()]).ok()) {
-                Some(field) => Receiver::Field(field.to_string()),
-                None => Receiver::Bare,
+    if recv == "self" || recv == "this" {
+        return Receiver::SelfThis;
+    }
+    if recv == "super" {
+        return Receiver::Super;
+    }
+    for kw in ["self.", "this."] {
+        if let Some(field) = recv.strip_prefix(kw) {
+            if !field.is_empty() && field.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                return Receiver::Field(field.to_string());
             }
         }
-        _ => Receiver::Bare,
+    }
+    // A qualified call whose receiver type we can't pin statically. Carry the
+    // receiver text so the resolver knows it's qualified (→ globally-unique only,
+    // never a same-file guess) instead of treating it like an unqualified call.
+    Receiver::Named(recv.to_string())
+}
+
+/// Language-agnostic receiver detection from the callee expression text. Works
+/// for `obj.method()` shapes across all grammars: Java's explicit `object` field,
+/// the `function` field (TS/JS/Python/Rust/Go/C#), or the first non-argument child
+/// (Swift). The class `self`/`this` is bound to is supplied separately (enclosing_class).
+fn first_callee(call: TsNode<'_>) -> Option<TsNode<'_>> {
+    if let Some(f) = call.child_by_field_name("function") {
+        return Some(f);
+    }
+    // Some grammars (Swift) expose the callee as an unnamed child, so scan ALL
+    // children and skip the argument / call-suffix kinds rather than `named_child`.
+    for i in 0..call.child_count() as u32 {
+        if let Some(ch) = call.child(i) {
+            if !matches!(
+                ch.kind(),
+                "arguments" | "argument_list" | "value_arguments" | "type_arguments" | "call_suffix"
+            ) {
+                return Some(ch);
+            }
+        }
+    }
+    None
+}
+
+fn detect_receiver(call: TsNode, src: &[u8]) -> Receiver {
+    // Java-style: the receiver is an explicit `object` field (no trailing name).
+    if let Some(obj) = call.child_by_field_name("object") {
+        return classify_receiver(node_str(obj, src).unwrap_or(""));
+    }
+    match first_callee(call).and_then(|c| node_str(c, src)).and_then(|t| t.rsplit_once('.')) {
+        Some((recv, _name)) => classify_receiver(recv),
+        None => Receiver::Bare,
     }
 }
 
@@ -447,12 +490,15 @@ fn ts_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Vec<Ra
     }
 }
 
-/// A non-arrow function literal rebinds `this` (arrow functions / methods do not).
-fn rebinds_this(kind: &str) -> bool {
-    matches!(
-        kind,
-        "function_declaration" | "function_expression" | "generator_function" | "generator_function_declaration"
-    )
+/// In TS/JS a nested non-arrow function literal rebinds `this`. In Swift/Kotlin/
+/// Python/etc. the "function" kind IS the method (self stays the instance), so we
+/// only treat these kinds as rebinding for TS/JS.
+fn rebinds_this(spec: &str, kind: &str) -> bool {
+    matches!(spec, "typescript" | "javascript")
+        && matches!(
+            kind,
+            "function_declaration" | "function_expression" | "generator_function" | "generator_function_declaration"
+        )
 }
 
 fn name_of(node: TsNode, src: &[u8], mode: NameMode) -> Option<String> {
@@ -519,7 +565,9 @@ fn callee_name(call: TsNode, src: &[u8], fields: &[&str]) -> Option<String> {
             return Some(s);
         }
     }
-    None
+    // Fallback for grammars where the callee is an unnamed child (Swift's
+    // navigation_expression) — otherwise `self.method()` calls are dropped.
+    first_callee(call).and_then(|c| trailing_ident(c, src))
 }
 
 fn trailing_ident(node: TsNode, src: &[u8]) -> Option<String> {
@@ -527,8 +575,18 @@ fn trailing_ident(node: TsNode, src: &[u8]) -> Option<String> {
     if k == "identifier" || k == "simple_identifier" || k.ends_with("_identifier") {
         return std::str::from_utf8(&src[node.byte_range()]).ok().map(|s| s.to_string());
     }
-    for field in ["name", "field", "attribute", "property", "method"] {
+    for field in ["name", "field", "attribute", "property", "method", "suffix"] {
         if let Some(c) = node.child_by_field_name(field) {
+            if let Some(s) = trailing_ident(c, src) {
+                return Some(s);
+            }
+        }
+    }
+    // Fallback: rightmost child yielding an identifier — handles member/navigation
+    // chains whose parts are unnamed (Swift navigation_expression/navigation_suffix).
+    for i in (0..node.child_count() as u32).rev() {
+        let Some(c) = node.child(i) else { continue };
+        if c.id() != node.id() && !c.is_extra() {
             if let Some(s) = trailing_ident(c, src) {
                 return Some(s);
             }
