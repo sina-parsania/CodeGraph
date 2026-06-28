@@ -17,6 +17,7 @@ codegraph-mcp.workspace = true
 codegraph-llm.workspace = true
 clap.workspace = true
 anyhow.workspace = true
+serde_json.workspace = true
 walkdir.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

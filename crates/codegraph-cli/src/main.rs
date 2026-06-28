@@ -82,6 +82,15 @@ enum Command {
     },
     /// Health check: languages, schema, and local-LLM availability.
     Doctor,
+    /// Configure this tool as an MCP server for Claude Code (and print config for others).
+    Install {
+        /// Only print the config; do not write any files.
+        #[arg(long)]
+        print: bool,
+        /// Repo path the MCP server should index.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
     /// Run the MCP server over stdio (for AI agents like Claude Code).
     Mcp {
         #[arg(long, default_value = ".")]
@@ -289,6 +298,36 @@ fn main() -> anyhow::Result<()> {
                 Some(llm) => println!("local LLM:  available  ({} / {})", llm.provider(), llm.model()),
                 None => println!("local LLM:  not detected  (search + graph work fully offline; LM Studio/Ollama enables `ask`)"),
             }
+        }
+        Command::Install { print, repo } => {
+            let repo = repo.canonicalize().unwrap_or(repo);
+            let entry = serde_json::json!({"command": "codegraph", "args": ["mcp", "--path", repo.to_string_lossy()]});
+            let snippet = serde_json::to_string_pretty(&serde_json::json!({"mcpServers": {"codegraph": entry.clone()}}))?;
+            if print {
+                println!("Add to your agent's MCP config:\n{}", snippet);
+                return Ok(());
+            }
+            let home = std::env::var("HOME").unwrap_or_default();
+            let path = std::path::Path::new(&home).join(".claude.json");
+            let mut root: serde_json::Value = if path.exists() {
+                serde_json::from_str(&std::fs::read_to_string(&path)?).unwrap_or_else(|_| serde_json::json!({}))
+            } else {
+                serde_json::json!({})
+            };
+            if !root.is_object() {
+                root = serde_json::json!({});
+            }
+            let obj = root.as_object_mut().unwrap();
+            let servers = obj.entry("mcpServers").or_insert_with(|| serde_json::json!({}));
+            if let Some(sm) = servers.as_object_mut() {
+                sm.insert("codegraph".to_string(), entry);
+            }
+            if path.exists() {
+                let _ = std::fs::copy(&path, path.with_extension("json.bak"));
+            }
+            std::fs::write(&path, serde_json::to_string_pretty(&root)?)?;
+            println!("configured Claude Code MCP at {} (backup .bak written)", path.display());
+            println!("for other agents, add:\n{}", snippet);
         }
         Command::Mcp { path } => {
             let db = index::db_path(&path);
