@@ -4,7 +4,9 @@ mod config;
 mod llm;
 mod types;
 
-pub use config::{Config, ConfigError, LlmConfig, MediaGate};
+pub use config::{
+    global_config_path, project_config_path, Config, ConfigError, LlmConfig, MediaGate,
+};
 pub use llm::{LlmClient, VisionLlmClient};
 pub use types::{
     Confidence, Edge, EdgeRelation, Hyperedge, HyperedgeMember, HyperedgeRelation, InheritKind, Metadata, Node,

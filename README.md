@@ -66,13 +66,14 @@ codegraph communities  /  routes      # clusters; detected HTTP routes
 codegraph semantic "retry with backoff" --hyde     # search by meaning (needs an embed model)
 codegraph ask "how does auth work?"                # NL answer over real source
 codegraph query "SELECT label, COUNT(*) FROM nodes GROUP BY label"   # arbitrary SQL
+codegraph config                      # view resolved config; `config set llm.model …` / `config edit`
 codegraph projects  /  gc             # list indexed projects; reclaim idle graphs
 codegraph doctor                      # what's available + how to enable AI features
 ```
 
 ## Configuration (all optional)
 
-`codegraph init` writes a commented **`.codegraph.toml`** (walked up from cwd); any **`CODEGRAPH_*`** env var overrides it. Core works with **no model**.
+`codegraph init` writes a commented **`.codegraph.toml`** (walked up from cwd). Precedence: built-in defaults < global `~/.config/codegraph/config.toml` < project `.codegraph.toml` < **`CODEGRAPH_*`** env. View/edit it with **`codegraph config`** (`config set llm.model <x>`, `config set <k> <v> --local`, `config edit`, `config get <k>`, `config path`). Core works with **no model**.
 
 | Setting          | `.codegraph.toml`            | Env                                      | Default              |
 | ---------------- | ---------------------------- | ---------------------------------------- | -------------------- |

@@ -86,14 +86,44 @@ impl MediaGate {
     pub fn media_enabled(&self) -> bool { self.media || self.images || self.videos }
 }
 
+/// Global per-user config: `$XDG_CONFIG_HOME/codegraph/config.toml`, else
+/// `~/.config/codegraph/config.toml`. Lowest precedence above built-in defaults.
+pub fn global_config_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(base.join("codegraph").join("config.toml"))
+}
+
+/// Nearest project `.codegraph.toml` walking up from `start` (if any).
+pub fn project_config_path(start: &Path) -> Option<PathBuf> {
+    find_config(start).ok().flatten()
+}
+
+fn merge_tables(base: &mut toml::Table, over: toml::Table) {
+    for (k, v) in over {
+        match (base.get_mut(&k), v) {
+            (Some(toml::Value::Table(bt)), toml::Value::Table(ot)) => merge_tables(bt, ot),
+            (_, v) => {
+                base.insert(k, v);
+            }
+        }
+    }
+}
+
 impl Config {
-    /// Walk up from `start` to find `.codegraph.toml`, parse it, then layer env
-    /// overrides on top.
+    /// Resolve config with precedence (low→high): defaults < global < project < env.
     pub fn load(start: &Path) -> Result<Config, ConfigError> {
-        let mut cfg = match find_config(start)? {
-            Some(path) => toml::from_str(&std::fs::read_to_string(path)?)?,
-            None => Config::default(),
-        };
+        let mut table = toml::Table::new();
+        for path in [global_config_path(), project_config_path(start)].into_iter().flatten() {
+            let Ok(s) = std::fs::read_to_string(&path) else { continue };
+            // A malformed config must not brick `index`/`search`: warn and ignore it.
+            match toml::from_str::<toml::Table>(&s) {
+                Ok(t) => merge_tables(&mut table, t),
+                Err(e) => eprintln!("codegraph: ignoring {} — TOML error: {e}", path.display()),
+            }
+        }
+        let mut cfg: Config = table.try_into().unwrap_or_default();
         cfg.apply_env_from(|k| std::env::var(k).ok());
         Ok(cfg)
     }
@@ -174,10 +204,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_error_surfaces() {
+    fn malformed_config_is_tolerated_not_bricking() {
+        // A bad config must NOT break index/search — it warns and falls back to defaults.
         let dir = tempdir_with(".codegraph.toml", "this is = = not valid toml [[[");
-        let err = Config::load(&dir);
-        assert!(matches!(err, Err(ConfigError::Toml(_))));
+        let c = Config::load(&dir).expect("load never errors on a bad file");
+        assert_eq!(c.llm.model, Config::default().llm.model);
     }
 
     #[test]
@@ -194,5 +225,19 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(name), contents).unwrap();
         dir
+    }
+}
+
+#[cfg(test)]
+mod layered_tests {
+    use super::*;
+    #[test]
+    fn merge_tables_deep_overrides() {
+        let mut base: toml::Table = toml::from_str("[llm]\nmodel='a'\nrerank=false\n").unwrap();
+        let over: toml::Table = toml::from_str("[llm]\nmodel='b'\n").unwrap();
+        merge_tables(&mut base, over);
+        // project overrides model, inherits rerank from global
+        assert_eq!(base["llm"]["model"].as_str(), Some("b"));
+        assert_eq!(base["llm"]["rerank"].as_bool(), Some(false));
     }
 }

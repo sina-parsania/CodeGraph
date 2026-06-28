@@ -1,6 +1,7 @@
 //! CodeGraph CLI. `codegraph mcp` (M6) is one subcommand among many; the CLI is
 //! a real standalone package.
 
+mod configcmd;
 mod index;
 mod init;
 mod query;
@@ -46,6 +47,11 @@ enum Command {
         /// Remove the agent nudge (CLAUDE.md block + SessionStart hook).
         #[arg(long)]
         uninstall: bool,
+    },
+    /// View or edit configuration (global ~/.config/codegraph/config.toml + project .codegraph.toml).
+    Config {
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
     },
     /// Print version, config defaults, and a readiness check.
     Status,
@@ -174,6 +180,50 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Show where config files live (global + project) and which exist.
+    Path,
+    /// Print a resolved value (e.g. `config get llm.model`).
+    Get { key: String },
+    /// Set a value; global by default, `--local` writes ./.codegraph.toml.
+    Set {
+        key: String,
+        value: String,
+        #[arg(long)]
+        local: bool,
+    },
+    /// Remove a value.
+    Unset {
+        key: String,
+        #[arg(long)]
+        local: bool,
+    },
+    /// Open the config file in $VISUAL/$EDITOR.
+    Edit {
+        #[arg(long)]
+        local: bool,
+    },
+}
+
+/// Promote resolved config values to the env vars the downstream readers already
+/// use (cache_root, detect, ...), so editing config actually takes effect. The
+/// user's env is already folded into the resolved Config (env wins), so this is
+/// idempotent and preserves precedence.
+fn apply_config_env(cfg: &codegraph_core::Config) {
+    if let Some(c) = &cfg.cache_dir {
+        std::env::set_var("CODEGRAPH_CACHE_DIR", c);
+    }
+    if let Some(e) = &cfg.embed_model {
+        std::env::set_var("CODEGRAPH_EMBED_MODEL", e);
+    }
+    std::env::set_var("CODEGRAPH_LLM_PROVIDER", &cfg.llm.provider);
+    if let Some(u) = &cfg.llm.base_url {
+        std::env::set_var("CODEGRAPH_LLM_URL", u);
+    }
+    std::env::set_var("CODEGRAPH_LLM_MODEL", &cfg.llm.model);
+}
+
 /// The project root a command operates on (for TTL bookkeeping), if any.
 fn project_path(cmd: &Command) -> Option<PathBuf> {
     use Command::*;
@@ -185,7 +235,7 @@ fn project_path(cmd: &Command) -> Option<PathBuf> {
             Some(path.clone())
         }
         Init { repo, .. } => Some(repo.clone()),
-        Install { .. } | Status | Doctor | Gc { .. } | Projects => None,
+        Install { .. } | Status | Doctor | Gc { .. } | Projects | Config { .. } => None,
     }
 }
 
@@ -203,6 +253,10 @@ fn needs_fresh(cmd: &Command) -> bool {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let cmd = cli.command;
+    // Resolve config (defaults < global < project < env) and promote it to the
+    // env vars downstream readers use, so config edits actually take effect.
+    let cfg = codegraph_core::Config::load(&std::env::current_dir().unwrap_or_default()).unwrap_or_default();
+    apply_config_env(&cfg);
     // Opportunistic TTL housekeeping: stamp this project as used + reclaim graphs
     // of projects untouched within CODEGRAPH_TTL_DAYS. Best-effort, never blocks.
     let root = project_path(&cmd);
@@ -254,7 +308,7 @@ fn main() -> anyhow::Result<()> {
             let db = index::db_path(&path);
             let store = codegraph_store::Store::open(&db)?;
             let mut hits = store.search_fts(&term, limit)?;
-            if rerank {
+            if rerank || cfg.llm.rerank {
                 if let Some(llm) = codegraph_llm::OpenAiCompatBackend::detect() {
                     hits = query::rerank(&term, hits, &llm);
                 }
@@ -335,6 +389,17 @@ fn main() -> anyhow::Result<()> {
             }
             for n in routes {
                 println!("{:<28} {}:{}", n.name, n.file_path, n.line_start);
+            }
+        }
+        Command::Config { action } => {
+            let cwd = std::env::current_dir()?;
+            match action {
+                None => configcmd::view(&cwd)?,
+                Some(ConfigAction::Path) => configcmd::path()?,
+                Some(ConfigAction::Get { key }) => configcmd::get(&cwd, &key)?,
+                Some(ConfigAction::Set { key, value, local }) => configcmd::set(&cwd, &key, &value, local)?,
+                Some(ConfigAction::Unset { key, local }) => configcmd::unset(&cwd, &key, local)?,
+                Some(ConfigAction::Edit { local }) => configcmd::edit(&cwd, local)?,
             }
         }
         Command::Projects => {
@@ -467,7 +532,7 @@ fn main() -> anyhow::Result<()> {
                 println!("no embedding model available (load one in LM Studio / Ollama)");
                 return Ok(());
             };
-            let query_text = if hyde {
+            let query_text = if hyde || cfg.llm.hyde {
                 b.generate(&format!("Write a short code documentation snippet that would answer this query (no preamble): {}", q), 200)
                     .unwrap_or_else(|| q.clone())
             } else {
