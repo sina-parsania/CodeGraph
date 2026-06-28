@@ -35,6 +35,9 @@ enum Command {
         path: PathBuf,
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Rerank results with a local LLM (if one is running).
+        #[arg(long)]
+        rerank: bool,
     },
     /// Shortest dependency path between two symbols (by name).
     Trace { from: String, to: String, #[arg(long, default_value = ".")] path: PathBuf },
@@ -141,10 +144,15 @@ fn main() -> anyhow::Result<()> {
                 db.display()
             );
         }
-        Command::Search { term, path, limit } => {
+        Command::Search { term, path, limit, rerank } => {
             let db = index::db_path(&path);
             let store = codegraph_store::Store::open(&db)?;
-            let hits = store.search_fts(&term, limit)?;
+            let mut hits = store.search_fts(&term, limit)?;
+            if rerank {
+                if let Some(llm) = codegraph_llm::OpenAiCompatBackend::detect() {
+                    hits = query::rerank(&term, hits, &llm);
+                }
+            }
             if hits.is_empty() {
                 println!("no matches for {:?}", term);
             }
