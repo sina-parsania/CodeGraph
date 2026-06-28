@@ -6,6 +6,7 @@ mod index;
 mod init;
 mod query;
 mod registry;
+mod scipcmd;
 
 use std::path::PathBuf;
 
@@ -47,6 +48,11 @@ enum Command {
         /// Remove the agent nudge (CLAUDE.md block + SessionStart hook).
         #[arg(long)]
         uninstall: bool,
+    },
+    /// One-command compiler-grade precision: run the project's SCIP indexer (if installed) and merge.
+    Scip {
+        #[arg(default_value = ".")]
+        path: PathBuf,
     },
     /// View or edit configuration (global ~/.config/codegraph/config.toml + project .codegraph.toml).
     Config {
@@ -234,7 +240,7 @@ fn project_path(cmd: &Command) -> Option<PathBuf> {
         | SemanticIndex { path, .. } | Semantic { path, .. } | Ingest { path, .. } | Mcp { path, .. } => {
             Some(path.clone())
         }
-        Init { repo, .. } => Some(repo.clone()),
+        Init { repo, .. } | Scip { path: repo } => Some(repo.clone()),
         Install { .. } | Status | Doctor | Gc { .. } | Projects | Config { .. } => None,
     }
 }
@@ -390,6 +396,9 @@ fn main() -> anyhow::Result<()> {
             for n in routes {
                 println!("{:<28} {}:{}", n.name, n.file_path, n.line_start);
             }
+        }
+        Command::Scip { path } => {
+            scipcmd::run(&path)?;
         }
         Command::Config { action } => {
             let cwd = std::env::current_dir()?;

@@ -45,7 +45,7 @@ Then just ask Claude Code to _"use codegraph to find …"_ — its tools are liv
 - **Always fresh, never wrong** — every query (CLI **and** MCP) runs a stat-only probe and **auto-reindexes before serving**, so edits, file add/delete, and `git checkout`/`switch` are reflected instantly. No stale results, no manual reindex.
 - **13 languages** — Rust, Python, JS, TS, Go, Swift, Kotlin, Java, C, C++, Ruby, C#, Bash. One grammar-driven parser.
 - **A real graph** — `Function/Method/Class/Enum/Interface/Type/Module/Route/Document` nodes joined by `DEFINES / CALLS / INHERITS / IMPLEMENTS` (+ IMPLEMENTS hyperedges). Honest cross-file resolution: ambiguous names stay unlinked (no phantom edges).
-- **Compiler-grade precision (optional)** — merge a `.scip` (scip-typescript / rust-analyzer / scip-java / …) for **Tier-A edges** that resolve overloads, re-exports, and ambiguous names tree-sitter can't.
+- **Compiler-grade precision (optional, one command)** — `codegraph scip` detects your language, runs the matching SCIP indexer (scip-typescript / rust-analyzer / scip-java / …) if installed, and merges **Tier-A edges** that resolve overloads, re-exports, and ambiguous names tree-sitter can't. _Zero-config means the tree-sitter core_ (which needs nothing); SCIP is an opt-in precision upgrade.
 - **Graph intelligence grep can't do** — `impact` (blast-radius), `trace` (shortest path), `callers`/`callees`, `implementers`, `important` (PageRank), `communities` (Louvain), `routes`.
 - **Search** — full-text (`--rerank`), **semantic** vector (`--hyde`), and `ask` (NL answer over real snippets). All optional; degrade gracefully with no model.
 - **Any input** — `index` also ingests docs + localization (md/rst/txt/`.strings`/po/xliff/…); `ingest` adds PDFs, URLs, json/yaml/csv/log/…, and (with `--features media`) images via OCR. One graph = code + docs + config + localization.
@@ -66,6 +66,7 @@ codegraph communities  /  routes      # clusters; detected HTTP routes
 codegraph semantic "retry with backoff" --hyde     # search by meaning (needs an embed model)
 codegraph ask "how does auth work?"                # NL answer over real source
 codegraph query "SELECT label, COUNT(*) FROM nodes GROUP BY label"   # arbitrary SQL
+codegraph scip                        # one-command compiler-grade precision (runs the SCIP indexer + merges)
 codegraph config                      # view resolved config; `config set llm.model …` / `config edit`
 codegraph projects  /  gc             # list indexed projects; reclaim idle graphs
 codegraph doctor                      # what's available + how to enable AI features
