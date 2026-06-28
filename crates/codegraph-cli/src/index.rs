@@ -9,6 +9,7 @@ use codegraph_parse::parse_file;
 
 const EXTS: &[&str] = &[
     "rs", "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "mts", "cts", "tsx", "go",
+    "swift", "java", "c", "h", "cpp", "cc", "cxx", "hpp", "hh", "hxx", "rb", "cs", "sh", "bash",
 ];
 use codegraph_store::Store;
 use walkdir::WalkDir;

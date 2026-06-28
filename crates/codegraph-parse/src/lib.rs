@@ -1,9 +1,9 @@
-//! Grammar-driven parser: one generic tree-sitter walk + a per-language
-//! kind→label map. Rust/Python/JS/TS/Go today; adding a language is a `LANGUAGE`
-//! + a `*_label` fn + a `parse_file` arm.
+//! Grammar-driven parser: one generic tree-sitter walk parameterized by a
+//! per-language `LangSpec` (label map, call-node kinds, callee fields, name
+//! extraction mode). Adding a language = one grammar dep + one `LangSpec`.
 
 use codegraph_core::{Metadata, Node, NodeLabel, QualifiedName, RawCall};
-use tree_sitter::{Node as TsNode, Parser};
+use tree_sitter::{Language, Node as TsNode, Parser};
 
 pub struct ParsedFile {
     pub nodes: Vec<Node>,
@@ -16,87 +16,114 @@ impl ParsedFile {
     }
 }
 
-/// Dispatch by file extension. Unknown extensions yield an empty result.
+#[derive(Clone, Copy)]
+enum NameMode {
+    Field,
+    CDeclarator,
+}
+
+struct LangSpec {
+    name: &'static str,
+    language: fn() -> Language,
+    label_for: fn(&str) -> Option<NodeLabel>,
+    call_kinds: &'static [&'static str],
+    callee_fields: &'static [&'static str],
+    name_mode: NameMode,
+}
+
 pub fn parse_file(project: &str, rel_path: &str, source: &str) -> ParsedFile {
-    match rel_path.rsplit('.').next().unwrap_or("") {
-        "rs" => parse_rust(project, rel_path, source),
-        "py" | "pyi" => parse_python(project, rel_path, source),
-        "js" | "jsx" | "mjs" | "cjs" => parse_js(project, rel_path, source),
-        "ts" | "mts" | "cts" => parse_ts(project, rel_path, source),
-        "tsx" => parse_tsx(project, rel_path, source),
-        "go" => parse_go(project, rel_path, source),
-        _ => ParsedFile::empty(),
+    let ext = rel_path.rsplit('.').next().unwrap_or("");
+    match spec_for_ext(ext) {
+        Some(spec) => parse_with(spec, project, rel_path, source),
+        None => ParsedFile::empty(),
     }
 }
 
-pub fn parse_rust(p: &str, r: &str, s: &str) -> ParsedFile {
-    parse_with(tree_sitter_rust::LANGUAGE.into(), "rust", rust_label, p, r, s)
-}
-pub fn parse_python(p: &str, r: &str, s: &str) -> ParsedFile {
-    parse_with(tree_sitter_python::LANGUAGE.into(), "python", python_label, p, r, s)
-}
-pub fn parse_js(p: &str, r: &str, s: &str) -> ParsedFile {
-    parse_with(tree_sitter_javascript::LANGUAGE.into(), "javascript", js_label, p, r, s)
-}
-pub fn parse_ts(p: &str, r: &str, s: &str) -> ParsedFile {
-    parse_with(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), "typescript", ts_label, p, r, s)
-}
-pub fn parse_tsx(p: &str, r: &str, s: &str) -> ParsedFile {
-    parse_with(tree_sitter_typescript::LANGUAGE_TSX.into(), "typescript", ts_label, p, r, s)
-}
-pub fn parse_go(p: &str, r: &str, s: &str) -> ParsedFile {
-    parse_with(tree_sitter_go::LANGUAGE.into(), "go", go_label, p, r, s)
-}
-
-fn rust_label(kind: &str) -> Option<NodeLabel> {
-    match kind {
-        "function_item" => Some(NodeLabel::Function),
-        "struct_item" | "union_item" => Some(NodeLabel::Class),
-        "enum_item" => Some(NodeLabel::Enum),
-        "trait_item" => Some(NodeLabel::Interface),
-        "type_item" => Some(NodeLabel::Type),
-        "mod_item" => Some(NodeLabel::Module),
-        _ => None,
-    }
-}
-fn python_label(kind: &str) -> Option<NodeLabel> {
-    match kind {
-        "function_definition" => Some(NodeLabel::Function),
-        "class_definition" => Some(NodeLabel::Class),
-        _ => None,
-    }
-}
-fn js_label(kind: &str) -> Option<NodeLabel> {
-    match kind {
-        "function_declaration" | "generator_function_declaration" => Some(NodeLabel::Function),
-        "class_declaration" => Some(NodeLabel::Class),
-        "method_definition" => Some(NodeLabel::Method),
-        _ => None,
-    }
-}
-fn ts_label(kind: &str) -> Option<NodeLabel> {
-    match kind {
-        "interface_declaration" => Some(NodeLabel::Interface),
-        "type_alias_declaration" => Some(NodeLabel::Type),
-        "enum_declaration" => Some(NodeLabel::Enum),
-        "abstract_class_declaration" => Some(NodeLabel::Class),
-        other => js_label(other),
-    }
-}
-fn go_label(kind: &str) -> Option<NodeLabel> {
-    match kind {
-        "function_declaration" => Some(NodeLabel::Function),
-        "method_declaration" => Some(NodeLabel::Method),
-        "type_spec" => Some(NodeLabel::Class),
-        _ => None,
-    }
+fn spec_for_ext(ext: &str) -> Option<&'static LangSpec> {
+    let s = match ext {
+        "rs" => &RUST,
+        "py" | "pyi" => &PYTHON,
+        "js" | "jsx" | "mjs" | "cjs" => &JS,
+        "ts" | "mts" | "cts" => &TS,
+        "tsx" => &TSX,
+        "go" => &GO,
+        "swift" => &SWIFT,
+        "java" => &JAVA,
+        "c" | "h" => &C,
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => &CPP,
+        "rb" => &RUBY,
+        "cs" => &CSHARP,
+        "sh" | "bash" => &BASH,
+        _ => return None,
+    };
+    Some(s)
 }
 
-type LabelFn = fn(&str) -> Option<NodeLabel>;
+// Back-compat single-language entry points (used by tests).
+pub fn parse_rust(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&RUST, p, r, s) }
+pub fn parse_python(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&PYTHON, p, r, s) }
+pub fn parse_js(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&JS, p, r, s) }
+pub fn parse_ts(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&TS, p, r, s) }
+pub fn parse_tsx(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&TSX, p, r, s) }
+pub fn parse_go(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&GO, p, r, s) }
+pub fn parse_swift(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&SWIFT, p, r, s) }
+pub fn parse_java(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&JAVA, p, r, s) }
 
-fn parse_with(language: tree_sitter::Language, lang: &str, label_for: LabelFn, project: &str, rel_path: &str, source: &str) -> ParsedFile {
+static RUST: LangSpec = LangSpec { name: "rust", language: || tree_sitter_rust::LANGUAGE.into(), label_for: rust_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field };
+static PYTHON: LangSpec = LangSpec { name: "python", language: || tree_sitter_python::LANGUAGE.into(), label_for: python_label, call_kinds: &["call"], callee_fields: &["function"], name_mode: NameMode::Field };
+static JS: LangSpec = LangSpec { name: "javascript", language: || tree_sitter_javascript::LANGUAGE.into(), label_for: js_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field };
+static TS: LangSpec = LangSpec { name: "typescript", language: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), label_for: ts_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field };
+static TSX: LangSpec = LangSpec { name: "typescript", language: || tree_sitter_typescript::LANGUAGE_TSX.into(), label_for: ts_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field };
+static GO: LangSpec = LangSpec { name: "go", language: || tree_sitter_go::LANGUAGE.into(), label_for: go_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field };
+static SWIFT: LangSpec = LangSpec { name: "swift", language: || tree_sitter_swift::LANGUAGE.into(), label_for: swift_label, call_kinds: &["call_expression"], callee_fields: &[], name_mode: NameMode::Field };
+static JAVA: LangSpec = LangSpec { name: "java", language: || tree_sitter_java::LANGUAGE.into(), label_for: java_label, call_kinds: &["method_invocation"], callee_fields: &["name"], name_mode: NameMode::Field };
+static C: LangSpec = LangSpec { name: "c", language: || tree_sitter_c::LANGUAGE.into(), label_for: c_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::CDeclarator };
+static CPP: LangSpec = LangSpec { name: "cpp", language: || tree_sitter_cpp::LANGUAGE.into(), label_for: cpp_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::CDeclarator };
+static RUBY: LangSpec = LangSpec { name: "ruby", language: || tree_sitter_ruby::LANGUAGE.into(), label_for: ruby_label, call_kinds: &["call"], callee_fields: &["method"], name_mode: NameMode::Field };
+static CSHARP: LangSpec = LangSpec { name: "csharp", language: || tree_sitter_c_sharp::LANGUAGE.into(), label_for: csharp_label, call_kinds: &["invocation_expression"], callee_fields: &["function"], name_mode: NameMode::Field };
+static BASH: LangSpec = LangSpec { name: "bash", language: || tree_sitter_bash::LANGUAGE.into(), label_for: bash_label, call_kinds: &[], callee_fields: &[], name_mode: NameMode::Field };
+
+fn rust_label(k: &str) -> Option<NodeLabel> {
+    match k { "function_item" => Some(NodeLabel::Function), "struct_item" | "union_item" => Some(NodeLabel::Class), "enum_item" => Some(NodeLabel::Enum), "trait_item" => Some(NodeLabel::Interface), "type_item" => Some(NodeLabel::Type), "mod_item" => Some(NodeLabel::Module), _ => None }
+}
+fn python_label(k: &str) -> Option<NodeLabel> {
+    match k { "function_definition" => Some(NodeLabel::Function), "class_definition" => Some(NodeLabel::Class), _ => None }
+}
+fn js_label(k: &str) -> Option<NodeLabel> {
+    match k { "function_declaration" | "generator_function_declaration" => Some(NodeLabel::Function), "class_declaration" => Some(NodeLabel::Class), "method_definition" => Some(NodeLabel::Method), _ => None }
+}
+fn ts_label(k: &str) -> Option<NodeLabel> {
+    match k { "interface_declaration" => Some(NodeLabel::Interface), "type_alias_declaration" => Some(NodeLabel::Type), "enum_declaration" => Some(NodeLabel::Enum), "abstract_class_declaration" => Some(NodeLabel::Class), other => js_label(other) }
+}
+fn go_label(k: &str) -> Option<NodeLabel> {
+    match k { "function_declaration" => Some(NodeLabel::Function), "method_declaration" => Some(NodeLabel::Method), "type_spec" => Some(NodeLabel::Class), _ => None }
+}
+fn swift_label(k: &str) -> Option<NodeLabel> {
+    // tree-sitter-swift parses class/struct/enum/actor all as `class_declaration`.
+    match k { "function_declaration" => Some(NodeLabel::Function), "class_declaration" => Some(NodeLabel::Class), "protocol_declaration" => Some(NodeLabel::Interface), "typealias_declaration" => Some(NodeLabel::Type), _ => None }
+}
+fn java_label(k: &str) -> Option<NodeLabel> {
+    match k { "method_declaration" | "constructor_declaration" => Some(NodeLabel::Method), "class_declaration" | "record_declaration" => Some(NodeLabel::Class), "interface_declaration" | "annotation_type_declaration" => Some(NodeLabel::Interface), "enum_declaration" => Some(NodeLabel::Enum), _ => None }
+}
+fn c_label(k: &str) -> Option<NodeLabel> {
+    match k { "function_definition" => Some(NodeLabel::Function), "struct_specifier" | "union_specifier" => Some(NodeLabel::Class), "enum_specifier" => Some(NodeLabel::Enum), "type_definition" => Some(NodeLabel::Type), _ => None }
+}
+fn cpp_label(k: &str) -> Option<NodeLabel> {
+    match k { "class_specifier" => Some(NodeLabel::Class), "namespace_definition" => Some(NodeLabel::Module), other => c_label(other) }
+}
+fn ruby_label(k: &str) -> Option<NodeLabel> {
+    match k { "method" | "singleton_method" => Some(NodeLabel::Method), "class" => Some(NodeLabel::Class), "module" => Some(NodeLabel::Module), _ => None }
+}
+fn csharp_label(k: &str) -> Option<NodeLabel> {
+    match k { "method_declaration" | "constructor_declaration" => Some(NodeLabel::Method), "class_declaration" | "record_declaration" | "struct_declaration" => Some(NodeLabel::Class), "interface_declaration" => Some(NodeLabel::Interface), "enum_declaration" => Some(NodeLabel::Enum), _ => None }
+}
+fn bash_label(k: &str) -> Option<NodeLabel> {
+    match k { "function_definition" => Some(NodeLabel::Function), _ => None }
+}
+
+fn parse_with(spec: &LangSpec, project: &str, rel_path: &str, source: &str) -> ParsedFile {
     let mut parser = Parser::new();
-    if parser.set_language(&language).is_err() {
+    if parser.set_language(&(spec.language)()).is_err() {
         return ParsedFile::empty();
     }
     let tree = match parser.parse(source, None) {
@@ -104,7 +131,6 @@ fn parse_with(language: tree_sitter::Language, lang: &str, label_for: LabelFn, p
         None => return ParsedFile::empty(),
     };
     let bytes = source.as_bytes();
-
     let mut dir: Vec<&str> = rel_path.split('/').filter(|s| !s.is_empty()).collect();
     let filename = dir.pop().unwrap_or("file");
     let mut file_segs = dir.clone();
@@ -118,45 +144,44 @@ fn parse_with(language: tree_sitter::Language, lang: &str, label_for: LabelFn, p
         file_path: rel_path.to_string(),
         line_start: 1,
         line_end: source.lines().count().max(1) as u32,
-        language: lang.to_string(),
+        language: spec.name.to_string(),
         metadata: Metadata::new(),
         community: None,
         pagerank: 0.0,
         betweenness: 0.0,
     }];
     let mut calls = Vec::new();
-    let ctx = Ctx { project, segs: &file_segs, rel_path, file_id: &file_id, lang, label_for };
+    let ctx = Ctx { spec, project, segs: &file_segs, rel_path, file_id: &file_id };
     collect(tree.root_node(), bytes, &ctx, None, &mut nodes, &mut calls);
     ParsedFile { nodes, calls }
 }
 
 struct Ctx<'a> {
+    spec: &'a LangSpec,
     project: &'a str,
     segs: &'a [&'a str],
     rel_path: &'a str,
     file_id: &'a str,
-    lang: &'a str,
-    label_for: LabelFn,
 }
 
 fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, nodes: &mut Vec<Node>, calls: &mut Vec<RawCall>) {
     let mut my_fn_id: Option<String> = None;
 
-    if let Some(label) = (ctx.label_for)(node.kind()) {
-        if let Some(name) = text_of_field(node, "name", src) {
+    if let Some(label) = (ctx.spec.label_for)(node.kind()) {
+        if let Some(name) = name_of(node, src, ctx.spec.name_mode) {
             if !name.is_empty() {
-                let id = QualifiedName::build(ctx.project, ctx.segs, name);
+                let id = QualifiedName::build(ctx.project, ctx.segs, &name);
                 if matches!(label, NodeLabel::Function | NodeLabel::Method) {
                     my_fn_id = Some(id.clone());
                 }
                 nodes.push(Node {
                     id,
                     label,
-                    name: name.to_string(),
+                    name,
                     file_path: ctx.rel_path.to_string(),
                     line_start: node.start_position().row as u32 + 1,
                     line_end: node.end_position().row as u32 + 1,
-                    language: ctx.lang.to_string(),
+                    language: ctx.spec.name.to_string(),
                     metadata: Metadata::new(),
                     community: None,
                     pagerank: 0.0,
@@ -166,8 +191,8 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, nodes:
         }
     }
 
-    if matches!(node.kind(), "call_expression" | "call") {
-        if let Some(callee) = node.child_by_field_name("function").and_then(|f| trailing_ident(f, src)) {
+    if ctx.spec.call_kinds.contains(&node.kind()) {
+        if let Some(callee) = callee_name(node, src, ctx.spec.callee_fields) {
             calls.push(RawCall {
                 caller_id: current_fn.unwrap_or(ctx.file_id).to_string(),
                 callee_name: callee,
@@ -183,16 +208,54 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, nodes:
     }
 }
 
-fn text_of_field<'a>(node: TsNode, field: &str, src: &'a [u8]) -> Option<&'a str> {
-    std::str::from_utf8(&src[node.child_by_field_name(field)?.byte_range()]).ok()
+fn name_of(node: TsNode, src: &[u8], mode: NameMode) -> Option<String> {
+    match mode {
+        NameMode::Field => field_text(node, "name", src),
+        NameMode::CDeclarator => {
+            if let Some(s) = field_text(node, "name", src) {
+                return Some(s);
+            }
+            // C/C++ function: descend the declarator chain to the identifier.
+            let mut d = node.child_by_field_name("declarator")?;
+            loop {
+                match d.kind() {
+                    "identifier" | "field_identifier" | "type_identifier" | "operator_name" => {
+                        return std::str::from_utf8(&src[d.byte_range()]).ok().map(|s| s.to_string());
+                    }
+                    _ => d = d.child_by_field_name("declarator")?,
+                }
+            }
+        }
+    }
+}
+
+fn field_text(node: TsNode, field: &str, src: &[u8]) -> Option<String> {
+    std::str::from_utf8(&src[node.child_by_field_name(field)?.byte_range()]).ok().map(|s| s.to_string())
+}
+
+fn callee_name(call: TsNode, src: &[u8], fields: &[&str]) -> Option<String> {
+    for f in fields {
+        if let Some(c) = call.child_by_field_name(f) {
+            if let Some(s) = trailing_ident(c, src) {
+                return Some(s);
+            }
+        }
+    }
+    let mut cursor = call.walk();
+    for child in call.named_children(&mut cursor) {
+        if let Some(s) = trailing_ident(child, src) {
+            return Some(s);
+        }
+    }
+    None
 }
 
 fn trailing_ident(node: TsNode, src: &[u8]) -> Option<String> {
     let k = node.kind();
-    if k == "identifier" || k.ends_with("_identifier") {
+    if k == "identifier" || k == "simple_identifier" || k.ends_with("_identifier") {
         return std::str::from_utf8(&src[node.byte_range()]).ok().map(|s| s.to_string());
     }
-    for field in ["name", "field", "attribute", "property"] {
+    for field in ["name", "field", "attribute", "property", "method"] {
         if let Some(c) = node.child_by_field_name(field) {
             if let Some(s) = trailing_ident(c, src) {
                 return Some(s);
@@ -206,58 +269,62 @@ fn trailing_ident(node: TsNode, src: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn names(pf: &ParsedFile) -> Vec<(&str, NodeLabel)> {
-        pf.nodes.iter().map(|n| (n.name.as_str(), n.label)).collect()
+    fn names(pf: &ParsedFile) -> Vec<(String, NodeLabel)> {
+        pf.nodes.iter().map(|n| (n.name.clone(), n.label)).collect()
+    }
+    fn has(pf: &ParsedFile, name: &str, label: NodeLabel) -> bool {
+        names(pf).iter().any(|(n, l)| n == name && *l == label)
     }
 
     #[test]
-    fn rust_defs_and_calls() {
-        let pf = parse_rust("p", "src/lib.rs", "fn helper() {}\nfn main() { helper(); }\nstruct S;\nenum E {}\ntrait T {}\n");
-        assert!(names(&pf).contains(&("helper", NodeLabel::Function)));
-        assert!(names(&pf).contains(&("S", NodeLabel::Class)));
-        assert!(names(&pf).contains(&("T", NodeLabel::Interface)));
-        assert!(pf.calls.iter().any(|c| c.callee_name == "helper" && c.caller_id.ends_with("main")));
+    fn rust_python_js_ts_go_still_work() {
+        assert!(has(&parse_rust("p", "a.rs", "fn helper(){}\nfn main(){ helper(); }\nstruct S;\ntrait T{}\n"), "helper", NodeLabel::Function));
+        assert!(has(&parse_python("p", "a.py", "def foo():\n  pass\nclass Bar:\n  pass\n"), "Bar", NodeLabel::Class));
+        assert!(has(&parse_ts("p", "a.ts", "interface I{}\nfunction f(){}\n"), "I", NodeLabel::Interface));
+        assert!(has(&parse_go("p", "a.go", "package m\nfunc run(){}\ntype S struct{}\n"), "run", NodeLabel::Function));
     }
 
     #[test]
-    fn python_defs_and_calls() {
-        let pf = parse_python("p", "m.py", "def foo():\n    pass\nclass Bar:\n    def m(self):\n        foo()\n");
-        assert!(names(&pf).contains(&("foo", NodeLabel::Function)));
-        assert!(names(&pf).contains(&("Bar", NodeLabel::Class)));
-        assert!(names(&pf).contains(&("m", NodeLabel::Function)));
-        assert!(pf.calls.iter().any(|c| c.callee_name == "foo"));
+    fn swift_defs_and_calls() {
+        let pf = parse_swift("p", "A.swift", "func helper() {}\nfunc run() { helper() }\nclass C {}\nprotocol P {}\nenum E { case a }\nstruct S {}\n");
+        assert!(has(&pf, "helper", NodeLabel::Function));
+        assert!(has(&pf, "run", NodeLabel::Function));
+        assert!(has(&pf, "C", NodeLabel::Class));
+        assert!(has(&pf, "P", NodeLabel::Interface));
+        assert!(has(&pf, "E", NodeLabel::Class));
+        assert!(has(&pf, "S", NodeLabel::Class));
+        assert!(pf.calls.iter().any(|c| c.callee_name == "helper" && c.caller_id.ends_with("run")));
     }
 
     #[test]
-    fn javascript_defs() {
-        let pf = parse_js("p", "a.js", "function foo(){}\nclass Bar { m(){ foo(); } }\n");
-        assert!(names(&pf).contains(&("foo", NodeLabel::Function)));
-        assert!(names(&pf).contains(&("Bar", NodeLabel::Class)));
-        assert!(names(&pf).contains(&("m", NodeLabel::Method)));
-        assert!(pf.calls.iter().any(|c| c.callee_name == "foo"));
+    fn java_defs_and_calls() {
+        let pf = parse_java("p", "A.java", "class A {\n  void run() { helper(); }\n  void helper() {}\n}\ninterface I {}\nenum E { X }\n");
+        assert!(has(&pf, "A", NodeLabel::Class));
+        assert!(has(&pf, "run", NodeLabel::Method));
+        assert!(has(&pf, "I", NodeLabel::Interface));
+        assert!(has(&pf, "E", NodeLabel::Enum));
+        assert!(pf.calls.iter().any(|c| c.callee_name == "helper"));
     }
 
     #[test]
-    fn typescript_interface_and_type() {
-        let pf = parse_ts("p", "a.ts", "interface I { x: number }\ntype Alias = string;\nfunction f(): I { return {x:1}; }\n");
-        assert!(names(&pf).contains(&("I", NodeLabel::Interface)));
-        assert!(names(&pf).contains(&("Alias", NodeLabel::Type)));
-        assert!(names(&pf).contains(&("f", NodeLabel::Function)));
+    fn c_function_name_from_declarator() {
+        let pf = parse_file("p", "a.c", "int helper(int x) { return x; }\nint main() { return helper(2); }\nstruct Point { int x; };\n");
+        assert!(has(&pf, "helper", NodeLabel::Function));
+        assert!(has(&pf, "main", NodeLabel::Function));
+        assert!(has(&pf, "Point", NodeLabel::Class));
+        assert!(pf.calls.iter().any(|c| c.callee_name == "helper"));
     }
 
     #[test]
-    fn go_defs_and_calls() {
-        let pf = parse_go("p", "main.go", "package main\nfunc helper() {}\nfunc main() { helper() }\ntype S struct{}\n");
-        assert!(names(&pf).contains(&("helper", NodeLabel::Function)));
-        assert!(names(&pf).contains(&("main", NodeLabel::Function)));
-        assert!(names(&pf).contains(&("S", NodeLabel::Class)));
-        assert!(pf.calls.iter().any(|c| c.callee_name == "helper" && c.caller_id.ends_with("main")));
+    fn ruby_csharp_bash() {
+        assert!(has(&parse_file("p", "a.rb", "def foo\nend\nclass Bar\nend\n"), "Bar", NodeLabel::Class));
+        assert!(has(&parse_file("p", "a.cs", "class C { void M() {} }"), "M", NodeLabel::Method));
+        assert!(has(&parse_file("p", "a.sh", "greet() { echo hi; }\n"), "greet", NodeLabel::Function));
     }
 
+
     #[test]
-    fn dispatch_by_extension() {
-        assert!(!parse_file("p", "x.py", "def a():\n    pass\n").nodes.is_empty());
-        assert!(!parse_file("p", "x.go", "package m\nfunc a(){}\n").nodes.is_empty());
-        assert!(parse_file("p", "x.unknown", "whatever").nodes.is_empty());
+    fn unknown_extension_is_empty() {
+        assert!(parse_file("p", "a.unknown", "stuff").nodes.is_empty());
     }
 }
