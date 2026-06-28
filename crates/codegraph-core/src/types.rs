@@ -115,6 +115,21 @@ fn normalize(s: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
+/// A class/type → supertype reference captured by the parser, resolved into an
+/// INHERITS (extends) or IMPLEMENTS edge by the graph builder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InheritKind {
+    Extends,
+    Implements,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawInherit {
+    pub impl_name: String,
+    pub super_name: String,
+    pub kind: InheritKind,
+}
+
 /// An unresolved call reference captured by the parser: the enclosing caller's
 /// node id, the called name, and the line. The graph builder resolves
 /// `callee_name` to a node id (intra-language, intra-file) into a CALLS edge.

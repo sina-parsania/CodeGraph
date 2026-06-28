@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use codegraph_core::{Edge, Hyperedge, HyperedgeMember, Node, RawCall};
+use codegraph_core::{Edge, Hyperedge, HyperedgeMember, InheritKind, Node, RawCall, RawInherit};
 use rusqlite::{params, Connection, OptionalExtension};
 
 #[derive(Debug, thiserror::Error)]
@@ -91,6 +91,9 @@ impl Store {
              CREATE TABLE IF NOT EXISTS calls(
                caller_id TEXT, callee_name TEXT, line INTEGER, file_path TEXT);
              CREATE INDEX IF NOT EXISTS idx_calls_file ON calls(file_path);
+             CREATE TABLE IF NOT EXISTS inherits(
+               impl_name TEXT, super_name TEXT, kind TEXT, file_path TEXT);
+             CREATE INDEX IF NOT EXISTS idx_inherits_file ON inherits(file_path);
              CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
                id UNINDEXED, name, label, language);",
         )?;
@@ -373,6 +376,7 @@ impl Store {
     pub fn delete_file_data(&self, file_path: &str) -> Result<()> {
         self.conn.execute("DELETE FROM nodes WHERE file_path = ?1", [file_path])?;
         self.conn.execute("DELETE FROM calls WHERE file_path = ?1", [file_path])?;
+        self.conn.execute("DELETE FROM inherits WHERE file_path = ?1", [file_path])?;
         Ok(())
     }
 
@@ -390,6 +394,48 @@ impl Store {
     pub fn clear_edges(&self) -> Result<()> {
         self.conn.execute("DELETE FROM edges", [])?;
         Ok(())
+    }
+
+    pub fn save_inherits(&self, file_path: &str, items: &[RawInherit]) -> Result<()> {
+        self.conn.execute("DELETE FROM inherits WHERE file_path = ?1", [file_path])?;
+        for it in items {
+            let kind = match it.kind { InheritKind::Extends => "Extends", InheritKind::Implements => "Implements" };
+            self.conn.execute(
+                "INSERT INTO inherits(impl_name, super_name, kind, file_path) VALUES(?1, ?2, ?3, ?4)",
+                params![it.impl_name, it.super_name, kind, file_path],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn all_inherits(&self) -> Result<Vec<RawInherit>> {
+        let mut stmt = self.conn.prepare("SELECT impl_name, super_name, kind FROM inherits")?;
+        let rows = stmt.query_map([], |r| {
+            let kind = if r.get::<_, String>(2)? == "Implements" { InheritKind::Implements } else { InheritKind::Extends };
+            Ok(RawInherit { impl_name: r.get(0)?, super_name: r.get(1)?, kind })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn clear_hyperedges(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM hyperedges", [])?;
+        self.conn.execute("DELETE FROM hyperedge_members", [])?;
+        Ok(())
+    }
+
+    pub fn implementers_of(&self, name: &str) -> Result<Vec<Node>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT s.data FROM edges e \
+             JOIN nodes t ON t.id = e.dst \
+             JOIN nodes s ON s.id = e.src \
+             WHERE e.relation IN ('Implements', 'Inherits') AND t.name = ?1",
+        )?;
+        let rows = stmt.query_map([name], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(serde_json::from_str(&r?)?);
+        }
+        Ok(out)
     }
 
     pub fn node_count(&self) -> Result<i64> {

@@ -63,6 +63,7 @@ pub fn index_dir(root: &Path, db: &Path, full: bool) -> Result<IndexStats> {
             store.upsert_node(n)?;
         }
         store.save_calls(&rel, &pf.calls)?;
+        store.save_inherits(&rel, &pf.inherits)?;
         store.save_manifest(&rel, &sha, 0)?;
         changed += 1;
     }
@@ -81,10 +82,15 @@ pub fn index_dir(root: &Path, db: &Path, full: bool) -> Result<IndexStats> {
     // cross-file CALLS correct after a partial update).
     let nodes = store.all_nodes()?;
     let calls = store.all_calls()?;
-    let built = build(&nodes, &calls);
+    let inherits = store.all_inherits()?;
+    let built = build(&nodes, &calls, &inherits);
     store.clear_edges()?;
     for e in &built.edges {
         store.upsert_edge(e)?;
+    }
+    store.clear_hyperedges()?;
+    for (h, members) in &built.hyperedges {
+        store.upsert_hyperedge(h, members)?;
     }
 
     // Community + centrality over the full graph, persisted onto each node.

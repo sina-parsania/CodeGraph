@@ -2,17 +2,18 @@
 //! per-language `LangSpec` (label map, call-node kinds, callee fields, name
 //! extraction mode). Adding a language = one grammar dep + one `LangSpec`.
 
-use codegraph_core::{Metadata, Node, NodeLabel, QualifiedName, RawCall};
+use codegraph_core::{InheritKind, Metadata, Node, NodeLabel, QualifiedName, RawCall, RawInherit};
 use tree_sitter::{Language, Node as TsNode, Parser};
 
 pub struct ParsedFile {
     pub nodes: Vec<Node>,
     pub calls: Vec<RawCall>,
+    pub inherits: Vec<RawInherit>,
 }
 
 impl ParsedFile {
     fn empty() -> Self {
-        ParsedFile { nodes: Vec::new(), calls: Vec::new() }
+        ParsedFile { nodes: Vec::new(), calls: Vec::new(), inherits: Vec::new() }
     }
 }
 
@@ -22,6 +23,8 @@ enum NameMode {
     CDeclarator,
 }
 
+type InheritFn = fn(TsNode, &[u8]) -> Vec<RawInherit>;
+
 struct LangSpec {
     name: &'static str,
     language: fn() -> Language,
@@ -29,6 +32,7 @@ struct LangSpec {
     call_kinds: &'static [&'static str],
     callee_fields: &'static [&'static str],
     name_mode: NameMode,
+    inherit_fn: Option<InheritFn>,
 }
 
 pub fn parse_file(project: &str, rel_path: &str, source: &str) -> ParsedFile {
@@ -69,19 +73,19 @@ pub fn parse_go(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&GO, p, r,
 pub fn parse_swift(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&SWIFT, p, r, s) }
 pub fn parse_java(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&JAVA, p, r, s) }
 
-static RUST: LangSpec = LangSpec { name: "rust", language: || tree_sitter_rust::LANGUAGE.into(), label_for: rust_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field };
-static PYTHON: LangSpec = LangSpec { name: "python", language: || tree_sitter_python::LANGUAGE.into(), label_for: python_label, call_kinds: &["call"], callee_fields: &["function"], name_mode: NameMode::Field };
-static JS: LangSpec = LangSpec { name: "javascript", language: || tree_sitter_javascript::LANGUAGE.into(), label_for: js_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field };
-static TS: LangSpec = LangSpec { name: "typescript", language: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), label_for: ts_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field };
-static TSX: LangSpec = LangSpec { name: "typescript", language: || tree_sitter_typescript::LANGUAGE_TSX.into(), label_for: ts_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field };
-static GO: LangSpec = LangSpec { name: "go", language: || tree_sitter_go::LANGUAGE.into(), label_for: go_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field };
-static SWIFT: LangSpec = LangSpec { name: "swift", language: || tree_sitter_swift::LANGUAGE.into(), label_for: swift_label, call_kinds: &["call_expression"], callee_fields: &[], name_mode: NameMode::Field };
-static JAVA: LangSpec = LangSpec { name: "java", language: || tree_sitter_java::LANGUAGE.into(), label_for: java_label, call_kinds: &["method_invocation"], callee_fields: &["name"], name_mode: NameMode::Field };
-static C: LangSpec = LangSpec { name: "c", language: || tree_sitter_c::LANGUAGE.into(), label_for: c_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::CDeclarator };
-static CPP: LangSpec = LangSpec { name: "cpp", language: || tree_sitter_cpp::LANGUAGE.into(), label_for: cpp_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::CDeclarator };
-static RUBY: LangSpec = LangSpec { name: "ruby", language: || tree_sitter_ruby::LANGUAGE.into(), label_for: ruby_label, call_kinds: &["call"], callee_fields: &["method"], name_mode: NameMode::Field };
-static CSHARP: LangSpec = LangSpec { name: "csharp", language: || tree_sitter_c_sharp::LANGUAGE.into(), label_for: csharp_label, call_kinds: &["invocation_expression"], callee_fields: &["function"], name_mode: NameMode::Field };
-static BASH: LangSpec = LangSpec { name: "bash", language: || tree_sitter_bash::LANGUAGE.into(), label_for: bash_label, call_kinds: &[], callee_fields: &[], name_mode: NameMode::Field };
+static RUST: LangSpec = LangSpec { name: "rust", language: || tree_sitter_rust::LANGUAGE.into(), label_for: rust_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: Some(rust_inherits) };
+static PYTHON: LangSpec = LangSpec { name: "python", language: || tree_sitter_python::LANGUAGE.into(), label_for: python_label, call_kinds: &["call"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: Some(py_inherits) };
+static JS: LangSpec = LangSpec { name: "javascript", language: || tree_sitter_javascript::LANGUAGE.into(), label_for: js_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: None };
+static TS: LangSpec = LangSpec { name: "typescript", language: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), label_for: ts_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: Some(ts_inherits) };
+static TSX: LangSpec = LangSpec { name: "typescript", language: || tree_sitter_typescript::LANGUAGE_TSX.into(), label_for: ts_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: Some(ts_inherits) };
+static GO: LangSpec = LangSpec { name: "go", language: || tree_sitter_go::LANGUAGE.into(), label_for: go_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: None };
+static SWIFT: LangSpec = LangSpec { name: "swift", language: || tree_sitter_swift::LANGUAGE.into(), label_for: swift_label, call_kinds: &["call_expression"], callee_fields: &[], name_mode: NameMode::Field, inherit_fn: None };
+static JAVA: LangSpec = LangSpec { name: "java", language: || tree_sitter_java::LANGUAGE.into(), label_for: java_label, call_kinds: &["method_invocation"], callee_fields: &["name"], name_mode: NameMode::Field, inherit_fn: Some(java_inherits) };
+static C: LangSpec = LangSpec { name: "c", language: || tree_sitter_c::LANGUAGE.into(), label_for: c_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::CDeclarator, inherit_fn: None };
+static CPP: LangSpec = LangSpec { name: "cpp", language: || tree_sitter_cpp::LANGUAGE.into(), label_for: cpp_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::CDeclarator, inherit_fn: None };
+static RUBY: LangSpec = LangSpec { name: "ruby", language: || tree_sitter_ruby::LANGUAGE.into(), label_for: ruby_label, call_kinds: &["call"], callee_fields: &["method"], name_mode: NameMode::Field, inherit_fn: None };
+static CSHARP: LangSpec = LangSpec { name: "csharp", language: || tree_sitter_c_sharp::LANGUAGE.into(), label_for: csharp_label, call_kinds: &["invocation_expression"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: None };
+static BASH: LangSpec = LangSpec { name: "bash", language: || tree_sitter_bash::LANGUAGE.into(), label_for: bash_label, call_kinds: &[], callee_fields: &[], name_mode: NameMode::Field, inherit_fn: None };
 
 fn rust_label(k: &str) -> Option<NodeLabel> {
     match k { "function_item" => Some(NodeLabel::Function), "struct_item" | "union_item" => Some(NodeLabel::Class), "enum_item" => Some(NodeLabel::Enum), "trait_item" => Some(NodeLabel::Interface), "type_item" => Some(NodeLabel::Type), "mod_item" => Some(NodeLabel::Module), _ => None }
@@ -121,6 +125,106 @@ fn bash_label(k: &str) -> Option<NodeLabel> {
     match k { "function_definition" => Some(NodeLabel::Function), _ => None }
 }
 
+fn rust_inherits(node: TsNode, src: &[u8]) -> Vec<RawInherit> {
+    if node.kind() != "impl_item" {
+        return Vec::new();
+    }
+    let Some(typ) = node.child_by_field_name("type").and_then(|t| trailing_ident(t, src)) else {
+        return Vec::new();
+    };
+    if let Some(tr) = node.child_by_field_name("trait").and_then(|t| trailing_ident(t, src)) {
+        return vec![RawInherit { impl_name: typ, super_name: tr, kind: InheritKind::Implements }];
+    }
+    Vec::new()
+}
+
+fn py_inherits(node: TsNode, src: &[u8]) -> Vec<RawInherit> {
+    if node.kind() != "class_definition" {
+        return Vec::new();
+    }
+    let Some(cls) = field_text(node, "name", src) else { return Vec::new() };
+    let Some(args) = node.child_by_field_name("superclasses") else { return Vec::new() };
+    let mut out = Vec::new();
+    let mut c = args.walk();
+    for ch in args.named_children(&mut c) {
+        if let Some(sup) = trailing_ident(ch, src) {
+            out.push(RawInherit { impl_name: cls.clone(), super_name: sup, kind: InheritKind::Extends });
+        }
+    }
+    out
+}
+
+fn ts_inherits(node: TsNode, src: &[u8]) -> Vec<RawInherit> {
+    if node.kind() != "class_declaration" {
+        return Vec::new();
+    }
+    let Some(cls) = field_text(node, "name", src) else { return Vec::new() };
+    let mut out = Vec::new();
+    let mut c = node.walk();
+    for ch in node.children(&mut c) {
+        if ch.kind() != "class_heritage" {
+            continue;
+        }
+        let mut h = ch.walk();
+        for clause in ch.children(&mut h) {
+            let kind = match clause.kind() {
+                "extends_clause" => InheritKind::Extends,
+                "implements_clause" => InheritKind::Implements,
+                _ => continue,
+            };
+            for sup in type_idents(clause, src) {
+                out.push(RawInherit { impl_name: cls.clone(), super_name: sup, kind });
+            }
+        }
+    }
+    out
+}
+
+fn java_inherits(node: TsNode, src: &[u8]) -> Vec<RawInherit> {
+    let Some(cls) = field_text(node, "name", src) else { return Vec::new() };
+    let mut out = Vec::new();
+    match node.kind() {
+        "class_declaration" => {
+            if let Some(sc) = node.child_by_field_name("superclass") {
+                for s in type_idents(sc, src) {
+                    out.push(RawInherit { impl_name: cls.clone(), super_name: s, kind: InheritKind::Extends });
+                }
+            }
+            if let Some(ifs) = node.child_by_field_name("interfaces") {
+                for s in type_idents(ifs, src) {
+                    out.push(RawInherit { impl_name: cls.clone(), super_name: s, kind: InheritKind::Implements });
+                }
+            }
+        }
+        "interface_declaration" => {
+            if let Some(ifs) = node.child_by_field_name("interfaces") {
+                for s in type_idents(ifs, src) {
+                    out.push(RawInherit { impl_name: cls.clone(), super_name: s, kind: InheritKind::Extends });
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+fn type_idents(node: TsNode, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if matches!(n.kind(), "type_identifier" | "identifier") {
+            if let Ok(s) = std::str::from_utf8(&src[n.byte_range()]) {
+                out.push(s.to_string());
+            }
+        }
+        let mut c = n.walk();
+        for ch in n.children(&mut c) {
+            stack.push(ch);
+        }
+    }
+    out
+}
+
 fn parse_with(spec: &LangSpec, project: &str, rel_path: &str, source: &str) -> ParsedFile {
     let mut parser = Parser::new();
     if parser.set_language(&(spec.language)()).is_err() {
@@ -151,9 +255,10 @@ fn parse_with(spec: &LangSpec, project: &str, rel_path: &str, source: &str) -> P
         betweenness: 0.0,
     }];
     let mut calls = Vec::new();
+    let mut inherits = Vec::new();
     let ctx = Ctx { spec, project, segs: &file_segs, rel_path, file_id: &file_id };
-    collect(tree.root_node(), bytes, &ctx, None, &mut nodes, &mut calls);
-    ParsedFile { nodes, calls }
+    collect(tree.root_node(), bytes, &ctx, None, &mut nodes, &mut calls, &mut inherits);
+    ParsedFile { nodes, calls, inherits }
 }
 
 struct Ctx<'a> {
@@ -164,7 +269,7 @@ struct Ctx<'a> {
     file_id: &'a str,
 }
 
-fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, nodes: &mut Vec<Node>, calls: &mut Vec<RawCall>) {
+fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, nodes: &mut Vec<Node>, calls: &mut Vec<RawCall>, inherits: &mut Vec<RawInherit>) {
     let mut my_fn_id: Option<String> = None;
 
     if let Some(label) = (ctx.spec.label_for)(node.kind()) {
@@ -201,10 +306,14 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, nodes:
         }
     }
 
+    if let Some(inf) = ctx.spec.inherit_fn {
+        inherits.extend(inf(node, src));
+    }
+
     let next_fn = my_fn_id.as_deref().or(current_fn);
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect(child, src, ctx, next_fn, nodes, calls);
+        collect(child, src, ctx, next_fn, nodes, calls, inherits);
     }
 }
 
@@ -322,6 +431,20 @@ mod tests {
         assert!(has(&parse_file("p", "a.sh", "greet() { echo hi; }\n"), "greet", NodeLabel::Function));
     }
 
+
+    #[test]
+    fn inheritance_extraction() {
+        let py = parse_python("p", "a.py", "class Animal:\n    pass\nclass Dog(Animal):\n    pass\n");
+        assert!(py.inherits.iter().any(|i| i.impl_name == "Dog" && i.super_name == "Animal" && i.kind == InheritKind::Extends));
+        let ts = parse_ts("p", "a.ts", "interface Service {}\nclass Impl implements Service {}\nclass Base {}\nclass Sub extends Base {}\n");
+        assert!(ts.inherits.iter().any(|i| i.impl_name == "Impl" && i.super_name == "Service" && i.kind == InheritKind::Implements));
+        assert!(ts.inherits.iter().any(|i| i.impl_name == "Sub" && i.super_name == "Base" && i.kind == InheritKind::Extends));
+        let java = parse_java("p", "A.java", "interface I {}\nclass A implements I {}\nclass B extends A {}\n");
+        assert!(java.inherits.iter().any(|i| i.impl_name == "A" && i.super_name == "I" && i.kind == InheritKind::Implements));
+        assert!(java.inherits.iter().any(|i| i.impl_name == "B" && i.super_name == "A" && i.kind == InheritKind::Extends));
+        let rust = parse_rust("p", "a.rs", "struct Foo;\ntrait Show {}\nimpl Show for Foo {}\n");
+        assert!(rust.inherits.iter().any(|i| i.impl_name == "Foo" && i.super_name == "Show" && i.kind == InheritKind::Implements));
+    }
 
     #[test]
     fn unknown_extension_is_empty() {

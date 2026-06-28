@@ -55,6 +55,8 @@ enum Command {
     },
     /// Most central symbols by PageRank.
     Important { #[arg(long, default_value = ".")] path: PathBuf, #[arg(long, default_value_t = 15)] limit: usize },
+    /// Find types that implement or extend a given interface/class.
+    Implementers { name: String, #[arg(long, default_value = ".")] path: PathBuf },
     /// Find functions that call a given function name (reverse CALLS edges).
     Callers {
         name: String,
@@ -133,6 +135,16 @@ fn main() -> anyhow::Result<()> {
                 println!("no matches for {:?}", term);
             }
             for n in hits {
+                println!("{:<24} {:?}  {}:{}", n.name, n.label, n.file_path, n.line_start);
+            }
+        }
+        Command::Implementers { name, path } => {
+            let store = codegraph_store::Store::open(&index::db_path(&path))?;
+            let impls = store.implementers_of(&name)?;
+            if impls.is_empty() {
+                println!("no implementers/subtypes of {:?}", name);
+            }
+            for n in impls {
                 println!("{:<24} {:?}  {}:{}", n.name, n.label, n.file_path, n.line_start);
             }
         }

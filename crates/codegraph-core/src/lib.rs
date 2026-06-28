@@ -7,8 +7,8 @@ mod types;
 pub use config::{Config, ConfigError, LlmConfig, MediaGate};
 pub use llm::{LlmClient, VisionLlmClient};
 pub use types::{
-    Confidence, Edge, EdgeRelation, Hyperedge, HyperedgeMember, HyperedgeRelation, Metadata, Node,
-    NodeLabel, QualifiedName, RawCall, ResolutionTier,
+    Confidence, Edge, EdgeRelation, Hyperedge, HyperedgeMember, HyperedgeRelation, InheritKind, Metadata, Node,
+    NodeLabel, QualifiedName, RawCall, RawInherit, ResolutionTier,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -4,7 +4,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use codegraph_core::{Confidence, Edge, EdgeRelation, Metadata, Node, NodeLabel, RawCall, ResolutionTier};
+use codegraph_core::{
+    Confidence, Edge, EdgeRelation, Hyperedge, HyperedgeMember, HyperedgeRelation, InheritKind, Metadata,
+    Node, NodeLabel, RawCall, RawInherit, ResolutionTier,
+};
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 
 /// Directed graph of node-id → node-id, edge weight = relation name.
@@ -13,13 +16,14 @@ pub type CodeGraph = StableGraph<String, String>;
 pub struct Built {
     pub graph: CodeGraph,
     pub edges: Vec<Edge>,
+    pub hyperedges: Vec<(Hyperedge, Vec<HyperedgeMember>)>,
 }
 
 /// Build the edge set + petgraph from parsed nodes and unresolved calls.
 /// - Pass 1 (structural): each File DEFINES every definition in the same file.
 /// - Pass 2 (calls): resolve each `RawCall` to a Function in the caller's file
 ///   by name (intra-language, intra-file) → CALLS edge tagged Tier B.
-pub fn build(nodes: &[Node], calls: &[RawCall]) -> Built {
+pub fn build(nodes: &[Node], calls: &[RawCall], inherits: &[RawInherit]) -> Built {
     let by_id: HashMap<&str, &Node> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let file_by_path: HashMap<&str, &str> = nodes
         .iter()
@@ -79,6 +83,68 @@ pub fn build(nodes: &[Node], calls: &[RawCall]) -> Built {
         }
     }
 
+    // Inheritance edges (resolved by unique project-wide name) + IMPLEMENTS hyperedges.
+    let mut node_by_name: HashMap<&str, Vec<&str>> = HashMap::new();
+    for n in nodes.iter().filter(|n| n.label != NodeLabel::File) {
+        node_by_name.entry(n.name.as_str()).or_default().push(n.id.as_str());
+    }
+    let mut implementers: HashMap<&str, Vec<String>> = HashMap::new();
+    for inh in inherits {
+        let imp_id = match node_by_name.get(inh.impl_name.as_str()) {
+            Some(v) if v.len() == 1 => v[0],
+            _ => continue,
+        };
+        let sup_id = match node_by_name.get(inh.super_name.as_str()) {
+            Some(v) if v.len() == 1 => v[0],
+            _ => continue,
+        };
+        if imp_id == sup_id {
+            continue;
+        }
+        let relation = match inh.kind {
+            InheritKind::Extends => EdgeRelation::Inherits,
+            InheritKind::Implements => EdgeRelation::Implements,
+        };
+        push_edge(&mut edges, &mut seen, Edge {
+            src: imp_id.to_string(),
+            dst: sup_id.to_string(),
+            relation,
+            tier: ResolutionTier::TreeSitter,
+            confidence: Confidence::Extracted,
+            src_file: by_id.get(imp_id).map(|n| n.file_path.clone()).unwrap_or_default(),
+            src_line: by_id.get(imp_id).map(|n| n.line_start).unwrap_or(1),
+            metadata: Metadata::new(),
+        });
+        if inh.kind == InheritKind::Implements {
+            implementers.entry(sup_id).or_default().push(imp_id.to_string());
+        }
+    }
+    let mut hyperedges: Vec<(Hyperedge, Vec<HyperedgeMember>)> = Vec::new();
+    let mut sup_ids: Vec<&str> = implementers.keys().copied().collect();
+    sup_ids.sort();
+    for sup_id in sup_ids {
+        let impls = &implementers[sup_id];
+        if impls.len() < 2 {
+            continue;
+        }
+        let hid = format!("implements::{}", sup_id);
+        let sup_name = by_id.get(sup_id).map(|n| n.name.as_str()).unwrap_or("");
+        let h = Hyperedge {
+            id: hid.clone(),
+            relation: HyperedgeRelation::Implement,
+            label: format!("implementers of {}", sup_name),
+            confidence: Confidence::Extracted,
+            tier: ResolutionTier::TreeSitter,
+            metadata: Metadata::new(),
+        };
+        let mut members: Vec<HyperedgeMember> = impls
+            .iter()
+            .map(|id| HyperedgeMember { hyperedge_id: hid.clone(), node_id: id.clone(), role: Some("implementer".to_string()) })
+            .collect();
+        members.push(HyperedgeMember { hyperedge_id: hid.clone(), node_id: sup_id.to_string(), role: Some("interface".to_string()) });
+        hyperedges.push((h, members));
+    }
+
     let mut graph = CodeGraph::new();
     let mut idx: HashMap<&str, NodeIndex> = HashMap::new();
     for n in nodes {
@@ -90,7 +156,7 @@ pub fn build(nodes: &[Node], calls: &[RawCall]) -> Built {
         }
     }
 
-    Built { graph, edges }
+    Built { graph, edges, hyperedges }
 }
 
 fn push_edge(
@@ -112,7 +178,7 @@ mod tests {
     #[test]
     fn structural_and_call_edges() {
         let pf = codegraph_parse::parse_rust("proj", "src/main.rs", "fn helper() {}\nfn main() { helper(); helper(); }\n");
-        let built = build(&pf.nodes, &pf.calls);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits);
 
         let calls: Vec<_> = built.edges.iter().filter(|e| e.relation == EdgeRelation::Calls).collect();
         assert_eq!(calls.len(), 1, "duplicate calls should dedupe to one edge");
@@ -122,9 +188,22 @@ mod tests {
     }
 
     #[test]
+    fn implements_hyperedge_materializes() {
+        let pf = codegraph_parse::parse_ts(
+            "p", "a.ts",
+            "interface Repo {}\nclass SqlRepo implements Repo {}\nclass MemRepo implements Repo {}\n",
+        );
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits);
+        assert!(built.edges.iter().any(|e| e.relation == EdgeRelation::Implements));
+        let he = built.hyperedges.iter().find(|(h, _)| h.label.contains("Repo")).expect("hyperedge");
+        // 2 implementers + the interface = 3 members
+        assert_eq!(he.1.len(), 3);
+    }
+
+    #[test]
     fn end_to_end_persist_and_query() {
         let pf = codegraph_parse::parse_rust("proj", "src/main.rs", "fn helper() {}\nfn main() { helper(); }\n");
-        let built = build(&pf.nodes, &pf.calls);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits);
         let store = Store::open_in_memory().unwrap();
         for n in &pf.nodes {
             store.upsert_node(n).unwrap();
@@ -144,7 +223,7 @@ mod tests {
         let other = codegraph_parse::parse_rust("proj", "b.rs", "fn ghost() {}\n");
         pf.nodes.extend(other.nodes);
         pf.calls.extend(other.calls);
-        let built = build(&pf.nodes, &pf.calls);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits);
         assert!(built.edges.iter().any(|e| e.relation == EdgeRelation::Calls
             && e.src.ends_with(".main") && e.dst.ends_with(".ghost")));
     }
@@ -158,7 +237,7 @@ mod tests {
         a.nodes.extend(b.nodes);
         a.nodes.extend(c.nodes);
         a.calls.extend(c.calls);
-        let built = build(&a.nodes, &a.calls);
+        let built = build(&a.nodes, &a.calls, &a.inherits);
         assert!(!built.edges.iter().any(|e| e.relation == EdgeRelation::Calls));
     }
 }
@@ -399,7 +478,7 @@ mod traversal_tests {
             "src/lib.rs",
             "fn a() { b(); }\nfn b() { c(); }\nfn c() {}\nfn lonely() {}\n",
         );
-        let built = build(&pf.nodes, &pf.calls);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits);
         (pf.nodes, built.edges)
     }
 
