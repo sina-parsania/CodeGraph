@@ -27,8 +27,10 @@ pub fn build(nodes: &[Node], calls: &[RawCall]) -> Built {
         .map(|n| (n.file_path.as_str(), n.id.as_str()))
         .collect();
     let mut fn_by_file_name: HashMap<(&str, &str), &str> = HashMap::new();
-    for n in nodes.iter().filter(|n| n.label == NodeLabel::Function) {
+    let mut fn_by_name: HashMap<&str, Vec<&str>> = HashMap::new();
+    for n in nodes.iter().filter(|n| matches!(n.label, NodeLabel::Function | NodeLabel::Method)) {
         fn_by_file_name.insert((n.file_path.as_str(), n.name.as_str()), n.id.as_str());
+        fn_by_name.entry(n.name.as_str()).or_default().push(n.id.as_str());
     }
 
     let mut edges: Vec<Edge> = Vec::new();
@@ -51,7 +53,19 @@ pub fn build(nodes: &[Node], calls: &[RawCall]) -> Built {
 
     for c in calls {
         let Some(caller) = by_id.get(c.caller_id.as_str()) else { continue };
-        if let Some(&callee_id) = fn_by_file_name.get(&(caller.file_path.as_str(), c.callee_name.as_str())) {
+        // 1) same-file resolution wins; 2) else a project-wide UNIQUE name.
+        // Ambiguous names (defined in >1 place) are left unresolved - no phantom edge.
+        let resolved = fn_by_file_name
+            .get(&(caller.file_path.as_str(), c.callee_name.as_str()))
+            .copied()
+            .or_else(|| match fn_by_name.get(c.callee_name.as_str()) {
+                Some(cands) if cands.len() == 1 => Some(cands[0]),
+                _ => None,
+            });
+        if let Some(callee_id) = resolved {
+            if callee_id == c.caller_id {
+                continue;
+            }
             push_edge(&mut edges, &mut seen, Edge {
                 src: c.caller_id.clone(),
                 dst: callee_id.to_string(),
@@ -124,12 +138,27 @@ mod tests {
     }
 
     #[test]
-    fn no_cross_file_call_resolution() {
-        // a call whose name matches a function in a DIFFERENT file must NOT resolve
+    fn cross_file_unique_name_resolves() {
+        // unique callee name across files -> cross-file CALLS edge
         let mut pf = codegraph_parse::parse_rust("proj", "a.rs", "fn main() { ghost(); }\n");
         let other = codegraph_parse::parse_rust("proj", "b.rs", "fn ghost() {}\n");
         pf.nodes.extend(other.nodes);
+        pf.calls.extend(other.calls);
         let built = build(&pf.nodes, &pf.calls);
+        assert!(built.edges.iter().any(|e| e.relation == EdgeRelation::Calls
+            && e.src.ends_with(".main") && e.dst.ends_with(".ghost")));
+    }
+
+    #[test]
+    fn ambiguous_name_not_resolved_cross_file() {
+        // same name defined in two files -> a call from a THIRD file stays unresolved
+        let mut a = codegraph_parse::parse_rust("proj", "a.rs", "fn dup() {}\n");
+        let b = codegraph_parse::parse_rust("proj", "b.rs", "fn dup() {}\n");
+        let c = codegraph_parse::parse_rust("proj", "c.rs", "fn caller() { dup(); }\n");
+        a.nodes.extend(b.nodes);
+        a.nodes.extend(c.nodes);
+        a.calls.extend(c.calls);
+        let built = build(&a.nodes, &a.calls);
         assert!(!built.edges.iter().any(|e| e.relation == EdgeRelation::Calls));
     }
 }
