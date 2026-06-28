@@ -1,96 +1,78 @@
 # CodeGraph
 
-A single static binary that turns **any codebase** into a queryable code-knowledge graph for AI agents — over **MCP** (Claude Code, Cursor, …) and from a **standalone CLI**. Project-agnostic, local-only, no API key required. An optional local LLM (LM Studio / MLX / Ollama, or a cloud key) adds natural-language Q&A and semantic search — everything degrades gracefully with no model running.
+**Give your AI agent a map of your codebase — so it stops grepping and reading whole files to answer simple questions.** One static binary, one command to set up, zero config, no API key. Works as an **MCP server** (Claude Code, Cursor, …) and a standalone **CLI**.
 
-> **v1.3 — production-grade.** 13 languages, cross-file resolution, **compiler-grade SCIP import**, incremental indexing, Louvain communities + betweenness, inheritance/hyperedges, HTTP route extraction, full-text + semantic search, doc/image ingestion, an MCP server with 9 tools. Indexes real large repos fast — the 23k-symbol, 2,189-file iOS app in **1.3s**. 38 tests, zero clippy warnings.
+> **One command:** `codegraph init` — indexes your repo, wires the MCP into Claude Code, and nudges the agent to use it. That's it. Everything AI is optional; the core graph works fully offline.
 
-## Features
+---
 
-- **13 languages** — Rust, Python, JavaScript, TypeScript, Go, **Swift**, **Kotlin**, Java, C, C++, Ruby, C#, Bash. One grammar-driven parser.
-- **The graph** — `File / Function / Method / Class / Enum / Interface / Type / Module / Route / Document` nodes joined by `DEFINES`, `CALLS`, `INHERITS`, `IMPLEMENTS` edges, plus **IMPLEMENTS hyperedges**.
-- **Honest cross-file resolution** — calls resolve in-file first, then to a project-wide unique name; ambiguous names stay unlinked (no phantom edges, no cross-language calls).
-- **Compiler-grade SCIP import** — merge a `.scip` (scip-typescript, rust-analyzer, scip-java, scip-python, …) for **Tier-A precise edges** that resolve what heuristics can't — overloads, re-exports, ambiguous names. Auto-detected at the repo root; supersedes the tree-sitter edge for the same pair.
-- **Fast & incremental** — respects `.gitignore` + a custom `.codegraphignore`; prunes dependency/build dirs; sha-256 manifest skips unchanged files; parallel parsing; single-transaction prepared bulk writes; O(V+E) PageRank. Real-world projects index in <1.4s.
-- **Graph intelligence** — `trace`, `impact` (blast-radius), `callers` / `callees`, `implementers`, `important` (PageRank), `communities` (Louvain), `routes`.
-- **Search** — full-text (`search`, optional `--rerank`), **semantic** vector search (`semantic`, `--hyde`), and `ask` (NL answer over real source snippets).
-- **Any-input** — `index` auto-ingests prose docs + localization (md/rst/txt/`.strings`/po/xliff/…) as searchable **Document** nodes in the same pass as code. `ingest` additionally pulls PDFs, web pages, and any text/data file (json/jsonl/yaml/toml/csv/xml/html/log/sql/…), plus (with `--features media`) **images via OCR**. One graph holds code + docs + config + localization.
-- **MCP server** — `search, semantic_search, get_node, callers, callees, trace_path, blast_radius, important, stats` over stdio.
-- **Arbitrary analytics** — `query` runs read-only SQL over the graph (a universal alternative to a graph query language).
-- **Always fresh (no stale false positives)** — every query (CLI **and** MCP) runs a cheap stat-only staleness probe and **auto-reindexes before serving**, so edits, file add/delete, and `git checkout`/`switch` are reflected instantly — no manual reindex. The clean path is a stat-walk (tens of ms even on large repos); the MCP server debounces to once/sec. Opt out with `--no-autoheal`. [docs/STORAGE.md](docs/STORAGE.md) covers the design.
-- **Team-safe** — the build is **deterministic** (same commit → byte-identical graph, community ids included) and graphs live in a **per-user central cache** (`~/.cache/codegraph/`), never inside the repo, so a 20-dev project never commits or shares a graph and never serves stale/false-positive results. WAL snapshot reads + atomic single-transaction indexing. Storage rationale: [docs/STORAGE.md](docs/STORAGE.md).
+## ⚡ Why it matters: 332× fewer tokens per code question
 
-See **[docs/BENCHMARK.md](docs/BENCHMARK.md)** for a measured head-to-head vs qmd, graphify, codebase-memory, and codebase-index — feature parity matrix + perf + honest gaps.
+When an AI agent answers _"who calls this function?"_ without CodeGraph, it greps, gets ambiguous hits, then **reads whole files into its context** to disambiguate — burning thousands of tokens and many tool round-trips. With CodeGraph it gets one compact, resolved `file:line` answer.
 
-## Install
+Measured on **CodeGraph's own repo** (reproduce: `python3 scripts/benchmark.py`):
 
-Rust 1.89+:
+| Real navigation question        | grep + read files         | **CodeGraph**         |
+| ------------------------------- | ------------------------- | --------------------- |
+| Where is `index_dir` defined?   | 5,166 tok · 3 calls       | **18 tok · 1 call**   |
+| Who calls `ensure_fresh`?       | 14,081 tok · 5 calls      | **22 tok · 1 call**   |
+| What does `run_init` call?      | 3,957 tok · 3 calls       | **71 tok · 1 call**   |
+| Where is `OpenAiCompatBackend`? | 15,900 tok · 8 calls      | **16 tok · 1 call**   |
+| Who calls `db_path`?            | 19,547 tok · 7 calls      | **36 tok · 1 call**   |
+| Where is `Store` defined?       | 8,154 tok · 3 calls       | **39 tok · 1 call**   |
+| **Total**                       | **66,967 tok · 29 calls** | **202 tok · 6 calls** |
+
+→ **332× fewer context tokens, ~5× fewer tool round-trips** — so the agent is **faster and cheaper** on every code-navigation step. And that's only the questions grep _can_ answer; **impact/blast-radius, shortest-path trace, importance (PageRank), and communities** grep can't answer at all without reading half the tree.
+
+---
+
+## Quickstart
 
 ```bash
+# install
 git clone git@github.com:sina-parsania/FlowCrafter.git codegraph && cd codegraph
-./install.sh                                   # release build → ~/.local/bin + Claude Code MCP hint
-cargo install --path crates/codegraph-cli      # or via cargo
-cargo install --path crates/codegraph-cli --features media   # + image OCR (needs tesseract)
+cargo install --path crates/codegraph-cli         # one static binary, no native deps
+
+# set up any repo in one command
+cd ~/my-project && codegraph init                 # index + wire Claude Code MCP + agent nudge + .codegraph.toml
 ```
 
-Prebuilt binaries (macOS arm64/x64, Linux x64/arm64, Windows x64) are built by CI on every `v*` tag.
+Then just ask Claude Code to _"use codegraph to find …"_ — its tools are live. Or use the CLI directly. Prebuilt binaries (macOS arm64/x64, Linux x64/arm64, Windows x64) ship on every `v*` tag.
+
+## What you get
+
+- **Self-setup, zero config** — `codegraph init` does everything; re-runnable, `--yes` for CI, `--uninstall` to undo. No model, key, or daemon required.
+- **Always fresh, never wrong** — every query (CLI **and** MCP) runs a stat-only probe and **auto-reindexes before serving**, so edits, file add/delete, and `git checkout`/`switch` are reflected instantly. No stale results, no manual reindex.
+- **13 languages** — Rust, Python, JS, TS, Go, Swift, Kotlin, Java, C, C++, Ruby, C#, Bash. One grammar-driven parser.
+- **A real graph** — `Function/Method/Class/Enum/Interface/Type/Module/Route/Document` nodes joined by `DEFINES / CALLS / INHERITS / IMPLEMENTS` (+ IMPLEMENTS hyperedges). Honest cross-file resolution: ambiguous names stay unlinked (no phantom edges).
+- **Compiler-grade precision (optional)** — merge a `.scip` (scip-typescript / rust-analyzer / scip-java / …) for **Tier-A edges** that resolve overloads, re-exports, and ambiguous names tree-sitter can't.
+- **Graph intelligence grep can't do** — `impact` (blast-radius), `trace` (shortest path), `callers`/`callees`, `implementers`, `important` (PageRank), `communities` (Louvain), `routes`.
+- **Search** — full-text (`--rerank`), **semantic** vector (`--hyde`), and `ask` (NL answer over real snippets). All optional; degrade gracefully with no model.
+- **Any input** — `index` also ingests docs + localization (md/rst/txt/`.strings`/po/xliff/…); `ingest` adds PDFs, URLs, json/yaml/csv/log/…, and (with `--features media`) images via OCR. One graph = code + docs + config + localization.
+- **Arbitrary analytics** — `query` runs read-only SQL over the graph.
+- **Fast & lean** — respects `.gitignore` + `.codegraphignore`; parallel parsing; one SQLite file per project in a **central cache** (`~/.cache/codegraph/`) so repos stay pristine. Real-world repos index in **<1.4s**; the 23k-symbol Swift app in 1.3s. Deterministic builds + auto-TTL cleanup.
 
 ## Usage
 
 ```bash
-codegraph init                       # one-time setup: index + wire the Claude Code MCP + agent nudge + .codegraph.toml
-codegraph index .                    # incremental index → central cache  (--full to force)
-codegraph projects                   # list indexed projects + their cache sizes
-codegraph index . --scip index.scip  # + merge compiler-grade SCIP edges (Tier-A; auto-detected if present)
-codegraph search UserService --rerank
-codegraph semantic "retry with backoff" --hyde
-codegraph ask "how does auth work?"
-codegraph important --limit 15        # most central symbols (PageRank)
-codegraph communities                 # detected code clusters (Louvain)
-codegraph routes                      # detected HTTP routes (NestJS/Express/Flask/Spring)
-codegraph query "SELECT label, COUNT(*) FROM nodes GROUP BY label"   # arbitrary read-only SQL analytics
-codegraph impact processPayment       # blast-radius
-codegraph callers handleLogin   /   codegraph callees parseFile
-codegraph implementers Repository     # who implements/extends it
-codegraph trace router handler        # shortest dependency path
-codegraph ingest ./docs/guide.pdf     # ingest a PDF / URL / json / yaml / csv / log / image as Document nodes
-codegraph gc                          # reclaim graphs of projects idle past the TTL
-codegraph gc --all --dry-run          # preview reclaiming every indexed graph
-codegraph doctor      /   codegraph install   /   codegraph mcp
+codegraph init                        # one-time setup (index + MCP + nudge + config)
+codegraph search UserService          # find a symbol  (PREFER over grep)
+codegraph callers handleLogin         # who calls it (resolved, exact)
+codegraph callees parseFile           # what it calls
+codegraph impact processPayment       # blast-radius: what breaks if I change it
+codegraph trace router handler        # shortest dependency path between two symbols
+codegraph important                   # most central symbols (map an unfamiliar repo)
+codegraph communities  /  routes      # clusters; detected HTTP routes
+codegraph semantic "retry with backoff" --hyde     # search by meaning (needs an embed model)
+codegraph ask "how does auth work?"                # NL answer over real source
+codegraph query "SELECT label, COUNT(*) FROM nodes GROUP BY label"   # arbitrary SQL
+codegraph projects  /  gc             # list indexed projects; reclaim idle graphs
+codegraph doctor                      # what's available + how to enable AI features
 ```
 
-### Auto-reclaim (TTL)
+## Configuration (all optional)
 
-The graph is a rebuildable cache, stored in a **per-user central cache** (`~/.cache/codegraph/`,
-or `$XDG_CACHE_HOME`/`$CODEGRAPH_CACHE_DIR`) keyed by project path — **source repos stay pristine**.
-CodeGraph keeps a tiny registry of indexed projects (`~/.config/codegraph/registry.json`) and,
-opportunistically on each run (at most hourly), deletes the cached graph of any project **not used
-within the TTL** — so abandoned indexes don't pile up. "Used" = indexed **or** queried, so an active
-project is never reclaimed. Default **30 days**; set `CODEGRAPH_TTL_DAYS` (`0` disables). Force it
-with `codegraph gc`; inspect with `codegraph projects`.
-
-### Custom ignore file
-
-Beyond `.gitignore`, drop a **`.codegraphignore`** (same gitignore syntax) in a repo to exclude extra paths from indexing — e.g. `generated/`, `*.pb.go`, `fixtures/`.
-
-### Use from Claude Code
-
-`codegraph install` writes the MCP server into `~/.claude.json`, or add manually:
-
-```json
-{
-  "mcpServers": {
-    "codegraph": {
-      "command": "codegraph",
-      "args": ["mcp", "--path", "/path/to/repo"]
-    }
-  }
-}
-```
-
-## Configuration
-
-`codegraph init` writes a commented **`.codegraph.toml`** (walked up from the cwd); any
-**`CODEGRAPH_*`** env var overrides it. Everything here is optional — core works with no model.
+`codegraph init` writes a commented **`.codegraph.toml`** (walked up from cwd); any **`CODEGRAPH_*`** env var overrides it. Core works with **no model**.
 
 | Setting          | `.codegraph.toml`            | Env                                      | Default              |
 | ---------------- | ---------------------------- | ---------------------------------------- | -------------------- |
@@ -102,19 +84,24 @@ Beyond `.gitignore`, drop a **`.codegraphignore`** (same gitignore syntax) in a 
 | rerank / HyDE    | `llm.rerank` / `llm.hyde`    | `CODEGRAPH_RERANK` / `_HYDE`             | off                  |
 | media ingest     | `ingest.media`               | `CODEGRAPH_MEDIA`                        | off                  |
 
-`codegraph doctor` shows what's available (core / chat model / embedding model) and how to enable each.
+**Optional local LLM**, auto-detected (first reachable wins): LM Studio (`:1234`) → MLX (`:8080`) → Ollama (`:11434`) → OpenAI/Gemini (key). `codegraph doctor` shows what's ready and the exact command to enable semantic search.
 
-## Optional LLM (local-first, no key)
+## How it compares
 
-Auto-detected, first reachable wins: **LM Studio** (`:1234`, MLX) → **mlx-lm/mlx-vlm** (`:8080`) → **Ollama** (`:11434`) → **OpenAI/Gemini** (opt-in key). One `LlmClient` over a unified OpenAI-compatible backend; adding a provider is one config entry. Override with `CODEGRAPH_LLM_PROVIDER` / `_BASE_URL` / `_MODEL` / `CODEGRAPH_EMBED_MODEL`.
+|                                 | grep / ripgrep | LSP | a graph DB (Neo4j) | **CodeGraph** |
+| ------------------------------- | :------------: | :-: | :----------------: | :-----------: |
+| Agent-friendly (MCP)            |       ➖       | ❌  |         ➖         |      ✅       |
+| Resolved call graph             |       ❌       | ✅  |         ✅         |      ✅       |
+| Blast-radius / trace / PageRank |       ❌       | ➖  |         ✅         |      ✅       |
+| One static binary, no server    |       ✅       | ❌  |         ❌         |      ✅       |
+| Always fresh (auto-reindex)     |       ✅       | ✅  |         ❌         |      ✅       |
+| Tokens per agent question       |      huge      | n/a |       medium       |   **tiny**    |
+
+Full measured head-to-head vs qmd / graphify / codebase-memory / codebase-index: **[docs/BENCHMARK.md](docs/BENCHMARK.md)**. Storage + freshness design: **[docs/STORAGE.md](docs/STORAGE.md)**.
 
 ## Architecture
 
-Cargo workspace: `codegraph-core` · `codegraph-parse` (tree-sitter, 13 langs, routes) · `codegraph-graph` (cross-file resolution, Louvain, betweenness, PageRank, hyperedges) · `codegraph-resolve` (SCIP import → Tier-A edges) · `codegraph-store` (SQLite + FTS5 + vectors + zst) · `codegraph-llm` (provider registry) · `codegraph-ingest` (PDF/web/text/image) · `codegraph-mcp` · `codegraph-cli`.
-
-## Roadmap (gated; the core never depends on these)
-
-- **Audio/video media ingest** (whisper transcription, ffmpeg keyframes) — the `media` feature's next expansion; image OCR ships today.
+Cargo workspace: `codegraph-core` · `codegraph-parse` (tree-sitter, 13 langs) · `codegraph-graph` (resolution, Louvain, PageRank, betweenness, hyperedges) · `codegraph-resolve` (SCIP) · `codegraph-store` (SQLite + FTS5 + vectors) · `codegraph-llm` (provider registry) · `codegraph-ingest` · `codegraph-mcp` · `codegraph-cli`.
 
 ## License
 
