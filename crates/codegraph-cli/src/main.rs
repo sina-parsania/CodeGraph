@@ -132,6 +132,15 @@ enum Command {
     },
     /// Most central symbols by PageRank.
     Important { #[arg(long, default_value = ".")] path: PathBuf, #[arg(long, default_value_t = 15)] limit: usize },
+    /// Select the most relevant symbols for a query, ranked by personalized
+    /// PageRank over the RESOLVED graph, within a token budget (for LLM context).
+    Context {
+        query: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 1000)]
+        budget: usize,
+    },
     /// Find types that implement or extend a given interface/class.
     Implementers { name: String, #[arg(long, default_value = ".")] path: PathBuf },
     /// Find functions that call a given function name (reverse CALLS edges).
@@ -244,9 +253,8 @@ fn project_path(cmd: &Command) -> Option<PathBuf> {
         Index { path, .. } | Search { path, .. } | Trace { path, .. } | Impact { path, .. }
         | Callees { path, .. } | Routes { path, .. } | Query { path, .. } | Communities { path, .. }
         | Important { path, .. } | Implementers { path, .. } | Callers { path, .. } | Ask { path, .. }
-        | SemanticIndex { path, .. } | Semantic { path, .. } | Ingest { path, .. } | Mcp { path, .. } => {
-            Some(path.clone())
-        }
+        | SemanticIndex { path, .. } | Semantic { path, .. } | Ingest { path, .. } | Mcp { path, .. }
+        | Context { path, .. } => Some(path.clone()),
         Init { repo, .. } | Scip { path: repo } => Some(repo.clone()),
         Install { .. } | Status | Doctor | Gc { .. } | Projects | Config { .. } => None,
     }
@@ -259,7 +267,7 @@ fn needs_fresh(cmd: &Command) -> bool {
         cmd,
         Search { .. } | Callers { .. } | Callees { .. } | Impact { .. } | Trace { .. }
             | Important { .. } | Communities { .. } | Routes { .. } | Query { .. }
-            | Implementers { .. } | Ask { .. } | Semantic { .. }
+            | Implementers { .. } | Ask { .. } | Semantic { .. } | Context { .. }
     )
 }
 
@@ -491,6 +499,41 @@ fn main() -> anyhow::Result<()> {
                 let sample: Vec<&str> = names.into_iter().take(8).collect();
                 println!("community {:<3} ({} symbols): {}", c, members.len(), sample.join(", "));
             }
+        }
+        Command::Context { query, path, budget } => {
+            let db = index::db_path(&path);
+            let store = codegraph_store::Store::open(&db)?;
+            // Seed with the query's lexical hits (canonical OR-of-tokens FTS query),
+            // then rank the whole resolved graph by personalized PageRank restarted
+            // at those seeds.
+            let seeds: Vec<String> = store
+                .search_fts(&query::fts_query_from(&query), 12)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|n| n.id)
+                .collect();
+            let l = query::Loaded::open(&db)?;
+            let ranked = l.lg.personalized_pagerank_top(&seeds, 200);
+            // Emit the highest-ranked symbols (not File nodes) until the token
+            // budget is spent (≈ chars/4).
+            let mut used = 0usize;
+            let mut shown = 0usize;
+            println!("# context for {:?} (budget {} tok)", query, budget);
+            for (id, score) in ranked {
+                let label = l.nodes.iter().find(|n| n.id == id).map(|n| n.label);
+                if !matches!(label, Some(lbl) if lbl != codegraph_core::NodeLabel::File) {
+                    continue;
+                }
+                let line = l.fmt(&id);
+                let cost = line.len() / 4 + 1;
+                if used + cost > budget {
+                    break;
+                }
+                used += cost;
+                shown += 1;
+                println!("{:.4}  {}", score, line);
+            }
+            println!("# {} symbols, ~{} tokens", shown, used);
         }
         Command::Important { path, limit } => {
             let l = query::Loaded::open(&index::db_path(&path))?;

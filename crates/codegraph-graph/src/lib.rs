@@ -688,6 +688,75 @@ impl LoadedGraph {
     }
 
     /// Top-k most central nodes by PageRank (deterministic id tiebreaker).
+    /// Personalized PageRank restarted at `seed_ids` (semantic/search hits), ranked
+    /// over the RESOLVED call+inherit graph. The basis of `context`: it surfaces the
+    /// symbols structurally closest to what the query is about — using real resolved
+    /// edges, not aider's name-match. Deterministic (fixed iterations, no RNG).
+    pub fn personalized_pagerank_top(&self, seed_ids: &[String], k: usize) -> Vec<(String, f64)> {
+        let seeds: Vec<usize> = seed_ids.iter().filter_map(|id| self.idx.get(id).map(|ni| ni.index())).collect();
+        let ranks = self.personalized_page_rank(&seeds);
+        let mut scored: Vec<(String, f64)> = self
+            .ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.clone(), ranks.get(i).copied().unwrap_or(0.0)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+        scored.truncate(k);
+        scored
+    }
+
+    fn personalized_page_rank(&self, seeds: &[usize]) -> Vec<f64> {
+        let n = self.graph.node_count();
+        if n == 0 {
+            return Vec::new();
+        }
+        // Teleport vector: uniform over the seed set (uniform over all if no seeds).
+        let mut pvec = vec![0.0; n];
+        if seeds.is_empty() {
+            pvec.iter_mut().for_each(|x| *x = 1.0 / n as f64);
+        } else {
+            let w = 1.0 / seeds.len() as f64;
+            for &s in seeds {
+                if s < n {
+                    pvec[s] = w;
+                }
+            }
+        }
+        let mut out: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for &ni in self.idx.values() {
+            let i = ni.index();
+            for nb in self.graph.neighbors(ni) {
+                out[i].push(nb.index());
+            }
+        }
+        // Lower damping than global PageRank (0.85): for query-LOCAL context we
+        // want the teleport-to-seeds mass to dominate, so results cluster around
+        // what the query is about rather than drifting to globally-central infra.
+        let d = 0.6;
+        let mut rank = pvec.clone();
+        for _ in 0..50 {
+            let mut next: Vec<f64> = pvec.iter().map(|p| (1.0 - d) * p).collect();
+            let mut dangling = 0.0;
+            for (i, outs) in out.iter().enumerate() {
+                if outs.is_empty() {
+                    dangling += rank[i];
+                    continue;
+                }
+                let share = d * rank[i] / outs.len() as f64;
+                for &j in outs {
+                    next[j] += share;
+                }
+            }
+            // Dangling mass returns to the teleport vector → stays personalized.
+            for (j, p) in pvec.iter().enumerate() {
+                next[j] += d * dangling * p;
+            }
+            rank = next;
+        }
+        rank
+    }
+
     pub fn pagerank_top(&self, k: usize) -> Vec<(String, f64)> {
         let ranks = self.page_rank();
         let mut scored: Vec<(String, f64)> = self
@@ -950,6 +1019,30 @@ mod traversal_tests {
         let comms: std::collections::HashSet<u32> = a.values().map(|v| v.0).collect();
         assert!(comms.len() >= 2, "expected at least two communities");
         assert!(a["c"].2 > 0.0 || a["d"].2 > 0.0, "bridge node should have betweenness");
+    }
+
+    #[test]
+    fn personalized_pagerank_localizes_and_is_deterministic() {
+        let mk_n = |x: &str| Node {
+            id: x.into(), label: NodeLabel::Function, name: x.into(), file_path: "f".into(),
+            line_start: 1, line_end: 1, language: "rust".into(), metadata: Metadata::new(),
+            community: None, pagerank: 0.0, betweenness: 0.0,
+        };
+        let mk_e = |s: &str, d: &str| Edge {
+            src: s.into(), dst: d.into(), relation: EdgeRelation::Calls, tier: ResolutionTier::TreeSitter,
+            confidence: Confidence::Inferred, src_file: "f".into(), src_line: 1, metadata: Metadata::new(),
+        };
+        // two disconnected components: a->b->c and x->y->z
+        let nodes: Vec<Node> = ["a", "b", "c", "x", "y", "z"].iter().map(|s| mk_n(s)).collect();
+        let edges = vec![mk_e("a", "b"), mk_e("b", "c"), mk_e("x", "y"), mk_e("y", "z")];
+        let lg = LoadedGraph::load(&nodes, &edges);
+        let top = lg.personalized_pagerank_top(&["a".to_string()], 6);
+        let score = |id: &str| top.iter().find(|(i, _)| i == id).map(|(_, s)| *s).unwrap_or(0.0);
+        // seeding at `a` must rank its reachable component above the disconnected one
+        assert!(score("a") > score("x"), "seed outranks unrelated node");
+        assert!(score("b") > score("z"), "seed's reachable neighbor outranks unrelated node");
+        // determinism: identical seeds → bit-identical ranking
+        assert_eq!(top, lg.personalized_pagerank_top(&["a".to_string()], 6));
     }
 
     #[test]

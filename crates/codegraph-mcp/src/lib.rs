@@ -39,6 +39,15 @@ pub struct SearchArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ContextArgs {
+    /// Natural-language description of the task/area to assemble context for.
+    pub query: String,
+    /// Approximate token budget for the returned context (default 1000).
+    #[serde(default)]
+    pub budget: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct IdArgs {
     /// Fully-qualified node id (e.g. `proj.src.lib_rs.foo`).
     pub id: String,
@@ -207,6 +216,46 @@ impl CodeGraphServer {
         }))?]))
     }
 
+    #[tool(description = "Assemble the most relevant symbols for a task/query within a token budget, ranked by personalized PageRank over the RESOLVED call graph. PREFER for 'what code is relevant to X' — it returns symbols structurally related to the query INCLUDING their call-graph dependencies, not just name/text matches. Each result has name/file/line/label/score.")]
+    async fn context(&self, args: Parameters<ContextArgs>) -> Result<CallToolResult, McpError> {
+        let store = self.open()?;
+        let budget = args.0.budget.unwrap_or(1000);
+        let fts = args
+            .0
+            .query
+            .split_whitespace()
+            .map(|w| w.chars().filter(|c| c.is_alphanumeric()).collect::<String>())
+            .filter(|w| w.len() > 1)
+            .map(|w| format!("{w}*"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let fts = if fts.is_empty() { args.0.query.clone() } else { fts };
+        let seeds: Vec<String> =
+            store.search_fts(&fts, 12).unwrap_or_default().into_iter().map(|n| n.id).collect();
+        let (lg, nodes) = self.load_graph()?;
+        let ranked = lg.personalized_pagerank_top(&seeds, 200);
+        let mut used = 0usize;
+        let mut out = Vec::new();
+        for (id, score) in ranked {
+            let Some(n) = nodes.iter().find(|n| n.id == id) else { continue };
+            if n.label == codegraph_core::NodeLabel::File {
+                continue;
+            }
+            let cost = (n.name.len() + n.file_path.len()) / 4 + 4;
+            if used + cost > budget {
+                break;
+            }
+            used += cost;
+            out.push(serde_json::json!({
+                "name": n.name, "label": format!("{:?}", n.label),
+                "file": n.file_path, "line": n.line_start, "score": score,
+            }));
+        }
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "query": args.0.query, "context": out, "tokens": used,
+        }))?]))
+    }
+
     #[tool(description = "The most central/important symbols by PageRank: a fast way to map the core of an unfamiliar codebase.")]
     async fn important(&self, args: Parameters<LimitArgs>) -> Result<CallToolResult, McpError> {
         let (lg, _) = self.load_graph()?;
@@ -250,7 +299,7 @@ impl ServerHandler for CodeGraphServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
         info.instructions = Some(
-            "CodeGraph indexes this repository into a live code knowledge graph (auto-reindexed before each query). Its tools return exact file:line and resolved call edges, so they beat text search for code navigation: `search` to locate a symbol, `callers`/`callees` to trace call edges, `blast_radius` before a refactor, `trace_path` between two symbols, `important` to map an unfamiliar repo, `semantic_search` to find code by meaning, `get_node` for one symbol's details, `stats` for counts. \
+            "CodeGraph indexes this repository into a live code knowledge graph (auto-reindexed before each query). Its tools return exact file:line and resolved call edges, so they beat text search for code navigation: `search` to locate a symbol, `callers`/`callees` to trace call edges, `blast_radius` before a refactor, `trace_path` between two symbols, `important` to map an unfamiliar repo, `context` to assemble the symbols relevant to a task (personalized PageRank over the resolved graph, within a token budget — better than reading files), `semantic_search` to find code by meaning, `get_node` for one symbol's details, `stats` for counts. \
              IMPORTANT — coverage: `callers`/`callees`/`blast_radius` resolve calls precisely but NOT exhaustively (ambiguous or external calls are dropped, never guessed). Each result carries a `coverage` object with `resolved`/`dropped`/`may_be_incomplete`. When `may_be_incomplete` is true, treat the list as a precise LOWER BOUND, not the complete set — fall back to text search (grep the name) before concluding 'nothing else calls this'."
                 .to_string(),
         );
