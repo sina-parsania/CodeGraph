@@ -324,10 +324,12 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
         }
     }
 
-    // At a TS class, capture its typed fields for T3 (this.field.method()) resolution.
+    // At a class, capture its typed fields for T3 (this.field.method()) resolution.
     if let Some(cls_id) = my_class_id.as_deref() {
-        if ctx.spec.name == "typescript" {
-            ts_extract_fields(node, src, cls_id, fields);
+        match ctx.spec.name {
+            "typescript" => ts_extract_fields(node, src, cls_id, fields),
+            "swift" => swift_extract_fields(node, src, cls_id, fields),
+            _ => {}
         }
     }
 
@@ -573,6 +575,51 @@ fn ts_infer_locals(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<RawLocal
     for (name, ty) in found {
         if let Some(t) = ty {
             out.push(RawLocal { caller_id: fn_id.into(), var_name: name, type_name: t });
+        }
+    }
+}
+
+/// First named child of `n` with the given kind (indexing borrows the tree, not
+/// a cursor, so the result can be reassigned/returned).
+fn named_child_of<'t>(n: TsNode<'t>, kind: &str) -> Option<TsNode<'t>> {
+    (0..n.named_child_count() as u32).filter_map(|i| n.named_child(i)).find(|c| c.kind() == kind)
+}
+
+/// Capture Swift stored-property types for T3 (`self.field.method()`). Accepts a
+/// plain `user_type` (the base of a generic resolves to that base), unwraps one
+/// `T?` optional layer, and REJECTS arrays/dictionaries/tuples/closures so a
+/// `[Foo]` field never resolves a call to `Foo` — precision over recall.
+fn swift_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Vec<RawField>) {
+    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let type_in = |n: TsNode| -> Option<String> {
+        let ann = named_child_of(n, "type_annotation")?;
+        let mut t = ann.named_child(0)?;
+        if t.kind() == "optional_type" {
+            t = t.named_child(0)?; // T? -> T
+        }
+        if t.kind() != "user_type" {
+            return None; // arrays / dictionaries / tuples / closures -> drop
+        }
+        text(named_child_of(t, "type_identifier")?)
+    };
+    let mut stack = vec![class];
+    while let Some(n) = stack.pop() {
+        // a nested type owns its own properties — don't attribute them here
+        if n.id() != class.id() && n.kind() == "class_declaration" {
+            continue;
+        }
+        if n.kind() == "property_declaration" {
+            let name = n
+                .child_by_field_name("name")
+                .and_then(|pat| named_child_of(pat, "simple_identifier").or(Some(pat)))
+                .and_then(text);
+            if let (Some(name), Some(ty)) = (name, type_in(n)) {
+                out.push(RawField { class_id: class_id.into(), field_name: name, type_name: ty });
+            }
+        }
+        let mut c = n.walk();
+        for ch in n.children(&mut c) {
+            stack.push(ch);
         }
     }
 }

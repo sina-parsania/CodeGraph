@@ -355,6 +355,39 @@ mod tests {
     }
 
     #[test]
+    fn swift_field_typed_call_resolves() {
+        // `fetch` is ambiguous (HomeVM.fetch + OtherVM.fetch); self.vm.fetch()
+        // resolves via the property's declared type (T3, FieldTypeMember).
+        let built = build_swift(&[
+            ("home_vm.swift", "class HomeVM {\n  func fetch() {}\n}"),
+            ("other_vm.swift", "class OtherVM {\n  func fetch() {}\n}"),
+            ("vc.swift", "class VC {\n  let vm: HomeVM\n  func go() { self.vm.fetch() }\n}"),
+        ]);
+        let fetch: Vec<_> = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".fetch"))
+            .collect();
+        assert_eq!(fetch.len(), 1, "self.vm.fetch() resolves to exactly one method");
+        assert!(fetch[0].dst.contains("home_vm"), "resolved to HomeVM.fetch, not OtherVM");
+        assert_eq!(fetch[0].metadata.get("justification").and_then(|v| v.as_str()), Some("FieldTypeMember"));
+    }
+
+    #[test]
+    fn swift_array_field_does_not_resolve() {
+        // `[HomeVM]` is an array — self.vms.fetch() must NOT resolve to HomeVM.fetch.
+        // `fetch` is ambiguous (HomeVM + OtherVM) so the ONLY way an edge appears is
+        // a wrong array→element field-type resolution; assert it drops instead.
+        let built = build_swift(&[
+            ("home_vm.swift", "class HomeVM {\n  func fetch() {}\n}"),
+            ("other_vm.swift", "class OtherVM {\n  func fetch() {}\n}"),
+            ("vc.swift", "class VC {\n  let vms: [HomeVM]\n  func go() { self.vms.fetch() }\n}"),
+        ]);
+        let n = built.edges.iter().filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".fetch")).count();
+        assert_eq!(n, 0, "array-typed field must not resolve an ambiguous call to the element type");
+    }
+
+    #[test]
     fn t5_local_var_typed_call_resolves() {
         // `save` is project-ambiguous (UserRepo.save + OtherRepo.save). A typed
         // local `const r: UserRepo` / a typed param resolves r.save() to UserRepo.save.
