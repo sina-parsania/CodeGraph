@@ -141,6 +141,17 @@ enum Command {
         #[arg(long, default_value_t = 1000)]
         budget: usize,
     },
+    /// Rename a symbol + all its RESOLVED references. Safe: refuses unless every
+    /// occurrence of the name in each affected file is accounted for by a resolved
+    /// reference (else it could corrupt code). Dry-run diff by default; --write applies.
+    RenameSymbol {
+        name: String,
+        new_name: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        write: bool,
+    },
     /// Find types that implement or extend a given interface/class.
     Implementers { name: String, #[arg(long, default_value = ".")] path: PathBuf },
     /// Find functions that call a given function name (reverse CALLS edges).
@@ -225,6 +236,10 @@ enum ConfigAction {
 /// use (cache_root, detect, ...), so editing config actually takes effect. The
 /// user's env is already folded into the resolved Config (env wins), so this is
 /// idempotent and preserves precedence.
+/// A planned per-file rename: (relative path, current source, identifier spans
+/// `(byte_start, byte_end, line)` to rewrite).
+type RenameFilePlan = (String, String, Vec<(usize, usize, u32)>);
+
 /// Print a one-line coverage signal under a call-graph result so the agent (or
 /// human) knows when the precise list may be incomplete and should grep instead.
 fn print_coverage(c: &codegraph_core::Coverage) {
@@ -254,7 +269,7 @@ fn project_path(cmd: &Command) -> Option<PathBuf> {
         | Callees { path, .. } | Routes { path, .. } | Query { path, .. } | Communities { path, .. }
         | Important { path, .. } | Implementers { path, .. } | Callers { path, .. } | Ask { path, .. }
         | SemanticIndex { path, .. } | Semantic { path, .. } | Ingest { path, .. } | Mcp { path, .. }
-        | Context { path, .. } => Some(path.clone()),
+        | Context { path, .. } | RenameSymbol { path, .. } => Some(path.clone()),
         Init { repo, .. } | Scip { path: repo } => Some(repo.clone()),
         Install { .. } | Status | Doctor | Gc { .. } | Projects | Config { .. } => None,
     }
@@ -267,7 +282,7 @@ fn needs_fresh(cmd: &Command) -> bool {
         cmd,
         Search { .. } | Callers { .. } | Callees { .. } | Impact { .. } | Trace { .. }
             | Important { .. } | Communities { .. } | Routes { .. } | Query { .. }
-            | Implementers { .. } | Ask { .. } | Semantic { .. } | Context { .. }
+            | Implementers { .. } | Ask { .. } | Semantic { .. } | Context { .. } | RenameSymbol { .. }
     )
 }
 
@@ -546,6 +561,76 @@ fn main() -> anyhow::Result<()> {
                 println!("{} {:.4}  {}", if is_seed { "*" } else { " " }, score, line);
             }
             println!("# {} symbols, ~{} tokens", shown, used);
+        }
+        Command::RenameSymbol { name, new_name, path, write } => {
+            use codegraph_core::NodeLabel::*;
+            let store = codegraph_store::Store::open(&index::db_path(&path))?;
+            // Gate 1 — the name must denote exactly ONE code definition.
+            let defs: Vec<_> = store
+                .find_by_name(&name)?
+                .into_iter()
+                .filter(|n| matches!(n.label, Function | Method | Class | Interface | Enum | Type))
+                .collect();
+            if defs.len() != 1 {
+                println!("✗ refused: {:?} names {} code definitions — ambiguous, cannot rename safely.", name, defs.len());
+                return Ok(());
+            }
+            // Gate 2 — every call to the name must already resolve (no dropped sites).
+            let cov = store.coverage_for_callers(&name)?;
+            if cov.may_be_incomplete {
+                println!("✗ refused: {} call site(s) naming {:?} are unresolved — a rename could miss them and break code.\n  {}", cov.dropped, name, cov.note);
+                return Ok(());
+            }
+            // Gate 3 (occurrence-completeness) — scan EVERY indexed file (not just
+            // graph-known callers, so a call form the parser MISSED can't slip
+            // through): each identifier token named `name` in a file must be
+            // accounted for by the def + that file's resolved call sites, else REFUSE.
+            let def = &defs[0];
+            let call_counts = store.call_sites_by_file(&name)?;
+            let mut plans: Vec<RenameFilePlan> = Vec::new();
+            let mut unaccounted: Vec<String> = Vec::new();
+            for f in store.indexed_files()? {
+                let Ok(src) = std::fs::read_to_string(path.join(&f)) else { continue };
+                if !src.contains(name.as_str()) {
+                    continue;
+                }
+                let spans = codegraph_parse::identifier_spans(&f, &src, &name);
+                if spans.is_empty() {
+                    continue;
+                }
+                let expected = usize::from(def.file_path == f) + call_counts.get(&f).copied().unwrap_or(0);
+                if spans.len() == expected {
+                    plans.push((f.clone(), src, spans));
+                } else {
+                    unaccounted.push(format!("{f}: {} occurrences vs {expected} resolved references", spans.len()));
+                }
+            }
+            if !unaccounted.is_empty() {
+                println!("✗ refused: some occurrences of {:?} are NOT accounted for by resolved references", name);
+                println!("  (could be a local/shadow/type-use of the same name — renaming would risk corruption):");
+                for u in &unaccounted {
+                    println!("    {u}");
+                }
+                return Ok(());
+            }
+            // Apply (byte ranges, right-to-left) — dry-run diff unless --write.
+            let total: usize = plans.iter().map(|(_, _, s)| s.len()).sum();
+            println!("{} rename {:?} → {:?}: {} occurrence(s) across {} file(s)",
+                if write { "✓ APPLIED" } else { "DRY-RUN" }, name, new_name, total, plans.len());
+            for (f, src, spans) in &plans {
+                let mut new_src = src.clone();
+                for &(s, e, _) in spans.iter().rev() {
+                    new_src.replace_range(s..e, &new_name);
+                }
+                let lines: Vec<u32> = spans.iter().map(|&(_, _, l)| l).collect();
+                println!("  {f}  (lines {:?})", lines);
+                if write {
+                    std::fs::write(path.join(f), new_src)?;
+                }
+            }
+            if !write {
+                println!("  re-run with --write to apply.");
+            }
         }
         Command::Important { path, limit } => {
             let l = query::Loaded::open(&index::db_path(&path))?;

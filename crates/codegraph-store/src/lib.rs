@@ -324,6 +324,25 @@ impl Store {
         Ok(out)
     }
 
+    /// Every distinct source file the index knows about — the candidate set a
+    /// rename must scan so an UNCAPTURED reference (a call form the parser missed)
+    /// can't slip through a "0 captured calls = complete" gate and corrupt code.
+    pub fn indexed_files(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT DISTINCT file_path FROM nodes WHERE file_path <> ''")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Count of call sites naming `name`, grouped by file — the expected number
+    /// of call-token occurrences per file, for the rename occurrence-completeness gate.
+    pub fn call_sites_by_file(&self, name: &str) -> Result<std::collections::HashMap<String, usize>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT file_path, COUNT(*) FROM calls WHERE callee_name = ?1 GROUP BY file_path")?;
+        let rows = stmt.query_map([name], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Coverage for `callers(name)`: how many of the textual call sites naming
     /// `name` actually resolved into a `Calls` edge to a node of that name. The
     /// difference is the count dropped (ambiguous / external / unresolved) — a

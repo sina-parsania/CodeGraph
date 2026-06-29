@@ -45,6 +45,37 @@ struct LangSpec {
     inherit_fn: Option<InheritFn>,
 }
 
+/// Byte ranges (+1-based line) of every identifier-kind token whose text == `name`,
+/// in source order. The occurrence set a `rename-symbol` must fully account for
+/// before it may rewrite — strings/comments are excluded by construction
+/// (tree-sitter classifies them as non-identifier nodes).
+pub fn identifier_spans(rel_path: &str, source: &str, name: &str) -> Vec<(usize, usize, u32)> {
+    let ext = rel_path.rsplit('.').next().unwrap_or("");
+    let Some(spec) = spec_for_ext(ext) else { return Vec::new() };
+    let mut parser = Parser::new();
+    if parser.set_language(&(spec.language)()).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else { return Vec::new() };
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(n) = stack.pop() {
+        let k = n.kind();
+        if (k == "identifier" || k == "simple_identifier" || k.ends_with("_identifier"))
+            && std::str::from_utf8(&bytes[n.byte_range()]).ok() == Some(name)
+        {
+            out.push((n.start_byte(), n.end_byte(), n.start_position().row as u32 + 1));
+        }
+        let mut c = n.walk();
+        for ch in n.children(&mut c) {
+            stack.push(ch);
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
 pub fn parse_file(project: &str, rel_path: &str, source: &str) -> ParsedFile {
     let ext = rel_path.rsplit('.').next().unwrap_or("");
     match spec_for_ext(ext) {
@@ -910,6 +941,18 @@ mod tests {
     #[test]
     fn unknown_extension_is_empty() {
         assert!(parse_file("p", "a.unknown", "stuff").nodes.is_empty());
+    }
+
+    #[test]
+    fn identifier_spans_excludes_strings_and_comments() {
+        // the def `foo` + the call `foo` are identifier tokens; the string "foo"
+        // and the `// foo` comment are NOT — the rename safety gate depends on this.
+        let src = "fn foo() {}\nfn bar() { foo(); let s = \"foo\"; }\n// foo here\n";
+        let spans = identifier_spans("a.rs", src, "foo");
+        assert_eq!(spans.len(), 2, "only identifier tokens, not string/comment occurrences");
+        for (s, e, _) in spans {
+            assert_eq!(&src[s..e], "foo");
+        }
     }
 
     #[test]
