@@ -506,23 +506,35 @@ fn main() -> anyhow::Result<()> {
             // Seed with the query's lexical hits (canonical OR-of-tokens FTS query),
             // then rank the whole resolved graph by personalized PageRank restarted
             // at those seeds.
+            use codegraph_core::NodeLabel::*;
+            let is_code = |l: codegraph_core::NodeLabel| matches!(l, Function | Method | Class | Interface | Enum | Type);
             let seeds: Vec<String> = store
-                .search_fts(&query::fts_query_from(&query), 12)
+                .search_fts(&query::fts_query_from(&query), 40)
                 .unwrap_or_default()
                 .into_iter()
+                .filter(|n| is_code(n.label))
                 .map(|n| n.id)
+                .take(12)
                 .collect();
             let l = query::Loaded::open(&db)?;
             let ranked = l.lg.personalized_pagerank_top(&seeds, 200);
-            // Emit the highest-ranked symbols (not File nodes) until the token
-            // budget is spent (≈ chars/4).
+            // Emit DIRECT seed matches first (so context never loses name-match
+            // recall), then the top graph-expanded neighbors → context = the
+            // name-matched symbols ∪ their call-graph neighborhood. Budget in ≈chars/4.
+            let scored: std::collections::HashMap<&str, f64> =
+                ranked.iter().map(|(id, s)| (id.as_str(), *s)).collect();
+            let seen_seed: std::collections::HashSet<&str> = seeds.iter().map(String::as_str).collect();
+            let order = seeds
+                .iter()
+                .map(|id| (id.clone(), *scored.get(id.as_str()).unwrap_or(&0.0), true))
+                .chain(ranked.iter().filter(|(id, _)| !seen_seed.contains(id.as_str())).map(|(id, s)| (id.clone(), *s, false)));
             let mut used = 0usize;
             let mut shown = 0usize;
             println!("# context for {:?} (budget {} tok)", query, budget);
-            for (id, score) in ranked {
+            for (id, score, is_seed) in order {
                 let label = l.nodes.iter().find(|n| n.id == id).map(|n| n.label);
-                if !matches!(label, Some(lbl) if lbl != codegraph_core::NodeLabel::File) {
-                    continue;
+                if !matches!(label, Some(lbl) if is_code(lbl)) {
+                    continue; // code symbols only — not File/Document/Route nodes
                 }
                 let line = l.fmt(&id);
                 let cost = line.len() / 4 + 1;
@@ -531,7 +543,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 used += cost;
                 shown += 1;
-                println!("{:.4}  {}", score, line);
+                println!("{} {:.4}  {}", if is_seed { "*" } else { " " }, score, line);
             }
             println!("# {} symbols, ~{} tokens", shown, used);
         }

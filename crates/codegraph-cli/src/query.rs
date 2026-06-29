@@ -36,11 +36,13 @@ impl Loaded {
 /// Turn a natural-language question into an FTS5 OR-query of identifier-ish tokens.
 pub fn fts_query_from(q: &str) -> String {
     let mut seen = std::collections::HashSet::new();
-    q.split_whitespace()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_'))
+    // Split on every non-identifier char (so `fix(meal-sense):` → meal, sense) and
+    // prefix-match each token (`meal*` matches the camelCase token `MealSense…`).
+    q.split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|t| t.len() > 2)
         .filter(|t| seen.insert(t.to_lowercase()))
         .take(8)
+        .map(|t| format!("{t}*"))
         .collect::<Vec<_>>()
         .join(" OR ")
 }
