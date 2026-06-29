@@ -345,6 +345,7 @@ dependencies = [
  "clap",
  "codegraph-core",
  "codegraph-graph",
+ "codegraph-indexstore",
  "codegraph-ingest",
  "codegraph-llm",
  "codegraph-mcp",
@@ -380,6 +381,15 @@ dependencies = [
  "codegraph-parse",
  "codegraph-store",
  "petgraph",
+ "serde_json",
+]
+
+[[package]]
+name = "codegraph-indexstore"
+version = "1.17.0"
+dependencies = [
+ "anyhow",
+ "codegraph-core",
  "serde_json",
 ]
 

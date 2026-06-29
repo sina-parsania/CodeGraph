@@ -163,12 +163,12 @@ pub fn is_stale(root: &Path) -> bool {
 pub fn ensure_fresh(root: &Path) -> Result<()> {
     if is_stale(root) {
         let db = db_path(root);
-        index_dir(root, &db, false, None)?;
+        index_dir(root, &db, false, None, false)?;
     }
     Ok(())
 }
 
-pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>) -> Result<IndexStats> {
+pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexstore: bool) -> Result<IndexStats> {
     if let Some(parent) = db.parent() {
         std::fs::create_dir_all(parent)?;
         // Self-describe the cache entry (which project it belongs to) for
@@ -285,6 +285,8 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>) -> Res
     let built = build(&nodes, &calls, &inherits, &fields, &locals);
     let mut edges = built.edges;
     let scip_edges = merge_scip_edges(root, scip, &nodes, &mut edges);
+    let indexstore_edges = if indexstore { merge_indexstore_edges(root, &nodes, &mut edges) } else { 0 };
+    let _ = indexstore_edges;
     store.clear_edges()?;
     store.bulk_upsert_edges(&edges)?;
     store.clear_hyperedges()?;
@@ -328,6 +330,61 @@ fn scip_path(root: &Path, explicit: Option<&Path>) -> Option<PathBuf> {
 
 /// Merge compiler-grade SCIP edges in: they supersede the tree-sitter edge for
 /// the same (src, dst, relation) and add precise edges tree-sitter missed.
+/// Opt-in Swift compiler-grade tier: read the DerivedData IndexStore (built by
+/// Xcode) and merge its precise CALL edges, superseding tree-sitter ones. Enriches
+/// once at index time; queries still served from the fast graph. macOS + feature.
+#[cfg(feature = "indexstore")]
+fn merge_indexstore_edges(root: &Path, nodes: &[Node], edges: &mut Vec<Edge>) -> usize {
+    let Some(store) = find_index_store(root) else {
+        eprintln!("indexstore: no DerivedData index store found (build the project in Xcode first)");
+        return 0;
+    };
+    match codegraph_indexstore::import_indexstore(&store, nodes, root) {
+        Ok(is_edges) if !is_edges.is_empty() => {
+            let superseded: HashSet<(String, String, EdgeRelation)> =
+                is_edges.iter().map(|e| (e.src.clone(), e.dst.clone(), e.relation)).collect();
+            edges.retain(|e| !superseded.contains(&(e.src.clone(), e.dst.clone(), e.relation)));
+            let n = is_edges.len();
+            edges.extend(is_edges);
+            eprintln!("indexstore: merged {n} compiler-grade edges from {}", store.display());
+            n
+        }
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("indexstore: {e}");
+            0
+        }
+    }
+}
+
+/// Most-recently-built DerivedData index store. DerivedData dirs are named after the
+/// Xcode project (not the repo), so we pick the freshest store rather than name-match;
+/// pass `codegraph index … --indexstore` after an Xcode build of the right project.
+#[cfg(feature = "indexstore")]
+fn find_index_store(_root: &Path) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let dd = Path::new(&home).join("Library/Developer/Xcode/DerivedData");
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(&dd).ok()?.flatten() {
+        let store = entry.path().join("Index.noindex/DataStore");
+        if !store.is_dir() {
+            continue;
+        }
+        let Ok(m) = entry.metadata().and_then(|md| md.modified()) else { continue };
+        if best.as_ref().map(|(t, _)| m > *t).unwrap_or(true) {
+            best = Some((m, store));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+#[cfg(not(feature = "indexstore"))]
+#[allow(clippy::ptr_arg)] // signature must match the feature-on variant (which needs Vec)
+fn merge_indexstore_edges(_root: &Path, _nodes: &[Node], _edges: &mut Vec<Edge>) -> usize {
+    eprintln!("indexstore: rebuild with `--features indexstore` (macOS + Xcode) to enable this tier");
+    0
+}
+
 fn merge_scip_edges(root: &Path, explicit: Option<&Path>, nodes: &[Node], edges: &mut Vec<Edge>) -> usize {
     let Some(path) = scip_path(root, explicit) else { return 0 };
     let Ok(bytes) = std::fs::read(&path) else { return 0 };

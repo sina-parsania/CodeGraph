@@ -17,6 +17,7 @@ codegraph-mcp.workspace = true
 codegraph-llm.workspace = true
 codegraph-ingest.workspace = true
 codegraph-resolve.workspace = true
+codegraph-indexstore = { workspace = true, optional = true }
 clap.workspace = true
 anyhow.workspace = true
 serde.workspace = true
@@ -32,3 +33,4 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 [features]
 media = ["codegraph-ingest/media"]
 local-embed = []  # placeholder; fastembed wired in a later increment
+indexstore = ["dep:codegraph-indexstore", "codegraph-indexstore/link"]  # opt-in Swift compiler-grade tier (macOS)

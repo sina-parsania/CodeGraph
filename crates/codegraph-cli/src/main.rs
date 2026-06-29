@@ -72,6 +72,10 @@ enum Command {
         /// Defaults to `index.scip` (or any `*.scip`) found at the repo root.
         #[arg(long)]
         scip: Option<PathBuf>,
+        /// Merge Apple's IndexStore (Swift compiler-grade calls) from the most
+        /// recently built DerivedData. Needs `--features indexstore` (macOS + Xcode).
+        #[arg(long)]
+        indexstore: bool,
     },
     /// Full-text search the indexed graph for a term.
     Search {
@@ -326,9 +330,9 @@ fn main() -> anyhow::Result<()> {
                 cfg.llm.model,
             );
         }
-        Command::Index { path, full, scip } => {
+        Command::Index { path, full, scip, indexstore } => {
             let db = index::db_path(&path);
-            let stats = index::index_dir(&path, &db, full, scip.as_deref())?;
+            let stats = index::index_dir(&path, &db, full, scip.as_deref(), indexstore)?;
             println!(
                 "indexed {} files ({} changed{}) → {} nodes, {} edges{}  ({})",
                 stats.files,

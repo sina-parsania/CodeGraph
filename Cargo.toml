@@ -14,6 +14,7 @@ codegraph-store   = { path = "crates/codegraph-store" }
 codegraph-parse   = { path = "crates/codegraph-parse" }
 codegraph-graph   = { path = "crates/codegraph-graph" }
 codegraph-resolve = { path = "crates/codegraph-resolve" }
+codegraph-indexstore = { path = "crates/codegraph-indexstore" }
 codegraph-mcp     = { path = "crates/codegraph-mcp" }
 codegraph-ingest  = { path = "crates/codegraph-ingest" }
 codegraph-llm     = { path = "crates/codegraph-llm" }
