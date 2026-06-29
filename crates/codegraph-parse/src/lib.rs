@@ -329,6 +329,8 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
         match ctx.spec.name {
             "typescript" => ts_extract_fields(node, src, cls_id, fields),
             "swift" => swift_extract_fields(node, src, cls_id, fields),
+            "kotlin" => kotlin_extract_fields(node, src, cls_id, fields),
+            "java" => java_extract_fields(node, src, cls_id, fields),
             _ => {}
         }
     }
@@ -373,8 +375,12 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
             // Receiver-aware capture (all languages): self/this binds to the
             // enclosing class so the resolver can do Class-Hierarchy-Analysis.
             let receiver = detect_receiver(node, src);
-            let enclosing_class = match receiver {
+            let enclosing_class = match &receiver {
                 Receiver::SelfThis | Receiver::Super | Receiver::Field(_) => this_class.map(str::to_string),
+                // In implicit-member languages a bare `field.method()` is an
+                // implicit `this.field.method()`, so carry the class to let the
+                // resolver try its fields (a local var shadows it — resolver order).
+                Receiver::Named(_) if has_implicit_member(ctx.spec.name) => this_class.map(str::to_string),
                 _ => None,
             };
             calls.push(RawCall {
@@ -585,6 +591,64 @@ fn named_child_of<'t>(n: TsNode<'t>, kind: &str) -> Option<TsNode<'t>> {
     (0..n.named_child_count() as u32).filter_map(|i| n.named_child(i)).find(|c| c.kind() == kind)
 }
 
+/// Capture Kotlin stored-property types for T3 (`val x: T`). Unwraps `T?`
+/// nullable; takes a generic's base type; only `user_type` (no function/array).
+fn kotlin_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Vec<RawField>) {
+    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let mut stack = vec![class];
+    while let Some(n) = stack.pop() {
+        if n.id() != class.id() && matches!(n.kind(), "class_declaration" | "object_declaration") {
+            continue;
+        }
+        if n.kind() == "property_declaration" {
+            if let Some(vd) = named_child_of(n, "variable_declaration") {
+                // tree-sitter-kotlin-ng names both the var and the type `identifier`.
+                let name = named_child_of(vd, "identifier").and_then(text);
+                let user = named_child_of(vd, "user_type")
+                    .or_else(|| named_child_of(vd, "nullable_type").and_then(|nt| named_child_of(nt, "user_type")));
+                let ty = user.and_then(|u| named_child_of(u, "identifier")).and_then(text);
+                if let (Some(name), Some(ty)) = (name, ty) {
+                    out.push(RawField { class_id: class_id.into(), field_name: name, type_name: ty });
+                }
+            }
+        }
+        let mut c = n.walk();
+        for ch in n.children(&mut c) {
+            stack.push(ch);
+        }
+    }
+}
+
+/// Capture Java field types for T3 (`T field;`). Simple `type_identifier` types
+/// only (generics/arrays rejected for precision); handles `T a, b;` declarators.
+fn java_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Vec<RawField>) {
+    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let mut stack = vec![class];
+    while let Some(n) = stack.pop() {
+        if n.id() != class.id()
+            && matches!(n.kind(), "class_declaration" | "interface_declaration" | "enum_declaration")
+        {
+            continue;
+        }
+        if n.kind() == "field_declaration" {
+            if let Some(ty) = n.child_by_field_name("type").filter(|t| t.kind() == "type_identifier").and_then(text) {
+                let mut c = n.walk();
+                for ch in n.children(&mut c) {
+                    if ch.kind() == "variable_declarator" {
+                        if let Some(name) = ch.child_by_field_name("name").and_then(text) {
+                            out.push(RawField { class_id: class_id.into(), field_name: name, type_name: ty.clone() });
+                        }
+                    }
+                }
+            }
+        }
+        let mut c = n.walk();
+        for ch in n.children(&mut c) {
+            stack.push(ch);
+        }
+    }
+}
+
 /// Capture Swift stored-property types for T3 (`self.field.method()`). Accepts a
 /// plain `user_type` (the base of a generic resolves to that base), unwraps one
 /// `T?` optional layer, and REJECTS arrays/dictionaries/tuples/closures so a
@@ -627,6 +691,13 @@ fn swift_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Vec
 /// In TS/JS a nested non-arrow function literal rebinds `this`. In Swift/Kotlin/
 /// Python/etc. the "function" kind IS the method (self stays the instance), so we
 /// only treat these kinds as rebinding for TS/JS.
+/// Languages where a bare `field.method()` is an implicit `this.field.method()`
+/// (member access without an explicit receiver). TS/JS/Python/Rust/Go require an
+/// explicit `this`/`self`, so a bare name there is never an implicit field.
+fn has_implicit_member(spec: &str) -> bool {
+    matches!(spec, "swift" | "kotlin" | "java" | "csharp" | "cpp" | "ruby")
+}
+
 fn rebinds_this(spec: &str, kind: &str) -> bool {
     matches!(spec, "typescript" | "javascript")
         && matches!(

@@ -173,18 +173,31 @@ pub fn build(
                 })
                 .and_then(|type_cls| resolve_member(type_cls, &c.callee_name, &class_members, &class_parents))
                 .map(|id| (id, "FieldTypeMember")),
-            // T5: `localVar.method()` where the variable's static type was inferred
-            // (declared-type local / typed param, unique-or-drop) → that type's class.
-            Receiver::Named(var) => local_types
-                .get(c.caller_id.as_str())
-                .and_then(|m| m.get(var.as_str()))
-                .copied()
-                .and_then(|ty| match class_by_name.get(ty) {
-                    Some(ids) if ids.len() == 1 => Some(ids[0]),
-                    _ => None,
-                })
-                .and_then(|type_cls| resolve_member(type_cls, &c.callee_name, &class_members, &class_parents))
-                .map(|id| (id, "LocalVarType")),
+            // `name.method()`: resolve `name`'s static type, then that type's method.
+            // A local/param SHADOWS a field (correct lexical scoping); failing that,
+            // an implicit-`this` field of the enclosing class (Kotlin/Swift/Java write
+            // `field.method()` without `this.`). Unique-or-drop throughout.
+            Receiver::Named(var) => {
+                let via_local = local_types
+                    .get(c.caller_id.as_str())
+                    .and_then(|m| m.get(var.as_str()))
+                    .copied()
+                    .map(|ty| (ty, "LocalVarType"));
+                let via_field = c
+                    .enclosing_class
+                    .as_deref()
+                    .and_then(|cls| field_types.get(cls).and_then(|m| m.get(var.as_str())).copied())
+                    .map(|ty| (ty, "FieldTypeMember"));
+                via_local
+                    .or(via_field)
+                    .and_then(|(ty, tag)| match class_by_name.get(ty) {
+                        Some(ids) if ids.len() == 1 => Some((ids[0], tag)),
+                        _ => None,
+                    })
+                    .and_then(|(type_cls, tag)| {
+                        resolve_member(type_cls, &c.callee_name, &class_members, &class_parents).map(|id| (id, tag))
+                    })
+            }
             _ => None,
         };
         let global_unique = || match fn_by_name.get(c.callee_name.as_str()) {
@@ -370,6 +383,25 @@ mod tests {
             .collect();
         assert_eq!(fetch.len(), 1, "self.vm.fetch() resolves to exactly one method");
         assert!(fetch[0].dst.contains("home_vm"), "resolved to HomeVM.fetch, not OtherVM");
+        assert_eq!(fetch[0].metadata.get("justification").and_then(|v| v.as_str()), Some("FieldTypeMember"));
+    }
+
+    #[test]
+    fn swift_implicit_member_field_call_resolves() {
+        // Swift writes `vm.fetch()` (implicit self), NOT `self.vm.fetch()`. `fetch`
+        // is ambiguous, so it must resolve via the field's type (implicit member).
+        let built = build_swift(&[
+            ("home_vm.swift", "class HomeVM {\n  func fetch() {}\n}"),
+            ("other_vm.swift", "class OtherVM {\n  func fetch() {}\n}"),
+            ("vc.swift", "class VC {\n  let vm: HomeVM\n  func go() { vm.fetch() }\n}"),
+        ]);
+        let fetch: Vec<_> = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".fetch"))
+            .collect();
+        assert_eq!(fetch.len(), 1, "implicit-member vm.fetch() resolves to one method");
+        assert!(fetch[0].dst.contains("home_vm"), "resolved to HomeVM.fetch");
         assert_eq!(fetch[0].metadata.get("justification").and_then(|v| v.as_str()), Some("FieldTypeMember"));
     }
 
