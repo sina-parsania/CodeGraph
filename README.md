@@ -49,6 +49,7 @@ Then just ask Claude Code to _"use codegraph to find …"_ — its tools are liv
 - **A real graph** — `Function/Method/Class/Enum/Interface/Type/Module/Route/Document` nodes joined by `DEFINES / CALLS / INHERITS / IMPLEMENTS` (+ IMPLEMENTS hyperedges). Honest, **language-agnostic** receiver-aware resolution (same-file → Class-Hierarchy-Analysis for `self`/`this` and `this.field.method()` DI → unique name) — one resolver fires across TS, Swift, Kotlin, Python, Java, … A qualified call on a named variable never guesses a same-file member; ambiguous names stay unlinked, no phantom edges. Precision is sacred — see [docs/RESOLUTION.md](docs/RESOLUTION.md).
 - **Compiler-grade precision (optional, one command)** — `codegraph scip` detects your language, runs the matching SCIP indexer (scip-typescript / rust-analyzer / scip-java / …) if installed, and merges **Tier-A edges** that resolve overloads, re-exports, and ambiguous names tree-sitter can't. _Zero-config means the tree-sitter core_ (which needs nothing); SCIP is an opt-in precision upgrade.
 - **Graph intelligence grep can't do** — `impact` (blast-radius), `trace` (shortest path), `callers`/`callees`, `implementers`, `important` (PageRank), `communities` (Louvain), `routes`, and `context` (assemble task-relevant symbols by **personalized PageRank over the resolved graph**, within a token budget — surfaces a query's call-graph dependencies, not just name matches).
+- **Safe semantic edits** — `rename-symbol` rewrites a symbol + all its resolved references, or **refuses** when any occurrence isn't accounted for (a local, a shadow, or a call form the parser couldn't resolve). Dry-run by default; `--write` to apply. It never corrupts code to make an edit.
 - **Search** — full-text (`--rerank`), **semantic** vector (`--hyde`), and `ask` (NL answer over real snippets). All optional; degrade gracefully with no model.
 - **Any input** — `index` also ingests docs + localization (md/rst/txt/`.strings`/po/xliff/…); `ingest` adds PDFs, URLs, json/yaml/csv/log/…, and (with `--features media`) images via OCR. One graph = code + docs + config + localization.
 - **Arbitrary analytics** — `query` runs read-only SQL over the graph.
@@ -65,6 +66,7 @@ codegraph impact processPayment       # blast-radius: what breaks if I change it
 codegraph trace router handler        # shortest dependency path between two symbols
 codegraph important                   # most central symbols (map an unfamiliar repo)
 codegraph context "auth login jwt" --budget 1000   # assemble task-relevant symbols (graph-ranked, budgeted)
+codegraph rename-symbol oldName newName            # safe rename of a symbol + all resolved refs (dry-run; --write to apply)
 codegraph communities  /  routes      # clusters; detected HTTP routes
 codegraph semantic "retry with backoff" --hyde     # search by meaning (needs an embed model)
 codegraph ask "how does auth work?"                # NL answer over real source
