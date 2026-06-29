@@ -157,6 +157,17 @@ pub struct RawField {
     pub type_name: String,
 }
 
+/// A local variable whose static type the parser inferred within a function body
+/// (declared-type locals + typed params; flow-insensitive single-assignment —
+/// conflicting/ambiguous declarations are dropped, never guessed). Lets the
+/// resolver turn `x.method()` into a precise edge via the variable's type (T5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawLocal {
+    pub caller_id: String,
+    pub var_name: String,
+    pub type_name: String,
+}
+
 /// An unresolved call reference captured by the parser: the enclosing caller's
 /// node id, the called name, the line, plus the receiver kind + the node id of
 /// the class `self`/`this` is bound to (for receiver-aware resolution).

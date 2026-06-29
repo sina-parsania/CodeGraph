@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use codegraph_core::{
-    Coverage, Edge, Hyperedge, HyperedgeMember, InheritKind, Node, RawCall, RawField, RawInherit,
+    Coverage, Edge, Hyperedge, HyperedgeMember, InheritKind, Node, RawCall, RawField, RawInherit, RawLocal,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
@@ -110,6 +110,9 @@ impl Store {
              CREATE TABLE IF NOT EXISTS fields(
                class_id TEXT, field_name TEXT, type_name TEXT, file_path TEXT);
              CREATE INDEX IF NOT EXISTS idx_fields_file ON fields(file_path);
+             CREATE TABLE IF NOT EXISTS locals(
+               caller_id TEXT, var_name TEXT, type_name TEXT, file_path TEXT);
+             CREATE INDEX IF NOT EXISTS idx_locals_file ON locals(file_path);
              CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
                id UNINDEXED, name, label, language);",
         )?;
@@ -456,6 +459,7 @@ impl Store {
         self.conn.execute("DELETE FROM calls WHERE file_path = ?1", [file_path])?;
         self.conn.execute("DELETE FROM inherits WHERE file_path = ?1", [file_path])?;
         self.conn.execute("DELETE FROM fields WHERE file_path = ?1", [file_path])?;
+        self.conn.execute("DELETE FROM locals WHERE file_path = ?1", [file_path])?;
         Ok(())
     }
 
@@ -520,6 +524,25 @@ impl Store {
         let mut stmt = self.conn.prepare("SELECT class_id, field_name, type_name FROM fields")?;
         let rows = stmt.query_map([], |r| {
             Ok(RawField { class_id: r.get(0)?, field_name: r.get(1)?, type_name: r.get(2)? })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn save_locals(&self, file_path: &str, items: &[RawLocal]) -> Result<()> {
+        self.conn.execute("DELETE FROM locals WHERE file_path = ?1", [file_path])?;
+        let mut stmt = self
+            .conn
+            .prepare("INSERT INTO locals(caller_id, var_name, type_name, file_path) VALUES(?1, ?2, ?3, ?4)")?;
+        for l in items {
+            stmt.execute(params![l.caller_id, l.var_name, l.type_name, file_path])?;
+        }
+        Ok(())
+    }
+
+    pub fn all_locals(&self) -> Result<Vec<RawLocal>> {
+        let mut stmt = self.conn.prepare("SELECT caller_id, var_name, type_name FROM locals")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(RawLocal { caller_id: r.get(0)?, var_name: r.get(1)?, type_name: r.get(2)? })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }

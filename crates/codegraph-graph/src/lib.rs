@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use codegraph_core::{
     Confidence, Edge, EdgeRelation, Hyperedge, HyperedgeMember, HyperedgeRelation, InheritKind, Metadata,
-    Node, NodeLabel, RawCall, RawField, RawInherit, Receiver, ResolutionTier,
+    Node, NodeLabel, RawCall, RawField, RawInherit, RawLocal, Receiver, ResolutionTier,
 };
 
 /// Class-Hierarchy-Analysis member resolution (docs/RESOLUTION.md): find the method
@@ -57,7 +57,13 @@ pub struct Built {
 /// - Pass 1 (structural): each File DEFINES every definition in the same file.
 /// - Pass 2 (calls): resolve each `RawCall` to a Function in the caller's file
 ///   by name (intra-language, intra-file) → CALLS edge tagged Tier B.
-pub fn build(nodes: &[Node], calls: &[RawCall], inherits: &[RawInherit], fields: &[RawField]) -> Built {
+pub fn build(
+    nodes: &[Node],
+    calls: &[RawCall],
+    inherits: &[RawInherit],
+    fields: &[RawField],
+    locals: &[RawLocal],
+) -> Built {
     let by_id: HashMap<&str, &Node> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let file_by_path: HashMap<&str, &str> = nodes
         .iter()
@@ -116,6 +122,14 @@ pub fn build(nodes: &[Node], calls: &[RawCall], inherits: &[RawInherit], fields:
             .or_default()
             .insert(f.field_name.as_str(), f.type_name.as_str());
     }
+    // local_types: caller fn id -> local var name -> inferred type name (T5).
+    let mut local_types: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
+    for l in locals {
+        local_types
+            .entry(l.caller_id.as_str())
+            .or_default()
+            .insert(l.var_name.as_str(), l.type_name.as_str());
+    }
 
     let mut edges: Vec<Edge> = Vec::new();
     let mut seen: HashSet<(String, String, EdgeRelation)> = HashSet::new();
@@ -159,6 +173,18 @@ pub fn build(nodes: &[Node], calls: &[RawCall], inherits: &[RawInherit], fields:
                 })
                 .and_then(|type_cls| resolve_member(type_cls, &c.callee_name, &class_members, &class_parents))
                 .map(|id| (id, "FieldTypeMember")),
+            // T5: `localVar.method()` where the variable's static type was inferred
+            // (declared-type local / typed param, unique-or-drop) → that type's class.
+            Receiver::Named(var) => local_types
+                .get(c.caller_id.as_str())
+                .and_then(|m| m.get(var.as_str()))
+                .copied()
+                .and_then(|ty| match class_by_name.get(ty) {
+                    Some(ids) if ids.len() == 1 => Some(ids[0]),
+                    _ => None,
+                })
+                .and_then(|type_cls| resolve_member(type_cls, &c.callee_name, &class_members, &class_parents))
+                .map(|id| (id, "LocalVarType")),
             _ => None,
         };
         let global_unique = || match fn_by_name.get(c.callee_name.as_str()) {
@@ -291,7 +317,7 @@ mod tests {
     #[test]
     fn structural_and_call_edges() {
         let pf = codegraph_parse::parse_rust("proj", "src/main.rs", "fn helper() {}\nfn main() { helper(); helper(); }\n");
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals);
 
         let calls: Vec<_> = built.edges.iter().filter(|e| e.relation == EdgeRelation::Calls).collect();
         assert_eq!(calls.len(), 1, "duplicate calls should dedupe to one edge");
@@ -301,29 +327,66 @@ mod tests {
     }
 
     fn build_ts(files: &[(&str, &str)]) -> Built {
-        let (mut nodes, mut calls, mut inherits, mut fields) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut nodes, mut calls, mut inherits, mut fields, mut locals) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (f, src) in files {
             let pf = codegraph_parse::parse_ts("p", f, src);
             nodes.extend(pf.nodes);
             calls.extend(pf.calls);
             inherits.extend(pf.inherits);
             fields.extend(pf.fields);
+            locals.extend(pf.locals);
         }
-        build(&nodes, &calls, &inherits, &fields)
+        build(&nodes, &calls, &inherits, &fields, &locals)
     }
 
     fn build_swift(files: &[(&str, &str)]) -> Built {
-        let (mut nodes, mut calls, mut inherits, mut fields) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut nodes, mut calls, mut inherits, mut fields, mut locals) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (f, src) in files {
             let pf = codegraph_parse::parse_swift("p", f, src);
             nodes.extend(pf.nodes);
             calls.extend(pf.calls);
             inherits.extend(pf.inherits);
             fields.extend(pf.fields);
+            locals.extend(pf.locals);
         }
-        build(&nodes, &calls, &inherits, &fields)
+        build(&nodes, &calls, &inherits, &fields, &locals)
+    }
+
+    #[test]
+    fn t5_local_var_typed_call_resolves() {
+        // `save` is project-ambiguous (UserRepo.save + OtherRepo.save). A typed
+        // local `const r: UserRepo` / a typed param resolves r.save() to UserRepo.save.
+        let built = build_ts(&[
+            ("user.repo.ts", "class UserRepo { save() {} }"),
+            ("other.repo.ts", "class OtherRepo { save() {} }"),
+            ("svc.ts", "class Svc { go(r: UserRepo) { r.save(); } }"),
+        ]);
+        let save: Vec<_> = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".save"))
+            .collect();
+        assert_eq!(save.len(), 1, "typed local r.save() resolves to exactly one method");
+        assert!(save[0].dst.contains("user_repo"), "resolved to UserRepo.save, not OtherRepo");
+        assert_eq!(save[0].metadata.get("justification").and_then(|v| v.as_str()), Some("LocalVarType"));
+    }
+
+    #[test]
+    fn t5_conflicting_local_type_drops_no_guess() {
+        // `x` declared with two different types in one scope → poisoned → drop.
+        let built = build_ts(&[
+            ("a.ts", "class A { save() {} }"),
+            ("b.ts", "class B { save() {} }"),
+            ("svc.ts", "function go() { let x: A; let x: B; x.save(); }"),
+        ]);
+        let save = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".save"))
+            .count();
+        assert_eq!(save, 0, "conflicting local types must drop, not guess");
     }
 
     #[test]
@@ -473,7 +536,7 @@ mod tests {
             "p", "a.ts",
             "interface Repo {}\nclass SqlRepo implements Repo {}\nclass MemRepo implements Repo {}\n",
         );
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals);
         assert!(built.edges.iter().any(|e| e.relation == EdgeRelation::Implements));
         let he = built.hyperedges.iter().find(|(h, _)| h.label.contains("Repo")).expect("hyperedge");
         // 2 implementers + the interface = 3 members
@@ -483,7 +546,7 @@ mod tests {
     #[test]
     fn end_to_end_persist_and_query() {
         let pf = codegraph_parse::parse_rust("proj", "src/main.rs", "fn helper() {}\nfn main() { helper(); }\n");
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals);
         let store = Store::open_in_memory().unwrap();
         for n in &pf.nodes {
             store.upsert_node(n).unwrap();
@@ -503,7 +566,7 @@ mod tests {
         let other = codegraph_parse::parse_rust("proj", "b.rs", "fn ghost() {}\n");
         pf.nodes.extend(other.nodes);
         pf.calls.extend(other.calls);
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals);
         assert!(built.edges.iter().any(|e| e.relation == EdgeRelation::Calls
             && e.src.ends_with(".main") && e.dst.ends_with(".ghost")));
     }
@@ -517,7 +580,7 @@ mod tests {
         a.nodes.extend(b.nodes);
         a.nodes.extend(c.nodes);
         a.calls.extend(c.calls);
-        let built = build(&a.nodes, &a.calls, &a.inherits, &a.fields);
+        let built = build(&a.nodes, &a.calls, &a.inherits, &a.fields, &a.locals);
         assert!(!built.edges.iter().any(|e| e.relation == EdgeRelation::Calls));
     }
 }
@@ -815,7 +878,7 @@ mod traversal_tests {
             "src/lib.rs",
             "fn a() { b(); }\nfn b() { c(); }\nfn c() {}\nfn lonely() {}\n",
         );
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals);
         (pf.nodes, built.edges)
     }
 

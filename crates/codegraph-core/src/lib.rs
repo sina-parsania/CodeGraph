@@ -10,7 +10,7 @@ pub use config::{
 pub use llm::{LlmClient, VisionLlmClient};
 pub use types::{
     Confidence, Coverage, Edge, EdgeRelation, Hyperedge, HyperedgeMember, HyperedgeRelation, InheritKind, Metadata,
-    Node, NodeLabel, QualifiedName, RawCall, RawField, RawInherit, Receiver, ResolutionTier,
+    Node, NodeLabel, QualifiedName, RawCall, RawField, RawInherit, RawLocal, Receiver, ResolutionTier,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -2,7 +2,9 @@
 //! per-language `LangSpec` (label map, call-node kinds, callee fields, name
 //! extraction mode). Adding a language = one grammar dep + one `LangSpec`.
 
-use codegraph_core::{InheritKind, Metadata, Node, NodeLabel, QualifiedName, RawCall, RawField, RawInherit, Receiver};
+use codegraph_core::{
+    InheritKind, Metadata, Node, NodeLabel, QualifiedName, RawCall, RawField, RawInherit, RawLocal, Receiver,
+};
 use tree_sitter::{Language, Node as TsNode, Parser};
 
 pub struct ParsedFile {
@@ -10,11 +12,18 @@ pub struct ParsedFile {
     pub calls: Vec<RawCall>,
     pub inherits: Vec<RawInherit>,
     pub fields: Vec<RawField>,
+    pub locals: Vec<RawLocal>,
 }
 
 impl ParsedFile {
     fn empty() -> Self {
-        ParsedFile { nodes: Vec::new(), calls: Vec::new(), inherits: Vec::new(), fields: Vec::new() }
+        ParsedFile {
+            nodes: Vec::new(),
+            calls: Vec::new(),
+            inherits: Vec::new(),
+            fields: Vec::new(),
+            locals: Vec::new(),
+        }
     }
 }
 
@@ -269,9 +278,10 @@ fn parse_with(spec: &LangSpec, project: &str, rel_path: &str, source: &str) -> P
     let mut calls = Vec::new();
     let mut inherits = Vec::new();
     let mut fields = Vec::new();
+    let mut locals = Vec::new();
     let ctx = Ctx { spec, project, segs: &file_segs, rel_path, file_id: &file_id };
-    collect(tree.root_node(), bytes, &ctx, None, None, &mut nodes, &mut calls, &mut inherits, &mut fields);
-    ParsedFile { nodes, calls, inherits, fields }
+    collect(tree.root_node(), bytes, &ctx, None, None, &mut nodes, &mut calls, &mut inherits, &mut fields, &mut locals);
+    ParsedFile { nodes, calls, inherits, fields, locals }
 }
 
 struct Ctx<'a> {
@@ -283,7 +293,8 @@ struct Ctx<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_class: Option<&str>, nodes: &mut Vec<Node>, calls: &mut Vec<RawCall>, inherits: &mut Vec<RawInherit>, fields: &mut Vec<RawField>) {
+#[allow(clippy::too_many_arguments)]
+fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_class: Option<&str>, nodes: &mut Vec<Node>, calls: &mut Vec<RawCall>, inherits: &mut Vec<RawInherit>, fields: &mut Vec<RawField>, locals: &mut Vec<RawLocal>) {
     let mut my_fn_id: Option<String> = None;
     let mut my_class_id: Option<String> = None;
 
@@ -317,6 +328,14 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
     if let Some(cls_id) = my_class_id.as_deref() {
         if ctx.spec.name == "typescript" {
             ts_extract_fields(node, src, cls_id, fields);
+        }
+    }
+
+    // At a TS function/method, infer the static type of its declared-type locals
+    // and typed params for T5 (`x.method()` via the variable's type).
+    if let Some(fn_id) = my_fn_id.as_deref() {
+        if ctx.spec.name == "typescript" {
+            ts_infer_locals(node, src, fn_id, locals);
         }
     }
 
@@ -380,7 +399,7 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
     };
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect(child, src, ctx, next_fn, next_this_class, nodes, calls, inherits, fields);
+        collect(child, src, ctx, next_fn, next_this_class, nodes, calls, inherits, fields, locals);
     }
 }
 
@@ -499,6 +518,61 @@ fn ts_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Vec<Ra
         let mut c = n.walk();
         for ch in n.children(&mut c) {
             stack.push(ch);
+        }
+    }
+}
+
+/// Infer the static type of declared-type locals + typed (non-property) params
+/// within a TS function body (T5). Flow-insensitive single-assignment: a name
+/// declared with two different types in the same body is DROPPED, never guessed.
+/// Stops at nested function boundaries (their locals are their own scope) and
+/// only accepts simple `type_identifier` types — matching the field extractor.
+fn ts_infer_locals(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<RawLocal>) {
+    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let type_in = |n: TsNode| -> Option<String> {
+        let mut c = n.walk();
+        let ann = n.named_children(&mut c).find(|ch| ch.kind() == "type_annotation")?;
+        let mut c2 = ann.walk();
+        let ty = ann.named_children(&mut c2).find(|t| t.kind() == "type_identifier")?;
+        text(ty)
+    };
+    // BTreeMap → deterministic emit order. `None` = poisoned (conflicting types).
+    let mut found: std::collections::BTreeMap<String, Option<String>> = std::collections::BTreeMap::new();
+    const FN_KINDS: [&str; 5] = [
+        "function_declaration",
+        "function_expression",
+        "arrow_function",
+        "method_definition",
+        "generator_function_declaration",
+    ];
+    let mut stack = vec![func];
+    while let Some(n) = stack.pop() {
+        if n.id() != func.id() && FN_KINDS.contains(&n.kind()) {
+            continue; // nested function: its own scope
+        }
+        let name_ty = match n.kind() {
+            "variable_declarator" | "required_parameter" | "optional_parameter" => n
+                .child_by_field_name(if n.kind() == "variable_declarator" { "name" } else { "pattern" })
+                .filter(|p| p.kind() == "identifier")
+                .and_then(text)
+                .zip(type_in(n)),
+            _ => None,
+        };
+        if let Some((name, ty)) = name_ty {
+            found.entry(name).and_modify(|e| {
+                if e.as_deref() != Some(ty.as_str()) {
+                    *e = None; // conflicting declared types in one scope → drop
+                }
+            }).or_insert(Some(ty));
+        }
+        let mut c = n.walk();
+        for ch in n.children(&mut c) {
+            stack.push(ch);
+        }
+    }
+    for (name, ty) in found {
+        if let Some(t) = ty {
+            out.push(RawLocal { caller_id: fn_id.into(), var_name: name, type_name: t });
         }
     }
 }
