@@ -168,6 +168,12 @@ pub fn read_occurrences(store_path: &Path, root: &Path) -> anyhow::Result<Vec<Oc
         }
         for (rname, rfile) in &records {
             let abs = if rfile.is_empty() { main_file.as_str() } else { rfile.as_str() };
+            // Skip dependency/system records — a real IndexStore also indexes every
+            // SwiftPM checkout + SDK framework (≈19M occurrences); only files under
+            // the repo can map to a node, so filter them out early (huge speedup).
+            if !Path::new(abs).starts_with(root) {
+                continue;
+            }
             let file = rel_path(root, abs);
             let Ok(cr) = CString::new(rname.as_str()) else { continue };
             let mut e3: ErrorT = ptr::null_mut();

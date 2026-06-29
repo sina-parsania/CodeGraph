@@ -36,6 +36,14 @@ pub const ROLE_REL_CALLEDBY: u64 = 1 << 13;
 /// Mirrors `codegraph-resolve::import_scip`: USR→def-node, then call→edge.
 pub fn import_indexstore(store: &Path, nodes: &[Node], repo_root: &Path) -> anyhow::Result<Vec<Edge>> {
     let occs = read_occurrences(store, repo_root)?;
+    if std::env::var_os("CODEGRAPH_DEBUG").is_some() {
+        eprintln!(
+            "indexstore DEBUG: {} occurrences | sample occ file: {:?} | sample swift node: {:?}",
+            occs.len(),
+            occs.iter().find(|o| o.file.ends_with(".swift")).map(|o| &o.file),
+            nodes.iter().find(|n| n.file_path.ends_with(".swift")).map(|n| &n.file_path),
+        );
+    }
     if occs.is_empty() {
         return Ok(Vec::new());
     }
