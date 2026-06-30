@@ -32,5 +32,5 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [features]
 media = ["codegraph-ingest/media"]
-local-embed = []  # placeholder; fastembed wired in a later increment
+local-embed = ["codegraph-llm/local-embed"]  # bundled bge-small-en-v1.5 (no server)
 indexstore = ["dep:codegraph-indexstore", "codegraph-indexstore/link"]  # opt-in Swift compiler-grade tier (macOS)

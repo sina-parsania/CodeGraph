@@ -153,6 +153,52 @@ impl OpenAiCompatBackend {
     }
 }
 
+/// Embed texts → L2-normalized vectors + the model label. Prefers a BUNDLED local
+/// model (`bge-small-en-v1.5`, no server needed) when built with `--features
+/// local-embed`; else a detected OpenAI-compatible endpoint; else `None`. Vectors
+/// are normalized so cosine == dot at query time.
+pub fn embed_texts(texts: &[String]) -> Option<(Vec<Vec<f32>>, String)> {
+    if texts.is_empty() {
+        return Some((Vec::new(), String::new()));
+    }
+    #[cfg(feature = "local-embed")]
+    if let Some(v) = local_embed(texts) {
+        let v = v.iter().map(|x| codegraph_core::normalize(x)).collect();
+        return Some((v, "bge-small-en-v1.5 (local)".to_string()));
+    }
+    let backend = OpenAiCompatBackend::detect().filter(|b| b.embed_model().is_some())?;
+    let model = backend.embed_model().unwrap_or("?").to_string();
+    let mut out = Vec::with_capacity(texts.len());
+    for t in texts {
+        out.push(codegraph_core::normalize(&backend.embed(t)?));
+    }
+    Some((out, model))
+}
+
+/// True when an embedder is available (a bundled local model, or a reachable
+/// server) — so callers can give a precise "no embedder" message.
+pub fn embedder_available() -> bool {
+    if cfg!(feature = "local-embed") {
+        return true;
+    }
+    OpenAiCompatBackend::detect().is_some_and(|b| b.embed_model().is_some())
+}
+
+#[cfg(feature = "local-embed")]
+fn local_embed(texts: &[String]) -> Option<Vec<Vec<f32>>> {
+    use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+    let cache = std::env::var_os("CODEGRAPH_CACHE_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache/codegraph")))
+        .unwrap_or_else(|| std::path::PathBuf::from(".codegraph-cache"))
+        .join("fastembed");
+    let _ = std::fs::create_dir_all(&cache);
+    let opts = InitOptions::new(EmbeddingModel::BGESmallENV15).with_cache_dir(cache).with_show_download_progress(true);
+    let model = TextEmbedding::try_new(opts).ok()?;
+    let docs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    model.embed(docs, None).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

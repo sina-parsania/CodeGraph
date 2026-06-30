@@ -189,7 +189,7 @@ impl CodeGraphServer {
         Ok(snap)
     }
 
-    #[tool(description = "Find symbols by MEANING rather than exact name (vector search). Use when you do not know the symbol name. Needs a local embedding model + a prior `codegraph semantic-index`; degrades gracefully if unavailable.")]
+    #[tool(description = "Find symbols by MEANING rather than exact name (vector search). Use when you do not know the symbol name. Uses a BUNDLED local embedder (bge-small, no server) when built with --features local-embed, else a local LLM endpoint; needs a prior `codegraph semantic-index`. Degrades gracefully if unavailable.")]
     async fn semantic_search(&self, args: Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
         self.maybe_refresh();
         let db = self.db_path.clone();
@@ -333,10 +333,8 @@ impl CodeGraphServer {
 
 fn semantic_blocking(db: &std::path::Path, q: &str, limit: usize) -> Vec<serde_json::Value> {
     let Ok(store) = codegraph_store::Store::open(db) else { return Vec::new() };
-    let Some(backend) = codegraph_llm::OpenAiCompatBackend::detect().filter(|b| b.embed_model().is_some()) else {
-        return Vec::new();
-    };
-    let Some(qv) = backend.embed(q).map(|v| codegraph_core::normalize(&v)) else { return Vec::new() };
+    let Some((qvs, _)) = codegraph_llm::embed_texts(&[q.to_string()]) else { return Vec::new() };
+    let Some(qv) = qvs.into_iter().next() else { return Vec::new() };
     let Ok(vectors) = store.all_vectors() else { return Vec::new() };
     let mut scored: Vec<(f32, String)> =
         vectors.iter().map(|(id, v)| (codegraph_core::dot(&qv, v), id.clone())).collect();

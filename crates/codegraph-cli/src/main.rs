@@ -679,42 +679,42 @@ fn main() -> anyhow::Result<()> {
         }
         Command::SemanticIndex { path } => {
             let store = codegraph_store::Store::open(&index::db_path(&path))?;
-            match codegraph_llm::OpenAiCompatBackend::detect().filter(|b| b.embed_model().is_some()) {
-                Some(b) => {
-                    let nodes = store.all_nodes()?;
-                    let mut n = 0usize;
-                    for node in &nodes {
-                        if node.label == codegraph_core::NodeLabel::File {
-                            continue;
-                        }
-                        let text = format!("{} {:?} in {}", node.name, node.label, node.file_path);
-                        if let Some(v) = b.embed(&text) {
-                            store.upsert_vector(&node.id, &v)?;
-                            n += 1;
-                        }
+            let nodes = store.all_nodes()?;
+            let items: Vec<(&codegraph_core::Node, String)> = nodes
+                .iter()
+                .filter(|n| n.label != codegraph_core::NodeLabel::File)
+                .map(|n| (n, format!("{} {:?} in {}", n.name, n.label, n.file_path)))
+                .collect();
+            let texts: Vec<String> = items.iter().map(|(_, t)| t.clone()).collect();
+            match codegraph_llm::embed_texts(&texts) {
+                Some((vecs, model)) if !vecs.is_empty() => {
+                    for ((node, _), v) in items.iter().zip(vecs.iter()) {
+                        store.upsert_vector(&node.id, v)?;
                     }
-                    println!("embedded {} symbols using {}", n, b.embed_model().unwrap_or("?"));
+                    println!("embedded {} symbols using {}", vecs.len(), model);
                 }
-                None => println!("no embedding model loaded - load one (LM Studio: `lms load <embed-model>`; Ollama: `ollama pull nomic-embed-text`)"),
+                _ => println!(
+                    "no embedder available — rebuild with `--features local-embed` for a bundled model (bge-small, no server), or load one in LM Studio / Ollama"
+                ),
             }
         }
         Command::Semantic { query: q, path, limit, hyde } => {
             let store = codegraph_store::Store::open(&index::db_path(&path))?;
-            let Some(b) = codegraph_llm::OpenAiCompatBackend::detect().filter(|b| b.embed_model().is_some()) else {
-                println!("no embedding model available (load one in LM Studio / Ollama)");
-                return Ok(());
-            };
+            // HyDE rewrites the query via a chat model (needs a server); skip if none.
             let query_text = if hyde || cfg.llm.hyde {
-                b.generate(&format!("Write a short code documentation snippet that would answer this query (no preamble): {}", q), 200)
+                codegraph_llm::OpenAiCompatBackend::detect()
+                    .and_then(|b| b.generate(&format!("Write a short code documentation snippet that would answer this query (no preamble): {q}"), 200))
                     .unwrap_or_else(|| q.clone())
             } else {
                 q.clone()
             };
-            let Some(qv) = b.embed(&query_text) else {
-                println!("embedding request failed - is an embedding model LOADED? (LM Studio: lms load <embed-model>; only downloaded != loaded)");
+            let Some((qvs, _)) = codegraph_llm::embed_texts(&[query_text]) else {
+                println!(
+                    "no embedder available — rebuild with `--features local-embed` (bundled bge-small, no server) or load a model in LM Studio / Ollama"
+                );
                 return Ok(());
             };
-            let qv = codegraph_core::normalize(&qv);
+            let Some(qv) = qvs.into_iter().next() else { return Ok(()) };
             let vectors = store.all_vectors()?;
             if vectors.is_empty() {
                 println!("no vectors yet - run `codegraph semantic-index` first");
