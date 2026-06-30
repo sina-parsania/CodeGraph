@@ -688,10 +688,10 @@ fn main() -> anyhow::Result<()> {
             let texts: Vec<String> = items.iter().map(|(_, t)| t.clone()).collect();
             match codegraph_llm::embed_texts(&texts) {
                 Some((vecs, model)) if !vecs.is_empty() => {
-                    for ((node, _), v) in items.iter().zip(vecs.iter()) {
-                        store.upsert_vector(&node.id, v)?;
-                    }
-                    println!("embedded {} symbols using {}", vecs.len(), model);
+                    let rows: Vec<(String, Vec<f32>)> =
+                        items.iter().zip(vecs).map(|((node, _), v)| (node.id.clone(), v)).collect();
+                    store.upsert_vectors(&rows)?;
+                    println!("embedded {} symbols using {}", rows.len(), model);
                 }
                 _ => println!(
                     "no embedder available — rebuild with `--features local-embed` for a bundled model (bge-small, no server), or load one in LM Studio / Ollama"

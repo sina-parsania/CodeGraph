@@ -451,16 +451,27 @@ impl Store {
     }
 
     pub fn upsert_vector(&self, node_id: &str, v: &[f32]) -> Result<()> {
-        // Store L2-normalized so semantic scoring is a plain dot product (== cosine).
-        let v = codegraph_core::normalize(v);
-        let mut bytes = Vec::with_capacity(v.len() * 4);
-        for f in &v {
-            bytes.extend_from_slice(&f.to_le_bytes());
+        self.upsert_vectors(std::slice::from_ref(&(node_id.to_string(), v.to_vec())))
+    }
+
+    /// Batch-store vectors in ONE transaction — 40k+ individual inserts otherwise
+    /// autocommit one row at a time (minutes). Vectors stored L2-normalized so
+    /// semantic scoring is a plain dot product (== cosine).
+    pub fn upsert_vectors(&self, items: &[(String, Vec<f32>)]) -> Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        {
+            let mut stmt =
+                self.conn.prepare("INSERT OR REPLACE INTO vectors(node_id, vec) VALUES(?1, ?2)")?;
+            for (id, v) in items {
+                let n = codegraph_core::normalize(v);
+                let mut bytes = Vec::with_capacity(n.len() * 4);
+                for f in &n {
+                    bytes.extend_from_slice(&f.to_le_bytes());
+                }
+                stmt.execute(params![id, bytes])?;
+            }
         }
-        self.conn.execute(
-            "INSERT OR REPLACE INTO vectors(node_id, vec) VALUES(?1, ?2)",
-            params![node_id, bytes],
-        )?;
+        self.conn.execute_batch("COMMIT")?;
         Ok(())
     }
 
