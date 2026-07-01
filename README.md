@@ -4,7 +4,7 @@
 
 CodeGraph indexes any repository into a **resolved code knowledge graph** (SQLite) and serves it to AI agents over **MCP** (Claude Code, Cursor, Zed, …) and a full **CLI**. Agents stop grepping and reading whole files — they ask the graph and get exact `file:line` answers with resolved call edges.
 
-[![release](https://img.shields.io/github/v/release/sina-parsania/FlowCrafter?label=release)](../../releases)
+[![release](https://img.shields.io/github/v/release/sina-parsania/CodeGraph?label=release)](../../releases)
 ![rust](https://img.shields.io/badge/rust-single%20static%20binary-orange)
 ![languages](https://img.shields.io/badge/languages-13-blue)
 ![license](https://img.shields.io/badge/license-MIT%2FApache--2.0-green)

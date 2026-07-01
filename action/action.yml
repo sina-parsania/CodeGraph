@@ -13,7 +13,7 @@ runs:
     - name: Install codegraph
       shell: bash
       run: |
-        curl -sL "https://github.com/sina-parsania/FlowCrafter/releases/latest/download/codegraph-macos-arm64" -o /usr/local/bin/codegraph || true
+        curl -sL "https://github.com/sina-parsania/CodeGraph/releases/latest/download/codegraph-macos-arm64" -o /usr/local/bin/codegraph || true
         chmod +x /usr/local/bin/codegraph 2>/dev/null || true
         codegraph --version
     - name: Index + review
