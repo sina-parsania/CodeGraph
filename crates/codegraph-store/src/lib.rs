@@ -171,6 +171,8 @@ impl Store {
              CREATE INDEX IF NOT EXISTS idx_locals_file ON locals(file_path);
              CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
                id UNINDEXED, name, parts, label, language);
+             CREATE TABLE IF NOT EXISTS meta(
+               key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS cochanges(
                file_a TEXT, file_b TEXT, n INTEGER,
                PRIMARY KEY(file_a, file_b)) WITHOUT ROWID;",
@@ -314,6 +316,18 @@ impl Store {
                SELECT id, name, cg_subwords(name), label, language FROM nodes;",
         )?;
         Ok(())
+    }
+
+    pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![key, value])?;
+        Ok(())
+    }
+
+    pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .optional()?)
     }
 
     /// Replace the git co-change pairs (files that historically change together).

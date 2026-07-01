@@ -2,6 +2,7 @@
 //! a real standalone package.
 
 mod configcmd;
+mod cypher;
 mod index;
 mod init;
 mod query;
@@ -130,6 +131,13 @@ enum Command {
         path: PathBuf,
         #[arg(long, default_value_t = 50)]
         limit: usize,
+    },
+    /// Cypher-lite graph query (read-only openCypher subset): 1-2 hop MATCH with
+    /// labels/relations, WHERE (=/CONTAINS/STARTS WITH/AND), RETURN props, LIMIT.
+    Cypher {
+        query: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
     },
     /// List the largest code communities (clusters) detected in the graph.
     Communities {
@@ -358,7 +366,8 @@ fn project_path(cmd: &Command) -> Option<PathBuf> {
         | Important { path, .. } | Implementers { path, .. } | Callers { path, .. } | Ask { path, .. }
         | SemanticIndex { path, .. } | Semantic { path, .. } | Ingest { path, .. } | Mcp { path, .. }
         | Context { path, .. } | RenameSymbol { path, .. } | DeadCode { path, .. }
-        | Changes { path, .. } | Export { path, .. } | Import { path, .. } | Flows { path, .. } => Some(path.clone()),
+        | Changes { path, .. } | Export { path, .. } | Import { path, .. } | Flows { path, .. }
+        | Cypher { path, .. } => Some(path.clone()),
         Init { repo, .. } | Scip { path: repo } => Some(repo.clone()),
         Install { .. } | Status | Doctor | Gc { .. } | Projects | Config { .. } => None,
     }
@@ -372,7 +381,7 @@ fn needs_fresh(cmd: &Command) -> bool {
         Search { .. } | Callers { .. } | Callees { .. } | Impact { .. } | Trace { .. }
             | Important { .. } | Communities { .. } | Routes { .. } | Query { .. }
             | Implementers { .. } | Ask { .. } | Semantic { .. } | Context { .. } | RenameSymbol { .. }
-            | DeadCode { .. } | Changes { .. } | Flows { .. }
+            | DeadCode { .. } | Changes { .. } | Flows { .. } | Cypher { .. }
     )
 }
 
@@ -590,6 +599,21 @@ fn main() -> anyhow::Result<()> {
                 for (root, bytes) in &report.removed {
                     println!("  {}  ({})", root, registry::human_bytes(*bytes));
                 }
+            }
+        }
+        Command::Cypher { query: cq, path } => {
+            let sql = match cypher::to_sql(&cq) {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("cypher-lite: {e}");
+                    return Ok(());
+                }
+            };
+            let db = index::db_path(&path);
+            let (cols, rows) = codegraph_store::query_readonly(&db, &sql, 500)?;
+            println!("{}", cols.join(" | "));
+            for row in rows {
+                println!("{}", row.join(" | "));
             }
         }
         Command::Query { sql, path, limit } => {
@@ -931,6 +955,7 @@ fn main() -> anyhow::Result<()> {
                     let rows: Vec<(String, Vec<f32>)> =
                         items.iter().zip(vecs).map(|((node, _), v)| (node.id.clone(), v)).collect();
                     store.upsert_vectors(&rows)?;
+                    store.meta_set("embed_model", &model)?;
                     println!("embedded {} symbols using {}", rows.len(), model);
                 }
                 _ => println!(
@@ -948,13 +973,19 @@ fn main() -> anyhow::Result<()> {
             } else {
                 q.clone()
             };
-            let Some((qvs, _)) = codegraph_llm::embed_texts(&[query_text]) else {
+            let Some((qvs, qmodel)) = codegraph_llm::embed_texts(&[query_text]) else {
                 println!(
                     "no embedder available — rebuild with `--features local-embed` (bundled bge-small, no server) or load a model in LM Studio / Ollama"
                 );
                 return Ok(());
             };
             let Some(qv) = qvs.into_iter().next() else { return Ok(()) };
+            if let Some(stamped) = store.meta_get("embed_model")? {
+                if stamped != qmodel {
+                    println!("index was embedded with {stamped:?} but the query used {qmodel:?} — cosine would be garbage.\nRe-run `codegraph semantic-index` (same CODEGRAPH_LOCAL_EMBED setting) first.");
+                    return Ok(());
+                }
+            }
             let vectors = store.all_vectors()?;
             if vectors.is_empty() {
                 println!("no vectors yet - run `codegraph semantic-index` first");
