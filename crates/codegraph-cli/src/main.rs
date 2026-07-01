@@ -166,6 +166,14 @@ enum Command {
         #[arg(long, default_value = "HEAD")]
         base: String,
     },
+    /// Execution flows: call chains from ENTRY POINTS (route handlers, main,
+    /// zero-fan-in hubs), ranked by criticality (reach × centrality).
+    Flows {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
     /// Export the graph as a shareable zstd artifact (.codegraph/graph.db.zst).
     /// Deterministic graphs make this safe to commit: teammates `import` and skip
     /// the full reindex (incremental heals any drift).
@@ -287,6 +295,35 @@ enum ConfigAction {
 /// `(byte_start, byte_end, line)` to rewrite).
 type RenameFilePlan = (String, String, Vec<(usize, usize, u32)>);
 
+/// Entry points for flow detection: HTTP route handlers (resolved by name within
+/// the route's file), `main`, and zero-fan-in functions that call 3+ others
+/// (likely tasks/jobs). Each tagged with its kind.
+fn detect_entry_points(nodes: &[codegraph_core::Node]) -> Vec<(&codegraph_core::Node, &'static str)> {
+    use codegraph_core::NodeLabel::*;
+    let mut out: Vec<(&codegraph_core::Node, &'static str)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for r in nodes.iter().filter(|n| n.label == Route) {
+        if let Some(h) = r.metadata.get("handler").and_then(|v| v.as_str()) {
+            if let Some(f) = nodes.iter().find(|n| {
+                n.name == h && n.file_path == r.file_path && matches!(n.label, Function | Method)
+            }) {
+                if seen.insert(&f.id) {
+                    out.push((f, "route"));
+                }
+            }
+        }
+    }
+    for f in nodes.iter().filter(|n| matches!(n.label, Function | Method)) {
+        let fan_in = f.metadata.get("fan_in").and_then(|v| v.as_u64()).unwrap_or(0);
+        let fan_out = f.metadata.get("fan_out").and_then(|v| v.as_u64()).unwrap_or(0);
+        let is_main = f.name == "main";
+        if (is_main || (fan_in == 0 && fan_out >= 3)) && seen.insert(&f.id) {
+            out.push((f, if is_main { "main" } else { "task" }));
+        }
+    }
+    out
+}
+
 /// Print a one-line coverage signal under a call-graph result so the agent (or
 /// human) knows when the precise list may be incomplete and should grep instead.
 fn print_coverage(c: &codegraph_core::Coverage) {
@@ -317,7 +354,7 @@ fn project_path(cmd: &Command) -> Option<PathBuf> {
         | Important { path, .. } | Implementers { path, .. } | Callers { path, .. } | Ask { path, .. }
         | SemanticIndex { path, .. } | Semantic { path, .. } | Ingest { path, .. } | Mcp { path, .. }
         | Context { path, .. } | RenameSymbol { path, .. } | DeadCode { path, .. }
-        | Changes { path, .. } | Export { path, .. } | Import { path, .. } => Some(path.clone()),
+        | Changes { path, .. } | Export { path, .. } | Import { path, .. } | Flows { path, .. } => Some(path.clone()),
         Init { repo, .. } | Scip { path: repo } => Some(repo.clone()),
         Install { .. } | Status | Doctor | Gc { .. } | Projects | Config { .. } => None,
     }
@@ -331,7 +368,7 @@ fn needs_fresh(cmd: &Command) -> bool {
         Search { .. } | Callers { .. } | Callees { .. } | Impact { .. } | Trace { .. }
             | Important { .. } | Communities { .. } | Routes { .. } | Query { .. }
             | Implementers { .. } | Ask { .. } | Semantic { .. } | Context { .. } | RenameSymbol { .. }
-            | DeadCode { .. } | Changes { .. }
+            | DeadCode { .. } | Changes { .. } | Flows { .. }
     )
 }
 
@@ -698,6 +735,34 @@ fn main() -> anyhow::Result<()> {
                 hv.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
                 for (f, n) in hv.into_iter().take(8) {
                     println!("  {f}  (co-changed {n}×)");
+                }
+            }
+        }
+        Command::Flows { path, limit } => {
+            let l = query::Loaded::open(&index::db_path(&path))?;
+            let entries = detect_entry_points(&l.nodes);
+            let mut flows: Vec<(f64, &codegraph_core::Node, Vec<String>, &str)> = entries
+                .iter()
+                .map(|(n, kind)| {
+                    let body = l.lg.flow_from(&n.id, 6);
+                    let crit: f64 = body
+                        .iter()
+                        .filter_map(|id| l.nodes.iter().find(|x| x.id == *id))
+                        .map(|x| x.pagerank)
+                        .sum::<f64>()
+                        * (1.0 + body.len() as f64).ln();
+                    (crit, *n, body, *kind)
+                })
+                .filter(|(_, _, body, _)| !body.is_empty())
+                .collect();
+            flows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            println!("# {} entry points, top {} flows by criticality:\n", entries.len(), limit);
+            for (crit, entry, body, kind) in flows.iter().take(limit) {
+                println!("[{kind:<6}] {:<30} reach={:<4} crit={:.4}  {}:{}", entry.name, body.len(), crit, entry.file_path, entry.line_start);
+                for id in body.iter().take(5) {
+                    if let Some(x) = l.nodes.iter().find(|n| n.id == *id) {
+                        println!("    → {:<26} {}:{}", x.name, x.file_path, x.line_start);
+                    }
                 }
             }
         }

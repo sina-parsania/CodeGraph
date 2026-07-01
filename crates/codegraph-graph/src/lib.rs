@@ -854,6 +854,33 @@ impl LoadedGraph {
         out
     }
 
+
+    /// Forward reachability over CALLS edges from `start` (the flow body).
+    pub fn flow_from(&self, start: &str, max_depth: usize) -> Vec<String> {
+        use petgraph::visit::EdgeRef;
+        let Some(&s) = self.idx.get(start) else { return Vec::new() };
+        let mut visited: HashSet<_> = HashSet::from([s]);
+        let mut frontier = vec![s];
+        let mut out = Vec::new();
+        for _ in 0..max_depth {
+            let mut next = Vec::new();
+            for &n in &frontier {
+                for e in self.graph.edges(n).filter(|e| e.weight() == "Calls") {
+                    let t = e.target();
+                    if visited.insert(t) {
+                        next.push(t);
+                        out.push(self.ids[t.index()].clone());
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+        out
+    }
+
     /// Direct callees (outgoing CALLS edges) of a node id.
     pub fn callees(&self, of: &str) -> Vec<String> {
         use petgraph::visit::EdgeRef;
