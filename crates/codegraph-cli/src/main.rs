@@ -166,6 +166,23 @@ enum Command {
         #[arg(long, default_value = "HEAD")]
         base: String,
     },
+    /// Export the graph as a shareable zstd artifact (.codegraph/graph.db.zst).
+    /// Deterministic graphs make this safe to commit: teammates `import` and skip
+    /// the full reindex (incremental heals any drift).
+    Export {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Output file (default <repo>/.codegraph/graph.db.zst).
+        #[arg(long, short = 'o')]
+        out: Option<PathBuf>,
+    },
+    /// Import a graph artifact produced by `export` into the local cache.
+    Import {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Artifact file (default <repo>/.codegraph/graph.db.zst).
+        file: Option<PathBuf>,
+    },
     /// Rename a symbol + all its RESOLVED references. Safe: refuses unless every
     /// occurrence of the name in each affected file is accounted for by a resolved
     /// reference (else it could corrupt code). Dry-run diff by default; --write applies.
@@ -295,7 +312,7 @@ fn project_path(cmd: &Command) -> Option<PathBuf> {
         | Important { path, .. } | Implementers { path, .. } | Callers { path, .. } | Ask { path, .. }
         | SemanticIndex { path, .. } | Semantic { path, .. } | Ingest { path, .. } | Mcp { path, .. }
         | Context { path, .. } | RenameSymbol { path, .. } | DeadCode { path, .. }
-        | Changes { path, .. } => Some(path.clone()),
+        | Changes { path, .. } | Export { path, .. } | Import { path, .. } => Some(path.clone()),
         Init { repo, .. } | Scip { path: repo } => Some(repo.clone()),
         Install { .. } | Status | Doctor | Gc { .. } | Projects | Config { .. } => None,
     }
@@ -661,6 +678,38 @@ fn main() -> anyhow::Result<()> {
                     println!("  {f}  (co-changed {n}×)");
                 }
             }
+        }
+        Command::Export { path, out } => {
+            let db = index::db_path(&path);
+            let bytes = std::fs::read(&db)?;
+            let compressed = zstd::encode_all(&bytes[..], 9)?;
+            let dest = out.unwrap_or_else(|| path.join(".codegraph/graph.db.zst"));
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&dest, &compressed)?;
+            println!(
+                "exported {} -> {} ({:.1} MB -> {:.1} MB, {:.0}% smaller)",
+                db.display(),
+                dest.display(),
+                bytes.len() as f64 / 1e6,
+                compressed.len() as f64 / 1e6,
+                100.0 * (1.0 - compressed.len() as f64 / bytes.len() as f64)
+            );
+        }
+        Command::Import { path, file } => {
+            let src = file.unwrap_or_else(|| path.join(".codegraph/graph.db.zst"));
+            let compressed = std::fs::read(&src)?;
+            let bytes = zstd::decode_all(&compressed[..])?;
+            let db = index::db_path(&path);
+            if let Some(parent) = db.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&db, &bytes)?;
+            // Sanity-open (runs migrations) then heal any drift incrementally.
+            let _ = codegraph_store::Store::open(&db)?;
+            index::ensure_fresh(&path)?;
+            println!("imported {} -> {} (graph live; drift healed incrementally)", src.display(), db.display());
         }
         Command::RenameSymbol { name, new_name, path, write } => {
             use codegraph_core::NodeLabel::*;

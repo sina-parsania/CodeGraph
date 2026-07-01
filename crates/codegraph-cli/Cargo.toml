@@ -28,6 +28,7 @@ walkdir.workspace = true
 ignore.workspace = true
 rayon.workspace = true
 sha2.workspace = true
+zstd.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [features]
