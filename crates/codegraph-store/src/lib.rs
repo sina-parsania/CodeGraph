@@ -24,7 +24,7 @@ type Result<T> = std::result::Result<T, StoreError>;
 const SCHEMA_VERSION: i64 = 3;
 
 /// Split an identifier into lowercase subwords: camelCase, PascalCase, snake_case,
-/// kebab-case, and digit boundaries (`MealSenseCookSession` → `meal sense cook session`,
+/// kebab-case, and digit boundaries (`OrderCheckoutSession` → `order checkout session`,
 /// `HTTPServer2Go` → `http server 2 go`). Indexed alongside the raw name so FTS
 /// matches mid-identifier words natively — no query-side hacks.
 pub fn subwords(name: &str) -> String {
@@ -490,7 +490,7 @@ impl Store {
 
     /// Forgiving search: exact FTS first (precise), and if that's empty fall back
     /// to an OR-of-prefixes over the query's identifier tokens — so a camelCase
-    /// fragment like `MealSenseCook` finds `MealSenseCookSession` (one FTS token).
+    /// fragment like `OrderCheckout` finds `OrderCheckoutSession` (one FTS token).
     /// Multiple words are OR'd (multi-term search). FTS special chars are stripped.
     pub fn search_smart(&self, raw: &str, limit: usize) -> Result<Vec<Node>> {
         let exact = self.search_fts(raw, limit)?;
@@ -498,7 +498,7 @@ impl Store {
             return Ok(exact);
         }
         // Fallback: split the query into identifier subwords (camel/snake aware —
-        // `MealSenseCook` → meal sense cook) and OR-prefix them; the FTS `parts`
+        // `OrderCheckout` → order checkout) and OR-prefix them; the FTS `parts`
         // column indexes node names the same way, so mid-identifier words match.
         let mut seen = std::collections::HashSet::new();
         let fts = raw
@@ -1167,7 +1167,7 @@ mod tests {
 mod subword_tests {
     #[test]
     fn subwords_splits_camel_snake_digits() {
-        assert_eq!(super::subwords("MealSenseCookSession"), "meal sense cook session");
+        assert_eq!(super::subwords("OrderCheckoutSession"), "order checkout session");
         assert_eq!(super::subwords("HTTPServer2Go"), "http server 2 go");
         assert_eq!(super::subwords("snake_case_name"), "snake case name");
         assert_eq!(super::subwords("plain"), ""); // single token adds nothing

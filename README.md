@@ -41,7 +41,7 @@ A competent agent answering _"who calls this?"_ with grep must read context arou
 
 ### 🔎 Search that actually finds things
 
-- **Subword FTS**: `Cook` finds `MealSenseCookWithMaiaViewController` (camelCase/snake split at index time).
+- **Subword FTS**: `Cook` finds `OrderCheckoutSessionViewController` (camelCase/snake split at index time).
 - `--regex` for anchors/middle fragments; multi-word OR; **semantic search by meaning** via a **bundled local embedder** — _no server, no API key_ (`bge-small` default, `CODEGRAPH_LOCAL_EMBED=code` for the 768-d code-trained model; the model is stamped into the index, mismatches refused).
 
 ### 🧭 Graph intelligence
@@ -69,7 +69,7 @@ A competent agent answering _"who calls this?"_ with grep must read context arou
 
 ```bash
 codegraph init                    # one-time: index + MCP wiring + agent nudge
-codegraph search MealSenseCook    # subword-tolerant symbol search
+codegraph search OrderCheckout    # subword-tolerant symbol search
 codegraph callers create          # 44 definitions? → pinnable candidates, not a merged lie
 codegraph review --base develop   # risk + test gaps + co-change hints for your diff
 codegraph flows                   # entry-point call chains by criticality

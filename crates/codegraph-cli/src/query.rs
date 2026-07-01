@@ -36,8 +36,8 @@ impl Loaded {
 /// Turn a natural-language question into an FTS5 OR-query of identifier-ish tokens.
 pub fn fts_query_from(q: &str) -> String {
     let mut seen = std::collections::HashSet::new();
-    // Split on every non-identifier char (so `fix(meal-sense):` → meal, sense) and
-    // prefix-match each token (`meal*` matches the camelCase token `MealSense…`).
+    // Split on every non-identifier char (so `fix(order-flow):` → order, flow) and
+    // prefix-match each token (`order*` matches the camelCase token `OrderCheckout…`).
     q.split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|t| t.len() > 2)
         .filter(|t| seen.insert(t.to_lowercase()))

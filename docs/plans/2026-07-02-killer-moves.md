@@ -48,10 +48,10 @@
 
 ## 7. Cross-project route/topic linking (`CROSS_*` edges)
 - **What:** canonicalize HTTP client call paths (`/api/orders/{id}`) and async topics; match against Route/Channel nodes in other indexed project DBs; write bidirectional cross-edges (CBM's `pass_cross_repo.c` concept). `blast_radius` crosses service boundaries.
-- **Why:** killer for exactly the ProMom-shaped user (backend-app → knowledge-rag internal API). CBM's version exists but sits on guessed call edges; ours sits on resolved routes — the answer is trustable.
+- **Why:** killer for exactly the monorepo user (an API service calling an internal ML service). CBM's version exists but sits on guessed call edges; ours sits on resolved routes — the answer is trustable.
 - **Rust:** canonical-path table per project DB; join at index or query time; path templating normalizer.
 - **Effort:** M (~1 week).
-- **Success:** `blast_radius` on a backend-app RAG-client method lists the knowledge-rag handler; zero false cross-edges on the promom corpus.
+- **Success:** `blast_radius` on a client method lists the downstream service handler; zero false cross-edges on a real multi-service corpus.
 
 ## 8. zstd index artifact export/import
 - **What:** `codegraph export` = `VACUUM INTO` temp + zstd → `graph.db.zst`; `codegraph import`. Wire into #1's action cache.
