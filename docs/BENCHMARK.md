@@ -11,6 +11,22 @@ supersede: **codebase-memory-mcp**, **graphify**, **qmd**, **codebase-index**.
 > source is the authoritative spec). `codebase-index` and `qmd` were run live; the
 > rest are compared on documented capabilities. Gaps are called out, not hidden.
 
+## Verdict (v1.24, measured + source-audited)
+
+Live 3-way runs on the same repos (binaries: codebase-memory-mcp v0.8.1, code-review-graph 2.3.6):
+
+| | **CodeGraph** | codebase-memory-mcp | code-review-graph |
+| --- | --- | --- | --- |
+| cold index (14k-symbol backend) | **1.5–2.0 s** | 7.8 s (2.8 s small repo) | 11.1 s |
+| binary / install | **~5 MB, single file** | 269 MB | pip + Python |
+| ambiguous `callers create` | **44 pinnable candidates** + coverage | 79 callers silently merged across ALL same-name defs (`mcp.c:2888` unions by design) | common names blocklisted → 0 results |
+| confidence honesty | justification tag on every edge + `may_be_incomplete` | hidden floor (0.006) | tiers are a dead schema column (never populated) |
+| review/risk | multiplicative resolved-edge risk, `--md`, GH Action, TESTS edges, co-change | — | flat keyword bumps (+0.20 "validate") → gate unusable at defaults; flow recall 33 % (their FAQ) |
+| cross-service | route hubs in ONE graph (334 HttpCalls edges, hubs across 3 projects) | multi-DB CROSS_* over guessed edges | — |
+| Swift | compiler-grade via Xcode IndexStore (+171 %) | tree-sitter only | tree-sitter only |
+
+Deliberately not chased: their 158 vendored grammars (we ship 13 + SCIP for the rest), 3-D visualization, audio/video ingest.
+
 ## 0. The real competitors — Serena & aider repo-map
 
 These two share CodeGraph's space (give an LLM agent structural code understanding),
@@ -27,7 +43,7 @@ via its `solidlsp` client) so its find-references and definitions are **compiler
 |                      | Serena                                                                                                                               | CodeGraph                                                                               |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
 | Reference resolution | compiler-grade via LSP (high recall + precision)                                                                                     | tree-sitter CHA, **precision-first, lower recall** (unique-or-drop); SCIP tier optional |
-| Edits code           | ✅ rename/replace/move/safe-delete                                                                                                   | ❌ read-only analysis                                                                   |
+| Edits code           | ✅ rename/replace/move/safe-delete                                                                                                   | ⚠ coverage-gated `rename-symbol` (refuses when not provably safe)                                                                   |
 | Per-language setup   | one language server **per language** (some need the toolchain on PATH)                                                               | **one static binary**, 13 languages, nothing else installed                             |
 | Cold start           | **194.5 s measured live** to index a 1-file Python project (uv install + Pyright auto-download dominate); recurs per language server | a 2,189-file Swift project in **~1.3 s**, queries answer cold                           |
 | Graph analytics      | ❌ none                                                                                                                              | ✅ PageRank · Louvain communities · betweenness · blast-radius · trace · routes         |
@@ -36,7 +52,7 @@ via its `solidlsp` client) so its find-references and definitions are **compiler
 **Where each wins:** Serena for _editing_ and _high-recall compiler-accurate references_ on a
 language whose server is installed; CodeGraph for _zero-setup polyglot indexing_, _sub-second cold
 queries_, and _whole-graph analytics_ (centrality, communities, impact) Serena has no concept of.
-They're complementary — Serena is an edit-capable LSP brain, CodeGraph a read-only graph analyzer.
+CodeGraph also ships coverage-gated `rename-symbol` (refuses rather than corrupts); Serena's LSP renames remain broader.
 
 ### aider repo-map — name-match PageRank for context selection
 
@@ -49,15 +65,14 @@ symbols to fit `--map-tokens`. Its purpose is **dynamic, prompt-aware context se
 |                     | aider repo-map                                              | CodeGraph                                                                                |
 | ------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | Edges               | name-match file→file (every definer), approximate by design | **resolved** CALLS edges (unique-or-drop; audited 99.4–99.9% call-present, zero phantom) |
-| Ranking             | **PageRank personalized to the live prompt**, budget-fitted | static global PageRank (`important`) — **no prompt-awareness or budget-fit yet**         |
+| Ranking             | **PageRank personalized to the live prompt**, budget-fitted | **`context`**: personalized PageRank over RESOLVED edges, token-budgeted (query-seeded)         |
 | Queryable graph     | ❌ transient, discarded after building the map              | ✅ callers/callees/impact/trace/implementers + SQL, persisted in SQLite                  |
 | Compiler-grade tier | ❌                                                          | ✅ optional SCIP merge                                                                   |
 
 **Where each wins:** aider for _prompt-aware, token-budgeted context ranking_ inside an edit loop (its
 core competency — CodeGraph's `important` is static and not budget-fitted); CodeGraph for _precise,
 queryable, persistent structural navigation_ (resolved callers/callees/impact/trace) aider's
-ranking-only map never attempts. The honest gap aider exposes: CodeGraph has **no personalized,
-budget-fitted context-selection layer** — a worthwhile future add.
+ranking-only map never attempts. The honest gap aider exposes: CodeGraph's `context` now covers the personalized, budget-fitted selection (resolved-edge-based).
 
 ## 1. Live head-to-heads (same machine, same corpus)
 

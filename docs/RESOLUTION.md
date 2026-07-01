@@ -51,7 +51,7 @@ Anything a tier can't resolve uniquely **drops** to T4 or is left unlinked — e
 
 - `build()` becomes tiered T0→T4, first match wins; each new tier emits **only** where the call is otherwise dropped.
 - one `resolve_member()` helper; `class_members` from MemberOf (or containment pre-B1); `field_types` from the field→type table; both built from the global persisted sets inside `build()`.
-- tag every CALLS edge with `Edge.metadata.justification ∈ {SameFileUnique, SelfThisMember, StaticTypeMember, FieldTypeMember, GlobalUnique}` + per-tier counters for measurement.
+- tag every CALLS edge with `Edge.metadata.justification ∈ {SameFileUnique, SelfThisMember, FieldTypeMember, LocalVarType, ImportNarrowed, PackageScope, GlobalUnique, HttpPath, IndexStore}` + per-tier counters for measurement.
 - global rebuild contract unchanged → determinism + incremental==full hold by construction.
 
 ## Precision proof obligations (tests)
