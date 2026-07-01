@@ -21,7 +21,57 @@ pub enum StoreError {
 
 type Result<T> = std::result::Result<T, StoreError>;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
+
+/// Split an identifier into lowercase subwords: camelCase, PascalCase, snake_case,
+/// kebab-case, and digit boundaries (`MealSenseCookSession` → `meal sense cook session`,
+/// `HTTPServer2Go` → `http server 2 go`). Indexed alongside the raw name so FTS
+/// matches mid-identifier words natively — no query-side hacks.
+pub fn subwords(name: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let chars: Vec<char> = name.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() {
+            if !cur.is_empty() {
+                parts.push(std::mem::take(&mut cur));
+            }
+            continue;
+        }
+        if !cur.is_empty() {
+            let prev = chars[i - 1];
+            let boundary = (c.is_uppercase() && prev.is_lowercase())
+                || (c.is_uppercase() && prev.is_uppercase() && chars.get(i + 1).is_some_and(|n| n.is_lowercase()))
+                || (c.is_ascii_digit() != prev.is_ascii_digit() && prev.is_alphanumeric());
+            if boundary {
+                parts.push(std::mem::take(&mut cur));
+            }
+        }
+        cur.push(c.to_ascii_lowercase());
+    }
+    if !cur.is_empty() {
+        parts.push(cur);
+    }
+    if parts.len() <= 1 {
+        return String::new(); // single token adds nothing over the name column
+    }
+    parts.join(" ")
+}
+
+/// SQL scalar `cg_subwords(name)` so FTS rebuilds stay pure SQL.
+fn register_subwords_fn(conn: &Connection) -> Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    conn.create_scalar_function(
+        "cg_subwords",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let name: String = ctx.get(0)?;
+            Ok(subwords(&name))
+        },
+    )?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManifestEntry {
@@ -60,6 +110,7 @@ impl Store {
         conn.pragma_update(None, "busy_timeout", 5000i64)?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
         conn.pragma_update(None, "cache_size", -65536i64)?;
+        register_subwords_fn(&conn)?;
         let store = Store { conn };
         store.migrate()?;
         Ok(store)
@@ -116,7 +167,10 @@ impl Store {
                caller_id TEXT, var_name TEXT, type_name TEXT, file_path TEXT);
              CREATE INDEX IF NOT EXISTS idx_locals_file ON locals(file_path);
              CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
-               id UNINDEXED, name, label, language);",
+               id UNINDEXED, name, parts, label, language);
+             CREATE TABLE IF NOT EXISTS cochanges(
+               file_a TEXT, file_b TEXT, n INTEGER,
+               PRIMARY KEY(file_a, file_b)) WITHOUT ROWID;",
         )?;
         // Additive column migrations for pre-existing DBs (best-effort; the next
         // index rebuilds calls anyway). Ignore "duplicate column" on re-run.
@@ -130,9 +184,22 @@ impl Store {
             .conn
             .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0))
             .optional()?;
-        if current.is_none() {
-            self.conn
-                .execute("INSERT INTO schema_version(version) VALUES(?1)", [SCHEMA_VERSION])?;
+        match current {
+            None => {
+                self.conn
+                    .execute("INSERT INTO schema_version(version) VALUES(?1)", [SCHEMA_VERSION])?;
+            }
+            Some(v) if v < SCHEMA_VERSION => {
+                // FTS shape changed (v3 adds `parts`): rebuild in place from `nodes`
+                // so old DBs keep working without a manual reindex.
+                self.conn.execute_batch(
+                    "DROP TABLE IF EXISTS nodes_fts;
+                     CREATE VIRTUAL TABLE nodes_fts USING fts5(id UNINDEXED, name, parts, label, language);",
+                )?;
+                self.rebuild_fts()?;
+                self.conn.execute("UPDATE schema_version SET version = ?1", [SCHEMA_VERSION])?;
+            }
+            Some(_) => {}
         }
         Ok(())
     }
@@ -240,9 +307,91 @@ impl Store {
     pub fn rebuild_fts(&self) -> Result<()> {
         self.conn.execute_batch(
             "DELETE FROM nodes_fts;
-             INSERT INTO nodes_fts(id,name,label,language) SELECT id,name,label,language FROM nodes;",
+             INSERT INTO nodes_fts(id,name,parts,label,language)
+               SELECT id, name, cg_subwords(name), label, language FROM nodes;",
         )?;
         Ok(())
+    }
+
+    /// Replace the git co-change pairs (files that historically change together).
+    pub fn save_cochanges(&self, pairs: &[(String, String, u32)]) -> Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        self.conn.execute("DELETE FROM cochanges", [])?;
+        {
+            let mut stmt =
+                self.conn.prepare("INSERT OR REPLACE INTO cochanges(file_a,file_b,n) VALUES(?1,?2,?3)")?;
+            for (a, b, n) in pairs {
+                stmt.execute(params![a, b, n])?;
+            }
+        }
+        self.conn.execute_batch("COMMIT")?;
+        Ok(())
+    }
+
+    /// Files that historically change together with `file`, strongest first.
+    pub fn cochanges_for(&self, file: &str, limit: usize) -> Result<Vec<(String, u32)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT CASE WHEN file_a = ?1 THEN file_b ELSE file_a END AS other, n
+             FROM cochanges WHERE file_a = ?1 OR file_b = ?1
+             ORDER BY n DESC, other LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![file, limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Dead-code CANDIDATES: functions/methods that no call site in the repo even
+    /// NAMES (the raw `calls` table holds every textual call site, so this is
+    /// stronger evidence than resolved-edges-only), excluding entry points, route
+    /// handlers, and test files. Candidates, not verdicts — dynamic dispatch,
+    /// exports, and reflection can't be seen statically.
+    pub fn dead_code_candidates(&self, limit: usize) -> Result<Vec<Node>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.data FROM nodes n
+             WHERE n.label IN ('Function','Method')
+               AND n.name NOT IN ('main','init','new','setup','run','constructor')
+               AND n.file_path NOT LIKE '%test%' AND n.file_path NOT LIKE '%spec%'
+               AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.callee_name = n.name)
+               AND NOT EXISTS (SELECT 1 FROM nodes r WHERE r.label = 'Route'
+                               AND json_extract(r.data,'$.metadata.handler') = n.name)
+             ORDER BY n.file_path, n.line_start LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(serde_json::from_str(&r?)?);
+        }
+        Ok(out)
+    }
+
+    /// Textual call sites naming `name` (fan-in signal — every call site, resolved or not).
+    pub fn call_site_count(&self, name: &str) -> Result<usize> {
+        let n: i64 =
+            self.conn.query_row("SELECT COUNT(*) FROM calls WHERE callee_name = ?1", [name], |r| r.get(0))?;
+        Ok(n as usize)
+    }
+
+    /// Is `name` called from any test-looking file? (test gap signal for `changes`.)
+    pub fn has_test_reference(&self, name: &str) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM calls WHERE callee_name = ?1
+             AND (file_path LIKE '%test%' OR file_path LIKE '%spec%' OR file_path LIKE '%Tests%')",
+            [name],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Non-File symbols defined in a file (for diff → affected-symbol mapping).
+    pub fn symbols_in_file(&self, file: &str) -> Result<Vec<Node>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT data FROM nodes WHERE file_path = ?1 AND label IN ('Function','Method','Class','Interface','Enum','Type') ORDER BY line_start",
+        )?;
+        let rows = stmt.query_map([file], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(serde_json::from_str(&r?)?);
+        }
+        Ok(out)
     }
 
     pub fn save_manifest(&self, file_path: &str, sha256: &str, mtime: i64) -> Result<()> {
@@ -323,9 +472,16 @@ impl Store {
         if !exact.is_empty() {
             return Ok(exact);
         }
+        // Fallback: split the query into identifier subwords (camel/snake aware —
+        // `MealSenseCook` → meal sense cook) and OR-prefix them; the FTS `parts`
+        // column indexes node names the same way, so mid-identifier words match.
         let mut seen = std::collections::HashSet::new();
         let fts = raw
             .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .flat_map(|t| {
+                let sw = subwords(t);
+                if sw.is_empty() { vec![t.to_string()] } else { sw.split(' ').map(str::to_string).collect() }
+            })
             .filter(|t| t.len() > 1)
             .filter(|t| seen.insert(t.to_lowercase()))
             .map(|t| format!("{t}*"))
@@ -925,5 +1081,16 @@ mod tests {
         assert_eq!(s.all_calls().unwrap().len(), 1);
         s.delete_file_data("a.rs").unwrap();
         assert_eq!(s.all_calls().unwrap().len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod subword_tests {
+    #[test]
+    fn subwords_splits_camel_snake_digits() {
+        assert_eq!(super::subwords("MealSenseCookSession"), "meal sense cook session");
+        assert_eq!(super::subwords("HTTPServer2Go"), "http server 2 go");
+        assert_eq!(super::subwords("snake_case_name"), "snake case name");
+        assert_eq!(super::subwords("plain"), ""); // single token adds nothing
     }
 }

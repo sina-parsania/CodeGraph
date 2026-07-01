@@ -149,6 +149,23 @@ enum Command {
         #[arg(long, default_value_t = 1000)]
         budget: usize,
     },
+    /// Dead-code CANDIDATES: functions/methods no call site in the repo even names
+    /// (excludes entry points, route handlers, test files). Candidates, not verdicts.
+    DeadCode {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Change-aware review: map the git diff against a base to affected symbols,
+    /// with fan-in, test-gap flags, a risk tier, and co-change hints.
+    Changes {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Base to diff against (any git ref).
+        #[arg(long, default_value = "HEAD")]
+        base: String,
+    },
     /// Rename a symbol + all its RESOLVED references. Safe: refuses unless every
     /// occurrence of the name in each affected file is accounted for by a resolved
     /// reference (else it could corrupt code). Dry-run diff by default; --write applies.
@@ -277,7 +294,8 @@ fn project_path(cmd: &Command) -> Option<PathBuf> {
         | Callees { path, .. } | Routes { path, .. } | Query { path, .. } | Communities { path, .. }
         | Important { path, .. } | Implementers { path, .. } | Callers { path, .. } | Ask { path, .. }
         | SemanticIndex { path, .. } | Semantic { path, .. } | Ingest { path, .. } | Mcp { path, .. }
-        | Context { path, .. } | RenameSymbol { path, .. } => Some(path.clone()),
+        | Context { path, .. } | RenameSymbol { path, .. } | DeadCode { path, .. }
+        | Changes { path, .. } => Some(path.clone()),
         Init { repo, .. } | Scip { path: repo } => Some(repo.clone()),
         Install { .. } | Status | Doctor | Gc { .. } | Projects | Config { .. } => None,
     }
@@ -291,6 +309,7 @@ fn needs_fresh(cmd: &Command) -> bool {
         Search { .. } | Callers { .. } | Callees { .. } | Impact { .. } | Trace { .. }
             | Important { .. } | Communities { .. } | Routes { .. } | Query { .. }
             | Implementers { .. } | Ask { .. } | Semantic { .. } | Context { .. } | RenameSymbol { .. }
+            | DeadCode { .. } | Changes { .. }
     )
 }
 
@@ -570,6 +589,78 @@ fn main() -> anyhow::Result<()> {
                 println!("{} {:.4}  {}", if is_seed { "*" } else { " " }, score, line);
             }
             println!("# {} symbols, ~{} tokens", shown, used);
+        }
+        Command::DeadCode { path, limit } => {
+            let store = codegraph_store::Store::open(&index::db_path(&path))?;
+            let dead = store.dead_code_candidates(limit)?;
+            if dead.is_empty() {
+                println!("no dead-code candidates found");
+            } else {
+                println!("# {} candidate(s) — no call site in the repo even NAMES these (static view; dynamic dispatch/exports/reflection excluded):", dead.len());
+                for n in dead {
+                    println!("{:<28} {:?}  {}:{}", n.name, n.label, n.file_path, n.line_start);
+                }
+            }
+        }
+        Command::Changes { path, base } => {
+            let store = codegraph_store::Store::open(&index::db_path(&path))?;
+            let out = std::process::Command::new("git")
+                .args(["-C", &path.to_string_lossy(), "diff", "--name-only", &base])
+                .output()?;
+            let changed: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(str::to_string)
+                .filter(|f| !f.is_empty())
+                .collect();
+            if changed.is_empty() {
+                println!("no changes vs {base}");
+                return Ok(());
+            }
+            println!("# changes vs {base}: {} file(s)\n", changed.len());
+            let mut rows: Vec<(usize, bool, codegraph_core::Node)> = Vec::new();
+            for f in &changed {
+                for sym in store.symbols_in_file(f)? {
+                    let fan_in = store.call_site_count(&sym.name)?;
+                    let tested = store.has_test_reference(&sym.name)?;
+                    rows.push((fan_in, tested, sym));
+                }
+            }
+            // risk = blast (fan-in) amplified when untested
+            rows.sort_by_key(|(fan_in, tested, _)| std::cmp::Reverse(fan_in * if *tested { 1 } else { 3 }));
+            for (fan_in, tested, sym) in rows.iter().take(40) {
+                let risk = match (fan_in, tested) {
+                    (f, false) if *f >= 10 => "HIGH",
+                    (f, _) if *f >= 10 => "MED ",
+                    (f, false) if *f >= 3 => "MED ",
+                    _ => "low ",
+                };
+                println!(
+                    "{risk}  {:<26} fan-in={:<4} {}  {}:{}",
+                    sym.name,
+                    fan_in,
+                    if *tested { "tested" } else { "NO-TESTS" },
+                    sym.file_path,
+                    sym.line_start
+                );
+            }
+            // co-change hints: files that usually change with these but aren't in the diff
+            let mut hints: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+            for f in &changed {
+                for (other, n) in store.cochanges_for(f, 5)? {
+                    if n >= 3 && !changed.contains(&other) {
+                        let e = hints.entry(other).or_insert(0);
+                        *e = (*e).max(n);
+                    }
+                }
+            }
+            if !hints.is_empty() {
+                println!("\n# usually change together with this diff (not in it):");
+                let mut hv: Vec<_> = hints.into_iter().collect();
+                hv.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+                for (f, n) in hv.into_iter().take(8) {
+                    println!("  {f}  (co-changed {n}×)");
+                }
+            }
         }
         Command::RenameSymbol { name, new_name, path, write } => {
             use codegraph_core::NodeLabel::*;

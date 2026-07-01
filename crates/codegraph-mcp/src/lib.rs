@@ -80,6 +80,22 @@ pub struct TwoNamesArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FileArgs {
+    /// Repo-relative file path.
+    pub file: String,
+    /// Max results (default 10).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ChangesArgs {
+    /// Git ref to diff against (default HEAD = uncommitted changes).
+    #[serde(default)]
+    pub base: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LimitArgs {
     /// Max results (default 15).
     #[serde(default)]
@@ -311,6 +327,77 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(serde_json::json!({ "nodes": n }))?]))
     }
 
+    #[tool(description = "Dead-code CANDIDATES: functions/methods that no call site in the repo even names (entry points, route handlers, and test files excluded). Static view — dynamic dispatch/exports/reflection are invisible, so treat as candidates to verify, not verdicts.")]
+    async fn dead_code(&self, args: Parameters<LimitArgs>) -> Result<CallToolResult, McpError> {
+        let store = self.open()?;
+        let dead = store
+            .dead_code_candidates(args.0.limit.unwrap_or(50))
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::json(dead)?]))
+    }
+
+    #[tool(description = "Files that historically CHANGE TOGETHER with the given file (mined from git history). Use before a change to see what usually needs touching alongside it.")]
+    async fn co_changes(&self, args: Parameters<FileArgs>) -> Result<CallToolResult, McpError> {
+        let store = self.open()?;
+        let pairs = store
+            .cochanges_for(&args.0.file, args.0.limit.unwrap_or(10))
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let out: Vec<serde_json::Value> =
+            pairs.into_iter().map(|(f, n)| serde_json::json!({"file": f, "co_changed": n})).collect();
+        Ok(CallToolResult::success(vec![Content::json(out)?]))
+    }
+
+    #[tool(description = "Change-aware review: map the git diff (vs a base ref, default HEAD = uncommitted) to affected symbols with fan-in, test-gap flags, a risk tier, and co-change hints (files that usually change with this diff but aren't in it). Use to review a change's blast radius before committing/merging.")]
+    async fn changes(&self, args: Parameters<ChangesArgs>) -> Result<CallToolResult, McpError> {
+        let store = self.open()?;
+        let base = args.0.base.unwrap_or_else(|| "HEAD".to_string());
+        let out = std::process::Command::new("git")
+            .args(["-C", &self.root.to_string_lossy(), "diff", "--name-only", &base])
+            .output()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let changed: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .filter(|f| !f.is_empty())
+            .collect();
+        let mut symbols = Vec::new();
+        let mut hints: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+        for f in &changed {
+            for sym in store.symbols_in_file(f).map_err(|e| McpError::internal_error(e.to_string(), None))? {
+                let fan_in = store.call_site_count(&sym.name).unwrap_or(0);
+                let tested = store.has_test_reference(&sym.name).unwrap_or(false);
+                let risk = match (fan_in, tested) {
+                    (f, false) if f >= 10 => "HIGH",
+                    (f, _) if f >= 10 => "MED",
+                    (f, false) if f >= 3 => "MED",
+                    _ => "low",
+                };
+                symbols.push(serde_json::json!({
+                    "name": sym.name, "file": sym.file_path, "line": sym.line_start,
+                    "fan_in": fan_in, "tested": tested, "risk": risk,
+                }));
+            }
+            for (other, n) in store.cochanges_for(f, 5).unwrap_or_default() {
+                if n >= 3 && !changed.contains(&other) {
+                    let e = hints.entry(other).or_insert(0);
+                    *e = (*e).max(n);
+                }
+            }
+        }
+        symbols.sort_by_key(|s| {
+            std::cmp::Reverse(
+                s["fan_in"].as_u64().unwrap_or(0) * if s["tested"].as_bool().unwrap_or(false) { 1 } else { 3 },
+            )
+        });
+        symbols.truncate(40);
+        let co_change_hints: Vec<serde_json::Value> =
+            hints.into_iter().map(|(f, n)| serde_json::json!({"file": f, "co_changed": n})).collect();
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "base": base, "changed_files": changed, "affected_symbols": symbols,
+            "co_change_hints": co_change_hints,
+        }))?]))
+    }
+
     #[tool(description = "List the types that IMPLEMENT or EXTEND a given interface/class/protocol (by name). Use to find every concrete implementation of an abstraction before changing it.")]
     async fn implementers(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
@@ -355,7 +442,7 @@ impl ServerHandler for CodeGraphServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
         info.instructions = Some(
-            "CodeGraph indexes this repository into a live code knowledge graph (auto-reindexed before each query). Its tools return exact file:line and resolved call edges, so they beat text search for code navigation: `search` to locate a symbol, `callers`/`callees` to trace call edges, `blast_radius` before a refactor, `trace_path` between two symbols, `important` to map an unfamiliar repo, `context` to assemble the symbols relevant to a task (personalized PageRank over the resolved graph, within a token budget — better than reading files), `implementers` for the concrete types behind an interface, `routes` for the HTTP API surface, `semantic_search` to find code by meaning, `get_node` for one symbol's details, `stats` for counts. \
+            "CodeGraph indexes this repository into a live code knowledge graph (auto-reindexed before each query). Its tools return exact file:line and resolved call edges, so they beat text search for code navigation: `search` to locate a symbol, `callers`/`callees` to trace call edges, `blast_radius` before a refactor, `trace_path` between two symbols, `important` to map an unfamiliar repo, `context` to assemble the symbols relevant to a task (personalized PageRank over the resolved graph, within a token budget — better than reading files), `implementers` for the concrete types behind an interface, `routes` for the HTTP API surface, `changes` to review a git diff (affected symbols + risk + test gaps + co-change hints), `dead_code` for unused-function candidates, `co_changes` for files that historically change together, `semantic_search` to find code by meaning, `get_node` for one symbol's details, `stats` for counts. \
              IMPORTANT — coverage: `callers`/`callees`/`blast_radius` resolve calls precisely but NOT exhaustively (ambiguous or external calls are dropped, never guessed). Each result carries a `coverage` object with `resolved`/`dropped`/`may_be_incomplete`. When `may_be_incomplete` is true, treat the list as a precise LOWER BOUND, not the complete set — fall back to text search (grep the name) before concluding 'nothing else calls this'."
                 .to_string(),
         );

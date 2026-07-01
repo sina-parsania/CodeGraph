@@ -1,7 +1,7 @@
 //! Incremental repo indexing: walk → sha256 → (re)parse changed → persist →
 //! rebuild edges from the full persisted graph (so cross-file edges stay correct).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -307,9 +307,51 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
     }
     store.bulk_upsert_nodes(&nodes)?;
     store.rebuild_fts()?;
+    let pairs = compute_cochanges(root);
+    if !pairs.is_empty() {
+        store.save_cochanges(&pairs)?;
+    }
     store.commit()?;
 
     Ok(IndexStats { files, changed, pruned, nodes: nodes.len(), edges: edges.len(), scip_edges })
+}
+
+/// Git co-change pairs: files that changed together in the last 1000 commits
+/// (unordered pairs, ≥2 occurrences; mega-commits >30 files skipped as noise).
+/// Deterministic for a given HEAD. Empty when not a git repo.
+fn compute_cochanges(root: &Path) -> Vec<(String, String, u32)> {
+    const COMMITS: &str = "1000";
+    const MAX_FILES_PER_COMMIT: usize = 30;
+    const MIN_PAIR_COUNT: u32 = 2;
+    const MAX_PAIRS: usize = 20_000;
+    let Ok(out) = std::process::Command::new("git")
+        .args(["-C", &root.to_string_lossy(), "log", "--no-merges", "--name-only", "--pretty=format:%x00", "-n", COMMITS])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut counts: HashMap<(String, String), u32> = HashMap::new();
+    for block in text.split('\0') {
+        let files: Vec<&str> = block.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        if files.len() < 2 || files.len() > MAX_FILES_PER_COMMIT {
+            continue;
+        }
+        for i in 0..files.len() {
+            for j in (i + 1)..files.len() {
+                let (a, b) = if files[i] < files[j] { (files[i], files[j]) } else { (files[j], files[i]) };
+                *counts.entry((a.to_string(), b.to_string())).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut pairs: Vec<(String, String, u32)> =
+        counts.into_iter().filter(|(_, n)| *n >= MIN_PAIR_COUNT).map(|((a, b), n)| (a, b, n)).collect();
+    pairs.sort_by(|x, y| y.2.cmp(&x.2).then(x.0.cmp(&y.0)).then(x.1.cmp(&y.1)));
+    pairs.truncate(MAX_PAIRS);
+    pairs
 }
 
 /// Locate a `.scip` index: explicit path, else `index.scip`, else any `*.scip` at root.
