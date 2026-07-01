@@ -48,9 +48,10 @@ Then just ask Claude Code to _"use codegraph to find …"_ — its tools are liv
 - **13 languages** — Rust, Python, JS, TS, Go, Swift, Kotlin, Java, C, C++, Ruby, C#, Bash. One grammar-driven parser.
 - **A real graph** — `Function/Method/Class/Enum/Interface/Type/Module/Route/Document` nodes joined by `DEFINES / CALLS / INHERITS / IMPLEMENTS` (+ IMPLEMENTS hyperedges). Honest, **language-agnostic** receiver-aware resolution (same-file → Class-Hierarchy-Analysis for `self`/`this` and `this.field.method()` DI → unique name) — one resolver fires across TS, Swift, Kotlin, Python, Java, … A qualified call on a named variable never guesses a same-file member; ambiguous names stay unlinked, no phantom edges. Precision is sacred — see [docs/RESOLUTION.md](docs/RESOLUTION.md).
 - **Compiler-grade precision (optional, one command)** — `codegraph scip` detects your language, runs the matching SCIP indexer (scip-typescript / rust-analyzer / scip-java / …) if installed, and merges **Tier-A edges** that resolve overloads, re-exports, and ambiguous names tree-sitter can't. _Zero-config means the tree-sitter core_ (which needs nothing); SCIP is an opt-in precision upgrade.
+- **Swift compiler-grade calls (no SCIP indexer exists for Swift)** — build with `--features indexstore` and `codegraph index --indexstore` reads Xcode's **IndexStore** (populated by your normal builds) for compiler-accurate Swift call edges. Merged once at index time, so queries stay fast — the agent never pays a per-query cost (unlike an always-live LSP). macOS + Xcode.
 - **Graph intelligence grep can't do** — `impact` (blast-radius), `trace` (shortest path), `callers`/`callees`, `implementers`, `important` (PageRank), `communities` (Louvain), `routes`, and `context` (assemble task-relevant symbols by **personalized PageRank over the resolved graph**, within a token budget — surfaces a query's call-graph dependencies, not just name matches).
 - **Safe semantic edits** — `rename-symbol` rewrites a symbol + all its resolved references, or **refuses** when any occurrence isn't accounted for (a local, a shadow, or a call form the parser couldn't resolve). Dry-run by default; `--write` to apply. It never corrupts code to make an edit.
-- **Search** — full-text (`--rerank`), **semantic** vector (`--hyde`), and `ask` (NL answer over real snippets). All optional; degrade gracefully with no model.
+- **Search** — full-text (camelCase-tolerant: `MealSenseCook` finds `MealSenseCookSession`) with `--regex` for patterns/middle-fragments/anchors and multi-word OR; **semantic** search by meaning via a **bundled local embedder** (`bge-small-en-v1.5`, 384-d) with `--features local-embed` — **no server needed** — else a local model endpoint; and `ask` (NL answer over real snippets).
 - **Any input** — `index` also ingests docs + localization (md/rst/txt/`.strings`/po/xliff/…); `ingest` adds PDFs, URLs, json/yaml/csv/log/…, and (with `--features media`) images via OCR. One graph = code + docs + config + localization.
 - **Arbitrary analytics** — `query` runs read-only SQL over the graph.
 - **Fast & lean** — respects `.gitignore` + `.codegraphignore`; parallel parsing; one SQLite file per project in a **central cache** (`~/.cache/codegraph/`) so repos stay pristine. Real-world repos index in **<1.4s**; the 23k-symbol Swift app in 1.3s. Deterministic builds + auto-TTL cleanup.
@@ -59,7 +60,8 @@ Then just ask Claude Code to _"use codegraph to find …"_ — its tools are liv
 
 ```bash
 codegraph init                        # one-time setup (index + MCP + nudge + config)
-codegraph search UserService          # find a symbol  (PREFER over grep)
+codegraph search UserService          # find a symbol  (PREFER over grep; camelCase-tolerant)
+codegraph search 'Handler$' --regex   # regex over symbol names (patterns / anchors / alternations)
 codegraph callers handleLogin         # who calls it (resolved, exact)
 codegraph callees parseFile           # what it calls
 codegraph impact processPayment       # blast-radius: what breaks if I change it
@@ -68,7 +70,7 @@ codegraph important                   # most central symbols (map an unfamiliar 
 codegraph context "auth login jwt" --budget 1000   # assemble task-relevant symbols (graph-ranked, budgeted)
 codegraph rename-symbol oldName newName            # safe rename of a symbol + all resolved refs (dry-run; --write to apply)
 codegraph communities  /  routes      # clusters; detected HTTP routes
-codegraph semantic "retry with backoff" --hyde     # search by meaning (needs an embed model)
+codegraph semantic "retry with backoff"            # search by MEANING (bundled embedder w/ --features local-embed, no server)
 codegraph ask "how does auth work?"                # NL answer over real source
 codegraph query "SELECT label, COUNT(*) FROM nodes GROUP BY label"   # arbitrary SQL
 codegraph scip                        # one-command compiler-grade precision (runs the SCIP indexer + merges)
@@ -87,11 +89,11 @@ codegraph doctor                      # what's available + how to enable AI feat
 | auto-reclaim TTL | —                            | `CODEGRAPH_TTL_DAYS` (`0`=off)           | 30 days              |
 | LLM provider     | `llm.provider`               | `CODEGRAPH_LLM_PROVIDER`                 | `auto`               |
 | LLM url / model  | `llm.base_url` / `llm.model` | `CODEGRAPH_LLM_URL` / `_MODEL`           | Qwen2.5-Coder-1.5B   |
-| embedding model  | `embed_model`                | `CODEGRAPH_EMBED_MODEL`                  | —                    |
+| embedding model  | `embed_model`                | `CODEGRAPH_EMBED_MODEL`                  | bge-small (bundled)  |
 | rerank / HyDE    | `llm.rerank` / `llm.hyde`    | `CODEGRAPH_RERANK` / `_HYDE`             | off                  |
 | media ingest     | `ingest.media`               | `CODEGRAPH_MEDIA`                        | off                  |
 
-**Optional local LLM**, auto-detected (first reachable wins): LM Studio (`:1234`) → MLX (`:8080`) → Ollama (`:11434`) → OpenAI/Gemini (key). `codegraph doctor` shows what's ready and the exact command to enable semantic search.
+**Semantic search needs no server** when built with `--features local-embed` — it bundles `bge-small-en-v1.5` (downloaded once to the cache, then fully local). **Optional local LLM** for `ask`/`--rerank`/`--hyde`, auto-detected (first reachable wins): LM Studio (`:1234`) → MLX (`:8080`) → Ollama (`:11434`) → OpenAI/Gemini (key). `codegraph doctor` shows what's ready.
 
 ## How it compares
 
