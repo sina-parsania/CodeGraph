@@ -288,8 +288,11 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
     let built = build(&nodes, &calls, &inherits, &fields, &locals, &imports);
     let mut edges = built.edges;
     let scip_edges = merge_scip_edges(root, scip, &nodes, &mut edges);
-    let indexstore_edges = if indexstore { merge_indexstore_edges(root, &nodes, &mut edges) } else { 0 };
-    let _ = indexstore_edges;
+    // Swift compiler-grade edges are AUTOMATIC when the feature is compiled:
+    // fresh Xcode build (store mtime > stamped) -> re-merge; otherwise the
+    // previously merged edges are REUSED so auto-heal never drops them.
+    // `--indexstore` just forces a re-merge.
+    auto_indexstore(&store, root, &nodes, &mut edges, indexstore);
     store.clear_edges()?;
     store.bulk_upsert_edges(&edges)?;
     store.clear_hyperedges()?;
@@ -389,47 +392,81 @@ fn scip_path(root: &Path, explicit: Option<&Path>) -> Option<PathBuf> {
 
 /// Merge compiler-grade SCIP edges in: they supersede the tree-sitter edge for
 /// the same (src, dst, relation) and add precise edges tree-sitter missed.
-/// Opt-in Swift compiler-grade tier: read the DerivedData IndexStore (built by
-/// Xcode) and merge its precise CALL edges, superseding tree-sitter ones. Enriches
-/// once at index time; queries still served from the fast graph. macOS + feature.
+/// Swift compiler-grade tier — SMART + automatic (no manual step):
+/// - picks the DerivedData store MATCHING this repo's .xcodeproj/.xcworkspace name
+///   (never a random other project's store);
+/// - re-merges only when the store is NEWER than the stamped mtime (or forced);
+/// - otherwise REUSES the previously merged edges from the DB, so incremental /
+///   auto-heal reindexes never silently drop compiler edges.
 #[cfg(feature = "indexstore")]
-fn merge_indexstore_edges(root: &Path, nodes: &[Node], edges: &mut Vec<Edge>) -> usize {
-    let Some(store) = find_index_store(root) else {
-        eprintln!("indexstore: no DerivedData index store found (build the project in Xcode first)");
-        return 0;
+fn auto_indexstore(db: &Store, root: &Path, nodes: &[Node], edges: &mut Vec<Edge>, force: bool) {
+    let extend_superseding = |edges: &mut Vec<Edge>, new: Vec<Edge>| {
+        let superseded: HashSet<(String, String, EdgeRelation)> =
+            new.iter().map(|e| (e.src.clone(), e.dst.clone(), e.relation)).collect();
+        edges.retain(|e| !superseded.contains(&(e.src.clone(), e.dst.clone(), e.relation)));
+        edges.extend(new);
     };
+    let reuse = |edges: &mut Vec<Edge>| {
+        if let Ok(prev) = db.edges_by_justification("IndexStore") {
+            if !prev.is_empty() {
+                let n = prev.len();
+                extend_superseding(edges, prev);
+                eprintln!("indexstore: reused {n} compiler-grade edges (no new Xcode build)");
+            }
+        }
+    };
+    let Some(store) = find_index_store(root) else {
+        reuse(edges);
+        return;
+    };
+    let mtime = std::fs::metadata(&store)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default();
+    let stamped = db.meta_get("indexstore_mtime").ok().flatten().unwrap_or_default();
+    if !force && !mtime.is_empty() && mtime == stamped {
+        reuse(edges);
+        return;
+    }
     match codegraph_indexstore::import_indexstore(&store, nodes, root) {
         Ok(is_edges) if !is_edges.is_empty() => {
-            let superseded: HashSet<(String, String, EdgeRelation)> =
-                is_edges.iter().map(|e| (e.src.clone(), e.dst.clone(), e.relation)).collect();
-            edges.retain(|e| !superseded.contains(&(e.src.clone(), e.dst.clone(), e.relation)));
             let n = is_edges.len();
-            edges.extend(is_edges);
-            eprintln!("indexstore: merged {n} compiler-grade edges from {}", store.display());
-            n
+            extend_superseding(edges, is_edges);
+            let _ = db.meta_set("indexstore_mtime", &mtime);
+            eprintln!("indexstore: merged {n} compiler-grade edges (fresh Xcode build detected)");
         }
-        Ok(_) => 0,
+        Ok(_) => reuse(edges),
         Err(e) => {
             eprintln!("indexstore: {e}");
-            0
+            reuse(edges);
         }
     }
 }
 
-/// Most-recently-built DerivedData index store. DerivedData dirs are named after the
-/// Xcode project (not the repo), so we pick the freshest store rather than name-match;
-/// pass `codegraph index … --indexstore` after an Xcode build of the right project.
+/// DerivedData store for THIS repo: dir names are `<XcodeProjectName>-<hash>`, so
+/// only stores whose prefix matches an .xcodeproj/.xcworkspace found in the repo
+/// qualify (never another project's store). Freshest match wins.
 #[cfg(feature = "indexstore")]
-fn find_index_store(_root: &Path) -> Option<PathBuf> {
+fn find_index_store(root: &Path) -> Option<PathBuf> {
+    let stems = xcode_project_stems(root);
+    if stems.is_empty() {
+        return None;
+    }
     let home = std::env::var_os("HOME")?;
     let dd = Path::new(&home).join("Library/Developer/Xcode/DerivedData");
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(&dd).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !stems.iter().any(|s| name.starts_with(&format!("{s}-"))) {
+            continue;
+        }
         let store = entry.path().join("Index.noindex/DataStore");
         if !store.is_dir() {
             continue;
         }
-        let Ok(m) = entry.metadata().and_then(|md| md.modified()) else { continue };
+        let Ok(m) = std::fs::metadata(&store).and_then(|md| md.modified()) else { continue };
         if best.as_ref().map(|(t, _)| m > *t).unwrap_or(true) {
             best = Some((m, store));
         }
@@ -437,11 +474,36 @@ fn find_index_store(_root: &Path) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
+/// Names of .xcodeproj / .xcworkspace bundles in the repo (shallow walk, 3 levels).
+#[cfg(feature = "indexstore")]
+fn xcode_project_stems(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut frontier = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = frontier.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".xcodeproj") || name.ends_with(".xcworkspace") {
+                if let Some(stem) = name.rsplit_once('.').map(|(s, _)| s.to_string()) {
+                    if !out.contains(&stem) {
+                        out.push(stem);
+                    }
+                }
+            } else if depth < 3 && p.is_dir() && !name.starts_with('.') && name != "node_modules" && name != "Pods" {
+                frontier.push((p, depth + 1));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(not(feature = "indexstore"))]
 #[allow(clippy::ptr_arg)] // signature must match the feature-on variant (which needs Vec)
-fn merge_indexstore_edges(_root: &Path, _nodes: &[Node], _edges: &mut Vec<Edge>) -> usize {
-    eprintln!("indexstore: rebuild with `--features indexstore` (macOS + Xcode) to enable this tier");
-    0
+fn auto_indexstore(_db: &Store, _root: &Path, _nodes: &[Node], _edges: &mut Vec<Edge>, force: bool) {
+    if force {
+        eprintln!("indexstore: rebuild with `--features indexstore` (macOS + Xcode) to enable this tier");
+    }
 }
 
 fn merge_scip_edges(root: &Path, explicit: Option<&Path>, nodes: &[Node], edges: &mut Vec<Edge>) -> usize {

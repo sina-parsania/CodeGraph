@@ -318,6 +318,20 @@ impl Store {
         Ok(())
     }
 
+    /// Edges whose metadata.justification matches (e.g. reuse IndexStore edges
+    /// across incremental reindexes without re-reading the store).
+    pub fn edges_by_justification(&self, j: &str) -> Result<Vec<Edge>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT data FROM edges WHERE json_extract(data,'$.metadata.justification') = ?1",
+        )?;
+        let rows = stmt.query_map([j], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(serde_json::from_str(&r?)?);
+        }
+        Ok(out)
+    }
+
     pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![key, value])?;
         Ok(())
