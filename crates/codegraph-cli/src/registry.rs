@@ -103,7 +103,7 @@ pub fn list_projects() -> Vec<ProjectInfo> {
             ProjectInfo { root, bytes, idle_secs: t.saturating_sub(e.last_touch), exists }
         })
         .collect();
-    out.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    out.sort_by_key(|p| std::cmp::Reverse(p.bytes));
     out
 }
 
