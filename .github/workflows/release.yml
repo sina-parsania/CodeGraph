@@ -11,7 +11,8 @@ jobs:
       matrix:
         include:
           - { os: macos-14,     target: aarch64-apple-darwin,       name: codegraph-macos-arm64,  features: "indexstore,local-embed,local-llm" }
-          - { os: macos-13,     target: x86_64-apple-darwin,        name: codegraph-macos-x64,    features: "local-embed,local-llm" }
+          # macos-13 (Intel) runners are retired — cross-compile x64 from the arm64 runner.
+          - { os: macos-14,     target: x86_64-apple-darwin,        name: codegraph-macos-x64,    features: "local-embed,local-llm" }
           - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu,   name: codegraph-linux-x64,    features: "local-embed,local-llm" }
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, name: codegraph-linux-arm64, features: "local-embed,local-llm" }
           - { os: windows-2022, target: x86_64-pc-windows-msvc,     name: codegraph-windows-x64.exe, features: "local-embed,local-llm" }
