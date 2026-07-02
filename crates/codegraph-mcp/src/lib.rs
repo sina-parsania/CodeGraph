@@ -100,6 +100,13 @@ pub struct ChangesArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CypherArgs {
+    /// Cypher-lite query: 1-2 hop MATCH with labels/relations, WHERE
+    /// (=/CONTAINS/STARTS WITH/AND), RETURN var.prop..., LIMIT n.
+    pub query: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LimitArgs {
     /// Max results (default 15).
     #[serde(default)]
@@ -425,6 +432,49 @@ impl CodeGraphServer {
             "base": base, "changed_files": changed, "affected_symbols": symbols,
             "co_change_hints": co_change_hints,
         }))?]))
+    }
+
+    #[tool(description = "Graph query in Cypher-lite (read-only openCypher subset): 1-2 hop patterns like MATCH (a:Method)-[:Calls]->(b) WHERE b.name = 'save' RETURN a.name, a.file LIMIT 10. Relations: Calls, Tests, Inherits, Implements, HttpCalls, Defines. Props: name/file/line/label/language/id/pagerank. Unsupported syntax errors clearly — never a wrong answer.")]
+    async fn graph_query(&self, args: Parameters<CypherArgs>) -> Result<CallToolResult, McpError> {
+        self.maybe_refresh();
+        let sql = codegraph_store::cypher::to_sql(&args.0.query)
+            .map_err(|e| McpError::invalid_params(format!("cypher-lite: {e}"), None))?;
+        let (cols, rows) = codegraph_store::query_readonly(&self.db_path, &sql, 500)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "columns": cols, "rows": rows,
+        }))?]))
+    }
+
+    #[tool(description = "Execution FLOWS: call chains from entry points (route handlers, main, zero-fan-in tasks) ranked by criticality (reach × centrality). Use to map what a service actually DOES, find the most critical paths, or see which flows a change touches.")]
+    async fn flows(&self, args: Parameters<LimitArgs>) -> Result<CallToolResult, McpError> {
+        let g = self.load_graph()?;
+        let (lg, nodes) = (&g.0, &g.1);
+        let entries = codegraph_graph::detect_entry_points(nodes);
+        let mut flows: Vec<serde_json::Value> = entries
+            .iter()
+            .filter_map(|(n, kind)| {
+                let body = lg.flow_from(&n.id, 6);
+                if body.is_empty() {
+                    return None;
+                }
+                let crit: f64 = body
+                    .iter()
+                    .filter_map(|id| nodes.iter().find(|x| x.id == *id))
+                    .map(|x| x.pagerank)
+                    .sum::<f64>()
+                    * (1.0 + body.len() as f64).ln();
+                Some(serde_json::json!({
+                    "entry": n.name, "kind": kind, "file": n.file_path, "line": n.line_start,
+                    "reach": body.len(), "criticality": crit,
+                }))
+            })
+            .collect();
+        flows.sort_by(|a, b| {
+            b["criticality"].as_f64().partial_cmp(&a["criticality"].as_f64()).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        flows.truncate(args.0.limit.unwrap_or(10));
+        Ok(CallToolResult::success(vec![Content::json(flows)?]))
     }
 
     #[tool(description = "List the types that IMPLEMENT or EXTEND a given interface/class/protocol (by name). Use to find every concrete implementation of an abstraction before changing it.")]

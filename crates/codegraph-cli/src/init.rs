@@ -205,7 +205,7 @@ pub fn run_init(
     // Step 1: index
     if !no_index && ask("Index this repo now?", true, interactive) {
         let db = index::db_path(repo);
-        let stats = index::index_dir(repo, &db, false, None, false)?;
+        let stats = index::index_dir(repo, &db, false, None, false, None)?;
         println!("  → indexed {} files → {} nodes, {} edges", stats.files, stats.nodes, stats.edges);
     }
 

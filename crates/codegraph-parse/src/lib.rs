@@ -335,7 +335,16 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
     if let Some(label) = (ctx.spec.label_for)(node.kind()) {
         if let Some(name) = name_of(node, src, ctx.spec.name_mode) {
             if !name.is_empty() {
-                let id = QualifiedName::build(ctx.project, ctx.segs, &name);
+                // B1: methods nest under their enclosing class so two same-named
+                // methods in two classes of ONE file get DISTINCT ids
+                // (`project.dir.file.class.method`) — identical ids previously
+                // merged them and misattributed members in CHA lookups.
+                let id = match (label, this_class) {
+                    (NodeLabel::Function | NodeLabel::Method, Some(cls)) => {
+                        format!("{}.{}", cls, QualifiedName::build("", &[], &name))
+                    }
+                    _ => QualifiedName::build(ctx.project, ctx.segs, &name),
+                };
                 match label {
                     NodeLabel::Function | NodeLabel::Method => my_fn_id = Some(id.clone()),
                     NodeLabel::Class | NodeLabel::Interface | NodeLabel::Enum => my_class_id = Some(id.clone()),

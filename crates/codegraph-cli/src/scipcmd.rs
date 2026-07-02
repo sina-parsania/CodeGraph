@@ -64,7 +64,7 @@ pub fn run(root: &Path) -> Result<()> {
         Ok(s) if s.success() => {
             let scip = root.join("index.scip");
             if scip.exists() {
-                let stats = index::index_dir(root, &index::db_path(root), true, Some(&scip), false)?;
+                let stats = index::index_dir(root, &index::db_path(root), true, Some(&scip), false, None)?;
                 println!(
                     "Merged SCIP → {} nodes, {} edges (+{} compiler-grade tier-A).",
                     stats.nodes, stats.edges, stats.scip_edges

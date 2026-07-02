@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use codegraph_graph::{build, LoadedGraph};
+use codegraph_graph::{build_with, LoadedGraph};
 use codegraph_parse::{parse_file, ParsedFile};
 use codegraph_core::{Edge, EdgeRelation, Metadata, Node, NodeLabel};
 use codegraph_store::Store;
@@ -163,12 +163,12 @@ pub fn is_stale(root: &Path) -> bool {
 pub fn ensure_fresh(root: &Path) -> Result<()> {
     if is_stale(root) {
         let db = db_path(root);
-        index_dir(root, &db, false, None, false)?;
+        index_dir(root, &db, false, None, false, None)?;
     }
     Ok(())
 }
 
-pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexstore: bool) -> Result<IndexStats> {
+pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexstore: bool, ambiguous: Option<bool>) -> Result<IndexStats> {
     if let Some(parent) = db.parent() {
         std::fs::create_dir_all(parent)?;
         // Self-describe the cache entry (which project it belongs to) for
@@ -285,7 +285,16 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
     let fields = store.all_fields()?;
     let locals = store.all_locals()?;
     let imports = store.all_imports()?;
-    let built = build(&nodes, &calls, &inherits, &fields, &locals, &imports);
+    // Sticky ambiguous-tier setting: an explicit flag stamps it; auto-heal reruns
+    // read the stamp so the tier survives incremental reindexes.
+    let include_ambiguous = match ambiguous {
+        Some(v) => {
+            let _ = store.meta_set("include_ambiguous", if v { "1" } else { "0" });
+            v
+        }
+        None => store.meta_get("include_ambiguous").ok().flatten().as_deref() == Some("1"),
+    };
+    let built = build_with(&nodes, &calls, &inherits, &fields, &locals, &imports, include_ambiguous);
     let mut edges = built.edges;
     let scip_edges = merge_scip_edges(root, scip, &nodes, &mut edges);
     // Swift compiler-grade edges are AUTOMATIC when the feature is compiled:

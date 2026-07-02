@@ -1,5 +1,7 @@
 //! Persistent SQLite store for the CodeGraph knowledge graph.
 
+pub mod cypher;
+
 use std::path::Path;
 
 use codegraph_core::{
@@ -21,7 +23,7 @@ pub enum StoreError {
 
 type Result<T> = std::result::Result<T, StoreError>;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Split an identifier into lowercase subwords: camelCase, PascalCase, snake_case,
 /// kebab-case, and digit boundaries (`OrderCheckoutSession` → `order checkout session`,
@@ -195,11 +197,13 @@ impl Store {
                     .execute("INSERT INTO schema_version(version) VALUES(?1)", [SCHEMA_VERSION])?;
             }
             Some(v) if v < SCHEMA_VERSION => {
-                // FTS shape changed (v3 adds `parts`): rebuild in place from `nodes`
-                // so old DBs keep working without a manual reindex.
+                // v3: FTS gains `parts`. v4: node-id scheme changed (class-qualified
+                // method ids) — clear the manifest so the next index reparses every
+                // file and rewrites ids; FTS rebuilt to match.
                 self.conn.execute_batch(
                     "DROP TABLE IF EXISTS nodes_fts;
-                     CREATE VIRTUAL TABLE nodes_fts USING fts5(id UNINDEXED, name, parts, label, language);",
+                     CREATE VIRTUAL TABLE nodes_fts USING fts5(id UNINDEXED, name, parts, label, language);
+                     DELETE FROM manifest;",
                 )?;
                 self.rebuild_fts()?;
                 self.conn.execute("UPDATE schema_version SET version = ?1", [SCHEMA_VERSION])?;
@@ -330,6 +334,25 @@ impl Store {
             out.push(serde_json::from_str(&r?)?);
         }
         Ok(out)
+    }
+
+    /// sha256 over the canonical structural dump (nodes by id, edges by key) —
+    /// two indexes of the same tree MUST produce the same hash (the determinism
+    /// brand guarantee, verified by `codegraph verify-determinism` + CI).
+    pub fn canonical_hash(&self) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        let mut stmt = self.conn.prepare("SELECT data FROM nodes ORDER BY id")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for r in rows {
+            h.update(r?.as_bytes());
+        }
+        let mut stmt = self.conn.prepare("SELECT data FROM edges ORDER BY src, dst, relation")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for r in rows {
+            h.update(r?.as_bytes());
+        }
+        Ok(format!("{:x}", h.finalize()))
     }
 
     pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
@@ -627,7 +650,7 @@ impl Store {
         let resolved: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM calls c WHERE c.callee_name = ?1 AND EXISTS(
                  SELECT 1 FROM edges e JOIN nodes n ON n.id = e.dst
-                 WHERE e.src = c.caller_id AND e.relation = 'Calls' AND n.name = ?1)",
+                 WHERE e.src = c.caller_id AND e.relation = 'Calls' AND e.confidence <> 'Ambiguous' AND n.name = ?1)",
             [name],
             |r| r.get(0),
         )?;
@@ -643,7 +666,7 @@ impl Store {
         let resolved: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM calls c WHERE c.caller_id = ?1 AND EXISTS(
                  SELECT 1 FROM edges e JOIN nodes n ON n.id = e.dst
-                 WHERE e.src = ?1 AND e.relation = 'Calls' AND n.name = c.callee_name)",
+                 WHERE e.src = ?1 AND e.relation = 'Calls' AND e.confidence <> 'Ambiguous' AND n.name = c.callee_name)",
             [caller_id],
             |r| r.get(0),
         )?;

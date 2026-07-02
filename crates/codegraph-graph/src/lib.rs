@@ -109,6 +109,36 @@ fn is_test_path(p: &str) -> bool {
     lp.contains("test") || lp.contains("spec") || lp.contains("__tests__")
 }
 
+/// Entry points for flow detection: HTTP route handlers (resolved by name within
+/// the route's file), `main`, and zero-fan-in functions that call 3+ others
+/// (likely tasks/jobs). Each tagged with its kind.
+pub fn detect_entry_points(nodes: &[Node]) -> Vec<(&Node, &'static str)> {
+    use NodeLabel::*;
+    let mut out: Vec<(&Node, &'static str)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for r in nodes.iter().filter(|n| n.label == Route) {
+        if let Some(h) = r.metadata.get("handler").and_then(|v| v.as_str()) {
+            if let Some(f) = nodes.iter().find(|n| {
+                n.name == h && n.file_path == r.file_path && matches!(n.label, Function | Method)
+            }) {
+                if seen.insert(&f.id) {
+                    out.push((f, "route"));
+                }
+            }
+        }
+    }
+    for f in nodes.iter().filter(|n| matches!(n.label, Function | Method)) {
+        let fan_in = f.metadata.get("fan_in").and_then(|v| v.as_u64()).unwrap_or(0);
+        let fan_out = f.metadata.get("fan_out").and_then(|v| v.as_u64()).unwrap_or(0);
+        let is_main = f.name == "main";
+        if (is_main || (fan_in == 0 && fan_out >= 3)) && seen.insert(&f.id) {
+            out.push((f, if is_main { "main" } else { "task" }));
+        }
+    }
+    out
+}
+
+
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 
 /// Directed graph of node-id → node-id, edge weight = relation name.
@@ -131,6 +161,21 @@ pub fn build(
     fields: &[RawField],
     locals: &[RawLocal],
     imports: &[RawImport],
+) -> Built {
+    build_with(nodes, calls, inherits, fields, locals, imports, false)
+}
+
+/// `include_ambiguous`: ALSO emit edges for unresolved calls with 2–5 same-name
+/// candidates, tagged `Confidence::Ambiguous` + justification "Ambiguous" — an
+/// honest opt-in recall tier (coverage/queries can filter them; never silent).
+pub fn build_with(
+    nodes: &[Node],
+    calls: &[RawCall],
+    inherits: &[RawInherit],
+    fields: &[RawField],
+    locals: &[RawLocal],
+    imports: &[RawImport],
+    include_ambiguous: bool,
 ) -> Built {
     let by_id: HashMap<&str, &Node> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let file_by_path: HashMap<&str, &str> = nodes
@@ -364,6 +409,31 @@ pub fn build(
                     metadata,
                 });
             }
+        } else if include_ambiguous {
+            // Opt-in honest-recall tier: an unresolved call with a SMALL candidate
+            // set (2–5 same-name defs) emits an edge to EACH, clearly tagged
+            // Ambiguous — never mixed into the precise default graph.
+            if let Some(cands) = fn_by_name.get(c.callee_name.as_str()) {
+                if (2..=5).contains(&cands.len()) {
+                    for &cand in cands.iter() {
+                        if cand == c.caller_id {
+                            continue;
+                        }
+                        let mut metadata = Metadata::new();
+                        metadata.insert("justification".to_string(), serde_json::Value::String("Ambiguous".to_string()));
+                        push_edge(&mut edges, &mut seen, Edge {
+                            src: c.caller_id.clone(),
+                            dst: cand.to_string(),
+                            relation: EdgeRelation::Calls,
+                            tier: ResolutionTier::TreeSitter,
+                            confidence: Confidence::Ambiguous,
+                            src_file: caller.file_path.clone(),
+                            src_line: c.line,
+                            metadata,
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -551,6 +621,30 @@ mod tests {
         ]);
         let n = built.edges.iter().filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".fetch")).count();
         assert_eq!(n, 0, "array-typed field must not resolve an ambiguous call to the element type");
+    }
+
+    #[test]
+    fn b1_same_named_methods_in_one_file_get_distinct_ids() {
+        // Two classes in ONE file, both defining `bar`. Pre-B1 both got the same
+        // id (project.file.bar) — one node, misattributed members. Now they nest
+        // under their class ids, and this.bar() resolves to A's bar only.
+        let built = build_ts(&[(
+            "src/two.ts",
+            "class A { foo() { this.bar(); } bar() {} }\nclass B { bar() {} }",
+        )]);
+        let pf = codegraph_parse::parse_ts("p", "src/two.ts", "class A { foo() { this.bar(); } bar() {} }\nclass B { bar() {} }");
+        let bars: Vec<_> = pf.nodes.iter().filter(|n| n.name == "bar").collect();
+        assert_eq!(bars.len(), 2, "two distinct bar nodes");
+        assert_ne!(bars[0].id, bars[1].id, "ids must differ (class-qualified)");
+        assert!(bars.iter().any(|n| n.id.contains(".a.")), "one nests under class a");
+        assert!(bars.iter().any(|n| n.id.contains(".b.")), "one nests under class b");
+        let this_bar: Vec<_> = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".bar"))
+            .collect();
+        assert_eq!(this_bar.len(), 1, "this.bar() resolves to exactly one method");
+        assert!(this_bar[0].dst.contains(".a."), "resolved to A.bar, not B.bar");
     }
 
     #[test]
