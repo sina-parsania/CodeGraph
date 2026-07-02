@@ -35,7 +35,10 @@ pub const ROLE_REL_CALLEDBY: u64 = 1 << 13;
 /// producing compiler-grade CALL edges (tier=Lsp, justification=IndexStore).
 /// Mirrors `codegraph-resolve::import_scip`: USR→def-node, then call→edge.
 pub fn import_indexstore(store: &Path, nodes: &[Node], repo_root: &Path) -> anyhow::Result<Vec<Edge>> {
-    let occs = read_occurrences(store, repo_root)?;
+    // Canonicalize: a relative root (`.`) never prefix-matches the store's
+    // absolute file paths, which would silently filter every record out.
+    let canon = repo_root.canonicalize().unwrap_or_else(|_| repo_root.to_path_buf());
+    let occs = read_occurrences(store, &canon)?;
     if std::env::var_os("CODEGRAPH_DEBUG").is_some() {
         eprintln!(
             "indexstore DEBUG: {} occurrences | sample occ file: {:?} | sample swift node: {:?}",
