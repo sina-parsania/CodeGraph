@@ -148,7 +148,7 @@ impl CodeGraphServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))
     }
 
-    #[tool(description = "Find where a symbol (function/class/type) is defined or referenced, by name. PREFER over Grep/ripgrep for code navigation: indexed, returns exact file:line + the node kind, no matches inside comments/strings. Use before reading files.")]
+    #[tool(description = "Locate a symbol by NAME (exact/subword/regex). Use ONLY when you know (part of) the identifier. NOT for: conceptual or docs/wiki questions (use semantic_search), who-calls (callers), task context (context), API surface (routes). Returns exact file:line + node kind; beats grep (no comment/string hits).")]
     async fn search(&self, args: Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let limit = args.0.limit.unwrap_or(20);
@@ -173,7 +173,7 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(node)?]))
     }
 
-    #[tool(description = "List the functions that CALL a given function (reverse call edges). PREFER over grepping the name: resolved and exact, no false hits in comments/strings. The result includes a `coverage` object — if `coverage.may_be_incomplete` is true, some calls to this name were dropped (ambiguous/external); fall back to text search to be sure.")]
+    #[tool(description = "Who calls X — ALWAYS use this (not search/grep) for usage/caller questions. Resolved call edges; ambiguous names return pinnable per-definition CANDIDATES (re-call with id=<id>). Includes `coverage`: if may_be_incomplete, the list is a precise LOWER BOUND — corroborate with text search before concluding nothing else calls it.")]
     async fn callers(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let err = |e: codegraph_store::StoreError| McpError::internal_error(e.to_string(), None);
@@ -234,7 +234,7 @@ impl CodeGraphServer {
         Ok(snap)
     }
 
-    #[tool(description = "Find symbols by MEANING rather than exact name (vector search). Use when you do not know the symbol name. Uses a BUNDLED local embedder (bge-small, no server) when built with --features local-embed, else a local LLM endpoint; needs a prior `codegraph semantic-index`. Degrades gracefully if unavailable.")]
+    #[tool(description = "Find code AND documentation by MEANING (vector search over all symbols + docs/wiki Document nodes). USE THIS for: conceptual questions ('code that retries with backoff'), docs/wiki lookups ('what does the wiki say about X' — do NOT grep/Read doc files first), and any query where you don't know the identifier. Bundled local embedder, no server. If empty, fall back to search.")]
     async fn semantic_search(&self, args: Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
         self.maybe_refresh();
         let db = self.db_path.clone();
@@ -298,7 +298,7 @@ impl CodeGraphServer {
         }))?]))
     }
 
-    #[tool(description = "Assemble the most relevant symbols for a task/query within a token budget, ranked by personalized PageRank over the RESOLVED call graph. PREFER for 'what code is relevant to X' — it returns symbols structurally related to the query INCLUDING their call-graph dependencies, not just name/text matches. Each result has name/file/line/label/score.")]
+    #[tool(description = "START HERE when beginning a task/bug/feature: assembles the most relevant symbols (personalized PageRank over resolved call edges, token-budgeted) — the structural neighborhood a plain search misses. Cheaper and more complete than reading files to orient yourself.")]
     async fn context(&self, args: Parameters<ContextArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let budget = args.0.budget.unwrap_or(1000);
@@ -471,8 +471,9 @@ impl ServerHandler for CodeGraphServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
         info.instructions = Some(
-            "CodeGraph indexes this repository into a live code knowledge graph (auto-reindexed before each query). Its tools return exact file:line and resolved call edges, so they beat text search for code navigation: `search` to locate a symbol, `callers`/`callees` to trace call edges, `blast_radius` before a refactor, `trace_path` between two symbols, `important` to map an unfamiliar repo, `context` to assemble the symbols relevant to a task (personalized PageRank over the resolved graph, within a token budget — better than reading files), `implementers` for the concrete types behind an interface, `routes` for the HTTP API surface, `changes` to review a git diff (affected symbols + risk + test gaps + co-change hints), `dead_code` for unused-function candidates, `co_changes` for files that historically change together, `semantic_search` to find code by meaning, `get_node` for one symbol's details, `stats` for counts. \
-             IMPORTANT — coverage: `callers`/`callees`/`blast_radius` resolve calls precisely but NOT exhaustively (ambiguous or external calls are dropped, never guessed). Each result carries a `coverage` object with `resolved`/`dropped`/`may_be_incomplete`. When `may_be_incomplete` is true, treat the list as a precise LOWER BOUND, not the complete set — fall back to text search (grep the name) before concluding 'nothing else calls this'."
+            "CodeGraph = a resolved code+docs knowledge graph for THIS repo (auto-fresh). ROUTE BY INTENT — do not send everything to `search`: \
+know the identifier → search · conceptual/'how does X work'/docs+wiki → semantic_search · who-calls → callers (ambiguous ⇒ pinnable candidates, re-call with id) · what-does-it-call → callees · what-breaks → blast_radius · path A→B → trace_path · starting a task → context · diff review/risk/test-gaps → changes · unused code → dead_code · co-edited files → co_changes · API surface → routes · interface impls → implementers · repo map → important. \
+COVERAGE: callers/callees/blast_radius are precise but NOT exhaustive — when `coverage.may_be_incomplete` is true treat the list as a lower bound and corroborate with text search. Docs/wiki pages are indexed as Document nodes — query them here instead of reading files."
                 .to_string(),
         );
         info
