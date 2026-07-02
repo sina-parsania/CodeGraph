@@ -327,7 +327,6 @@ struct Ctx<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_class: Option<&str>, nodes: &mut Vec<Node>, calls: &mut Vec<RawCall>, inherits: &mut Vec<RawInherit>, fields: &mut Vec<RawField>, locals: &mut Vec<RawLocal>, imports: &mut Vec<RawImport>) {
     let mut my_fn_id: Option<String> = None;
     let mut my_class_id: Option<String> = None;
