@@ -9,6 +9,12 @@ codegraph-core.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 fastembed = { version = "4", optional = true }
+mistralrs = { version = "0.8", optional = true }
+tokio = { workspace = true, optional = true }
 
 [features]
 local-embed = ["dep:fastembed"]
+# Pure-Rust bundled chat engine (CPU everywhere: macOS/Linux/Windows).
+local-llm = ["dep:mistralrs", "dep:tokio"]
+# GPU variant for macs that have the Xcode Metal Toolchain installed.
+local-llm-metal = ["local-llm", "mistralrs/metal"]

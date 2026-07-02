@@ -62,8 +62,7 @@ pub fn read_snippet(root: &std::path::Path, file_path: &str, start: u32, end: u3
 
 /// LLM rerank: ask the model to reorder hits by relevance to the query.
 /// Best-effort — falls back to the original order on any parse failure.
-pub fn rerank(query: &str, hits: Vec<codegraph_core::Node>, llm: &codegraph_llm::OpenAiCompatBackend) -> Vec<codegraph_core::Node> {
-    use codegraph_core::LlmClient;
+pub fn rerank(query: &str, hits: Vec<codegraph_core::Node>) -> Vec<codegraph_core::Node> {
     if hits.len() < 2 {
         return hits;
     }
@@ -77,7 +76,7 @@ pub fn rerank(query: &str, hits: Vec<codegraph_core::Node>, llm: &codegraph_llm:
         "Rank these code symbols by relevance to the query \"{}\". Reply with ONLY the leading numbers, best first, comma-separated.\n\n{}",
         query, listing
     );
-    let Some(resp) = llm.generate(&prompt, 200) else { return hits };
+    let Some(resp) = codegraph_llm::generate_text(&prompt, 200) else { return hits };
     let order: Vec<usize> = resp
         .split(|c: char| !c.is_ascii_digit())
         .filter_map(|t| t.parse::<usize>().ok())

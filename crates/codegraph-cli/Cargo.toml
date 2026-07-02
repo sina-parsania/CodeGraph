@@ -34,4 +34,6 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 [features]
 media = ["codegraph-ingest/media"]
 local-embed = ["codegraph-llm/local-embed"]  # bundled bge-small-en-v1.5 (no server)
+local-llm = ["codegraph-llm/local-llm"]              # bundled mistral.rs chat engine, CPU (no server)
+local-llm-metal = ["codegraph-llm/local-llm-metal"]  # + Metal GPU (needs Xcode Metal Toolchain)
 indexstore = ["dep:codegraph-indexstore", "codegraph-indexstore/link"]  # opt-in Swift compiler-grade tier (macOS)

@@ -11,7 +11,7 @@ mod scipcmd;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use codegraph_core::{Config, LlmClient};
+use codegraph_core::Config;
 
 #[derive(Parser)]
 #[command(name = "codegraph", version, about = "Project-agnostic code-intelligence graph + MCP server")]
@@ -436,9 +436,7 @@ fn main() -> anyhow::Result<()> {
             let mut hits =
                 if regex { store.search_regex(&term, limit)? } else { store.search_smart(&term, limit)? };
             if rerank || cfg.llm.rerank {
-                if let Some(llm) = codegraph_llm::OpenAiCompatBackend::detect() {
-                    hits = query::rerank(&term, hits, &llm);
-                }
+                hits = query::rerank(&term, hits);
             }
             if hits.is_empty() {
                 println!("no matches for {:?}", term);
@@ -930,21 +928,16 @@ fn main() -> anyhow::Result<()> {
                     context.push_str(&format!("```\n{}\n```\n", snip));
                 }
             }
-            match codegraph_llm::OpenAiCompatBackend::detect() {
-                Some(llm) => {
-                    let prompt = format!(
-                        "You are a code assistant answering questions about a codebase using its symbol graph. \
-                         Use ONLY the context below; if it is insufficient, say so. Be concise.\n\n\
-                         Context (relevant symbols):\n{}\n\nQuestion: {}\n\nAnswer:",
-                        context, question
-                    );
-                    match llm.generate(&prompt, 600) {
-                        Some(ans) => println!("{}\n\n[{} / {}]", ans.trim(), llm.provider(), llm.model()),
-                        None => println!("LLM request failed. Relevant symbols:\n{}", context),
-                    }
-                }
+            let prompt = format!(
+                "You are a code assistant answering questions about a codebase using its symbol graph. \
+                 Use ONLY the context below; if it is insufficient, say so. Be concise.\n\n\
+                 Context (relevant symbols):\n{}\n\nQuestion: {}\n\nAnswer:",
+                context, question
+            );
+            match codegraph_llm::generate_text_labeled(&prompt, 600) {
+                Some((ans, label)) => println!("{}\n\n[{}]", ans.trim(), label),
                 None => println!(
-                    "No local LLM detected (start LM Studio or Ollama, or set CODEGRAPH_LLM_BASE_URL).\n\nRelevant symbols:\n{}",
+                    "No LLM available (start MLX/LM Studio/Ollama, set an API key, or install a build with --features local-llm).\n\nRelevant symbols:\n{}",
                     context
                 ),
             }
@@ -973,11 +966,13 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Semantic { query: q, path, limit, hyde } => {
             let store = codegraph_store::Store::open(&index::db_path(&path))?;
-            // HyDE rewrites the query via a chat model (needs a server); skip if none.
+            // HyDE rewrites the query via a chat model (server or bundled); skip if none.
             let query_text = if hyde || cfg.llm.hyde {
-                codegraph_llm::OpenAiCompatBackend::detect()
-                    .and_then(|b| b.generate(&format!("Write a short code documentation snippet that would answer this query (no preamble): {q}"), 200))
-                    .unwrap_or_else(|| q.clone())
+                codegraph_llm::generate_text(
+                    &format!("Write a short code documentation snippet that would answer this query (no preamble): {q}"),
+                    200,
+                )
+                .unwrap_or_else(|| q.clone())
             } else {
                 q.clone()
             };
@@ -1026,12 +1021,18 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 None => {
-                    println!("chat model (ask/rerank/HyDE):  ✗ no local provider (start LM Studio/Ollama, or set an API key)");
+                    if cfg!(feature = "local-llm") {
+                        println!("chat model (ask/rerank/HyDE):  ✓ bundled mistral.rs engine (no server needed)");
+                    } else {
+                        println!("chat model (ask/rerank/HyDE):  ✗ no local provider (start MLX/LM Studio/Ollama, or set an API key)");
+                    }
                     println!("embedding model (semantic):    ✗ none");
                 }
             }
             #[cfg(feature = "local-embed")]
             println!("local embeddings:  ✓ compiled in (--features local-embed)");
+            #[cfg(feature = "local-llm")]
+            println!("local chat engine: ✓ compiled in (--features local-llm, mistral.rs)");
             println!("\nsetup:  codegraph init   |   config: .codegraph.toml (env CODEGRAPH_* overrides)");
         }
         Command::Ingest { input, path } => {

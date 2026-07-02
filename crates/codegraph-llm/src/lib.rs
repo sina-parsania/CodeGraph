@@ -1,5 +1,5 @@
 //! Optional LLM layer: ONE OpenAI-compatible backend, parameterized by a
-//! provider spec. Local-first (LM Studio → mlx → Ollama), cloud opt-in
+//! provider spec. Local-first (MLX → LM Studio → Ollama), cloud opt-in
 //! (OpenAI / Gemini via an env key). Implements the core `LlmClient` trait;
 //! every call degrades to `None` when no server is reachable.
 
@@ -29,9 +29,10 @@ fn candidates() -> Vec<Candidate> {
     if let Some(base) = env("CODEGRAPH_LLM_BASE_URL") {
         return vec![Candidate { id: "custom", base_url: base, api_key_env: None, default_model: "local-model" }];
     }
+    // MLX first on request (best perf/RAM on Apple Silicon when running).
     let local = vec![
-        Candidate { id: "lmstudio", base_url: "http://localhost:1234/v1".into(), api_key_env: None, default_model: "local-model" },
         Candidate { id: "mlx", base_url: "http://localhost:8080/v1".into(), api_key_env: None, default_model: "local-model" },
+        Candidate { id: "lmstudio", base_url: "http://localhost:1234/v1".into(), api_key_env: None, default_model: "local-model" },
         Candidate { id: "ollama", base_url: "http://localhost:11434/v1".into(), api_key_env: None, default_model: "qwen2.5-coder:1.5b" },
     ];
     let cloud = vec![
@@ -39,8 +40,8 @@ fn candidates() -> Vec<Candidate> {
         Candidate { id: "gemini", base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(), api_key_env: Some("GEMINI_API_KEY"), default_model: "gemini-2.0-flash" },
     ];
     match env("CODEGRAPH_LLM_PROVIDER").as_deref() {
-        Some("lmstudio") => local.into_iter().take(1).collect(),
-        Some("mlx") => local.into_iter().skip(1).take(1).collect(),
+        Some("mlx") => local.into_iter().take(1).collect(),
+        Some("lmstudio") => local.into_iter().skip(1).take(1).collect(),
         Some("ollama") => local.into_iter().skip(2).take(1).collect(),
         Some("openai") => cloud.into_iter().take(1).collect(),
         Some("gemini") => cloud.into_iter().skip(1).take(1).collect(),
@@ -206,6 +207,86 @@ fn local_embed(texts: &[String]) -> Option<(Vec<Vec<f32>>, String)> {
     model.embed(docs, None).ok().map(|v| (v, label.to_string()))
 }
 
+
+/// Generate text: a reachable OpenAI-compat server FIRST (MLX preferred — best
+/// perf/RAM on Apple Silicon when running), else the BUNDLED in-process engine
+/// (mistral.rs, GGUF auto-downloaded once) when built with `--features
+/// local-llm` (CPU) / `local-llm-metal` (GPU), else None. Same layering as
+/// `embed_texts`.
+pub fn generate_text(prompt: &str, max_tokens: usize) -> Option<String> {
+    generate_text_labeled(prompt, max_tokens).map(|(out, _)| out)
+}
+
+/// Like `generate_text`, but also returns a "provider / model" label so
+/// callers can attribute the answer.
+pub fn generate_text_labeled(prompt: &str, max_tokens: usize) -> Option<(String, String)> {
+    if let Some(b) = OpenAiCompatBackend::detect() {
+        if let Some(out) = b.generate(prompt, max_tokens) {
+            return Some((out, format!("{} / {}", b.provider(), b.model())));
+        }
+    }
+    #[cfg(feature = "local-llm")]
+    {
+        return local_gen::generate(prompt, max_tokens).map(|out| (out, local_gen::label()));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// True when any generation path exists (server or bundled engine).
+pub fn generator_available() -> bool {
+    cfg!(feature = "local-llm") || OpenAiCompatBackend::detect().is_some()
+}
+
+#[cfg(feature = "local-llm")]
+mod local_gen {
+    /// Bundled engine = mistral.rs (pure Rust, cargo-only, no cmake, no server;
+    /// CPU by default, Metal GPU via `local-llm-metal`). Default model:
+    /// Qwen2.5-Coder 0.5B Q4 GGUF (~400 MB download, ~600 MB RAM) — sized for
+    /// fast rerank/HyDE/ask assists, loaded lazily and only when no server is
+    /// reachable. Override: CODEGRAPH_LOCAL_LLM_REPO / CODEGRAPH_LOCAL_LLM_FILE
+    /// (e.g. the 1.5B for higher answer quality).
+    const REPO: &str = "Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF";
+    const FILE: &str = "qwen2.5-coder-0.5b-instruct-q4_k_m.gguf";
+
+    pub fn label() -> String {
+        let file = std::env::var("CODEGRAPH_LOCAL_LLM_FILE").unwrap_or_else(|_| FILE.into());
+        format!("bundled mistral.rs / {file}")
+    }
+
+    use std::sync::OnceLock;
+
+    // Model load costs seconds; long-lived processes (MCP server) pay it once.
+    static ENGINE: OnceLock<Option<(tokio::runtime::Runtime, mistralrs::Model)>> = OnceLock::new();
+
+    fn engine() -> &'static Option<(tokio::runtime::Runtime, mistralrs::Model)> {
+        ENGINE.get_or_init(|| {
+            use mistralrs::GgufModelBuilder;
+            let repo = std::env::var("CODEGRAPH_LOCAL_LLM_REPO").unwrap_or_else(|_| REPO.into());
+            let file = std::env::var("CODEGRAPH_LOCAL_LLM_FILE").unwrap_or_else(|_| FILE.into());
+            eprintln!("[codegraph] no LLM server detected — loading bundled engine ({repo}); first run downloads the model (one-time, cached in ~/.cache/huggingface)");
+            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().ok()?;
+            let model = rt
+                .block_on(GgufModelBuilder::new(repo, vec![file]).build())
+                .map_err(|e| eprintln!("[codegraph] bundled engine failed to load: {e}"))
+                .ok()?;
+            Some((rt, model))
+        })
+    }
+
+    pub fn generate(prompt: &str, max_tokens: usize) -> Option<String> {
+        use mistralrs::{RequestBuilder, TextMessageRole};
+        let (rt, model) = engine().as_ref()?;
+        rt.block_on(async move {
+            let req = RequestBuilder::new()
+                .add_message(TextMessageRole::User, prompt)
+                .set_sampler_max_len(max_tokens);
+            let resp = model.send_chat_request(req).await.ok()?;
+            resp.choices.first()?.message.content.as_ref().map(|c| c.trim().to_string())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,7 +295,8 @@ mod tests {
     fn candidate_order_is_local_first() {
         // No env set in the harness → auto order starts with local providers.
         let c = candidates();
-        assert_eq!(c[0].id, "lmstudio");
+        assert_eq!(c[0].id, "mlx");
+        assert!(c.iter().any(|x| x.id == "lmstudio"));
         assert!(c.iter().any(|x| x.id == "ollama"));
     }
 

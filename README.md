@@ -79,11 +79,19 @@ codegraph semantic "retry with backoff"           # meaning search, serverless
 codegraph export                  # commit .codegraph/graph.db.zst for your team
 ```
 
-**MCP (15 tools):** `search`, `callers`, `callees`, `blast_radius`, `trace_path`, `context`, `changes`, `dead_code`, `co_changes`, `implementers`, `routes`, `important`, `semantic_search`, `get_node`, `stats` — each with agent-guidance descriptions, coverage signals, and `_hints`.
+**MCP (17 tools):** `search`, `callers`, `callees`, `blast_radius`, `trace_path`, `context`, `changes`, `dead_code`, `co_changes`, `implementers`, `routes`, `important`, `semantic_search`, `flows`, `graph_query`, `get_node`, `stats` — each with agent-guidance descriptions, coverage signals, and `_hints`.
 
 ## Configuration (all optional)
 
-Everything works with **no model, no key, no daemon**. `codegraph init` writes a commented `.codegraph.toml`; env vars (`CODEGRAPH_*`) override. Optional local LLM (LM Studio → MLX → Ollama → OpenAI/Gemini) adds `ask`, `--rerank`, `--hyde`. `codegraph doctor` shows what's ready.
+Everything works with **no model, no key, no daemon**. `codegraph init` writes a commented `.codegraph.toml`; env vars (`CODEGRAPH_*`) override. `codegraph doctor` shows what's ready.
+
+**LLM features (`ask`, `--rerank`, `--hyde`) — layered, all optional:**
+
+1. A running OpenAI-compatible server is used first (MLX → LM Studio → Ollama → OpenAI/Gemini via API key).
+2. No server? A build with `--features local-llm` bundles a **pure-Rust in-process engine** (mistral.rs, CPU — macOS/Linux/Windows). Default model: Qwen2.5-Coder-0.5B GGUF (~400 MB, ~600 MB RAM), loaded lazily and only when actually used; auto-downloaded once. Override via `CODEGRAPH_LOCAL_LLM_REPO`/`CODEGRAPH_LOCAL_LLM_FILE` (e.g. the 1.5B for higher quality). Release binaries ship with it.
+3. Macs with the Xcode Metal Toolchain can build `--features local-llm-metal` for GPU inference.
+
+Semantic search is the same story: `--features local-embed` bundles the embedder (release binaries include it) — no server needed.
 
 ## How it compares
 
@@ -99,12 +107,12 @@ crates/
   codegraph-resolve    SCIP merge (compiler-grade, optional)
   codegraph-indexstore Xcode IndexStore merge (Swift compiler-grade, optional)
   codegraph-store      SQLite: nodes/edges/calls/vectors/FTS5(subword)/cochanges/meta
-  codegraph-llm        bundled fastembed embedder (optional) + OpenAI-compat client
-  codegraph-mcp        MCP server (15 tools, graph cache, coverage signals)
+  codegraph-llm        OpenAI-compat client + optional bundled embedder (fastembed) & chat engine (mistral.rs)
+  codegraph-mcp        MCP server (17 tools, graph cache, coverage signals)
   codegraph-cli        the `codegraph` binary
 ```
 
-**Design invariants:** single static binary · deterministic builds · precision-sacred resolution · heavy deps feature-gated (`indexstore`, `local-embed`, `media`).
+**Design invariants:** single static binary · deterministic builds · precision-sacred resolution · heavy deps feature-gated (`indexstore`, `local-embed`, `local-llm`, `media`).
 
 ## License
 
