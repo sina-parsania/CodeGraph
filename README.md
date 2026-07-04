@@ -18,13 +18,13 @@ codegraph init                              # index + wire MCP + done
 
 ## Why teams pick CodeGraph
 
-|                      | CodeGraph                                                                                                                                                                    | typical graph tools                                                                   |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| **Answer trust**     | **Zero phantom edges** — ambiguous calls are _dropped, never guessed_; every edge carries a `justification` tag; results include a **coverage signal** (`may_be_incomplete`) | silently merge same-name symbols, or emit guessed edges with hidden confidence floors |
-| **Ambiguity**        | `callers create` → **44 pinnable candidates** grouped per definition                                                                                                         | one merged (wrong) list, or a blocklist refusing the query                            |
-| **Speed** (measured) | cold index **1.5 s**, queries **~13 ms**, binary **~5 MB**                                                                                                                   | 2.8 s–11 s cold, 269 MB binaries, pip/npm setup tax                                   |
-| **Determinism**      | same commit → **byte-identical graph** — safe to commit & share (`export`/`import`, 88 % smaller)                                                                            | machine-dependent results                                                             |
-| **Reach**            | **cross-service route hubs**: a backend route and its frontend caller collapse onto one node — `blast_radius` crosses service boundaries                                     | per-repo silos                                                                        |
+|                      | CodeGraph                                                                                                                                                                                      | typical graph tools                                                                   |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| **Answer trust**     | **Zero phantom edges** — ambiguous calls are _dropped, never guessed_; every edge carries a `justification` tag; results include a **coverage signal** (`may_be_incomplete`)                   | silently merge same-name symbols, or emit guessed edges with hidden confidence floors |
+| **Ambiguity**        | `callers create` → **44 pinnable candidates** grouped per definition                                                                                                                           | one merged (wrong) list, or a blocklist refusing the query                            |
+| **Speed** (measured) | cold index **1.5 s**, queries **~13 ms**, binary **~5 MB**; **incremental reindex is O(impact)** — an edit re-resolves only the files whose call sites name a changed definition, not the repo | 2.8 s–11 s cold, 269 MB binaries, pip/npm setup tax                                   |
+| **Determinism**      | same commit → **byte-identical graph** — safe to commit & share (`export`/`import`, 88 % smaller)                                                                                              | machine-dependent results                                                             |
+| **Reach**            | **cross-service route hubs**: a backend route and its frontend caller collapse onto one node — `blast_radius` crosses service boundaries                                                       | per-repo silos                                                                        |
 
 ## ⚡ ~20–100× fewer agent tokens per code question
 
@@ -38,11 +38,13 @@ A competent agent answering _"who calls this?"_ with grep must read context arou
 - **Tiered, evidence-based resolution** (unique-or-drop at every tier): same-file → `self`/`this` CHA → field-type (DI) → local-var type → **import-narrowed** (the import _is_ the evidence) → Go package scope → global-unique. Details: [docs/RESOLUTION.md](docs/RESOLUTION.md).
 - **Compiler-grade tiers (optional):** `codegraph scip` merges any SCIP index; `--features indexstore` reads **Xcode's IndexStore** for Swift (+171 % resolved calls on a real iOS app) — merged at index time, queries stay milliseconds.
 - **Per-node metrics**: cyclomatic complexity, fan-in/fan-out (resolved-only — honest degrees), PageRank, betweenness, Louvain community.
+- **Incremental & live**: an edit re-resolves only the files whose call sites name a changed definition (wave-propagation, O(impact) not O(repo)) — proven byte-identical to a from-scratch index. The MCP server watches the repo and heals in the background, so queries never wait on a reindex. Details: [docs/INCREMENTAL.md](docs/INCREMENTAL.md).
 
 ### 🔎 Search that actually finds things
 
 - **Subword FTS**: `Cook` finds `OrderCheckoutSessionViewController` (camelCase/snake split at index time).
 - `--regex` for anchors/middle fragments; multi-word OR; **semantic search by meaning** via a **bundled local embedder** — _no server, no API key_ (`bge-small` default, `CODEGRAPH_LOCAL_EMBED=code` for the 768-d code-trained model; the model is stamped into the index, mismatches refused).
+- **Indexed vector search** — embeddings live in a `sqlite-vec` (`vec0`) KNN table, not a brute-force scan, so semantic search scales past the old ~10k-vector ceiling. Vectors auto-refresh for the symbols an incremental index touched — no manual `semantic-index` after every edit.
 
 ### 🧭 Graph intelligence
 
@@ -106,9 +108,9 @@ crates/
   codegraph-graph      tiered resolution (unique-or-drop), PageRank/Louvain/betweenness, flows
   codegraph-resolve    SCIP merge (compiler-grade, optional)
   codegraph-indexstore Xcode IndexStore merge (Swift compiler-grade, optional)
-  codegraph-store      SQLite: nodes/edges/calls/vectors/FTS5(subword)/cochanges/meta
+  codegraph-store      SQLite: nodes/edges/calls/sqlite-vec KNN/FTS5(external-content)/cochanges/meta
   codegraph-llm        OpenAI-compat client + optional bundled embedder (fastembed) & chat engine (mistral.rs)
-  codegraph-mcp        MCP server (17 tools, graph cache, coverage signals)
+  codegraph-mcp        MCP server (17 tools, generation-keyed graph cache, fs-watcher, coverage signals)
   codegraph-cli        the `codegraph` binary
 ```
 

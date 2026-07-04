@@ -4,7 +4,7 @@ members = ["crates/*"]
 exclude = ["_probe"]
 
 [workspace.package]
-version = "1.27.0"
+version = "1.28.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
@@ -25,6 +25,7 @@ anyhow     = "1"
 clap       = { version = "4", features = ["derive"] }
 tokio      = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util"] }
 rusqlite   = { version = "0.37", features = ["bundled", "functions"] }
+sqlite-vec = "0.1"
 petgraph   = "0.8"
 rayon      = "1"
 rmcp       = "1.8"

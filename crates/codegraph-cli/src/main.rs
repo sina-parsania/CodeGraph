@@ -420,10 +420,11 @@ fn main() -> anyhow::Result<()> {
             };
             let stats = index::index_dir(&path, &db, full, scip.as_deref(), indexstore, ambiguous)?;
             println!(
-                "indexed {} files ({} changed{}) → {} nodes, {} edges{}  ({})",
+                "indexed {} files ({} changed{}{}) → {} nodes, {} edges{}  ({})",
                 stats.files,
                 stats.changed,
                 if stats.pruned > 0 { format!(", {} pruned", stats.pruned) } else { String::new() },
+                if stats.partial { ", partial edge rebuild" } else { "" },
                 stats.nodes,
                 stats.edges,
                 if stats.scip_edges > 0 { format!(" (+{} SCIP tier-A)", stats.scip_edges) } else { String::new() },
@@ -948,7 +949,7 @@ fn main() -> anyhow::Result<()> {
             let items: Vec<(&codegraph_core::Node, String)> = nodes
                 .iter()
                 .filter(|n| n.label != codegraph_core::NodeLabel::File)
-                .map(|n| (n, format!("{} {:?} in {}", n.name, n.label, n.file_path)))
+                .map(|n| (n, index::embed_text_for(n)))
                 .collect();
             let texts: Vec<String> = items.iter().map(|(_, t)| t.clone()).collect();
             match codegraph_llm::embed_texts(&texts) {
@@ -989,17 +990,13 @@ fn main() -> anyhow::Result<()> {
                     return Ok(());
                 }
             }
-            let vectors = store.all_vectors()?;
-            if vectors.is_empty() {
+            // Indexed KNN via sqlite-vec (stored L2-normalized → score is cosine).
+            let hits = store.knn(&qv, limit)?;
+            if hits.is_empty() {
                 println!("no vectors yet - run `codegraph semantic-index` first");
                 return Ok(());
             }
-            // Stored vectors are L2-normalized, so dot == cosine (cheaper).
-            let mut scored: Vec<(f32, String)> =
-                vectors.iter().map(|(id, v)| (codegraph_core::dot(&qv, v), id.clone())).collect();
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            scored.truncate(limit);
-            for (score, id) in scored {
+            for (id, score) in hits {
                 if let Some(n) = store.get_node(&id)? {
                     println!("{:.3}  {:<22} {:?}  {}:{}", score, n.name, n.label, n.file_path, n.line_start);
                 }
@@ -1041,7 +1038,7 @@ fn main() -> anyhow::Result<()> {
             for (i, ch) in chunks.iter().enumerate() {
                 store.upsert_node(&index::document_node_from_chunk(ch, i))?;
             }
-            store.rebuild_fts()?;
+            // FTS stays in sync via the nodes_fts triggers — no rebuild needed.
             println!("ingested {} chunk(s) from {} as Document nodes (searchable by title; semantic over content)", chunks.len(), input);
         }
         Command::Init { repo, yes, no_index, no_mcp, force, print, uninstall } => {

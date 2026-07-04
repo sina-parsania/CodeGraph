@@ -104,6 +104,16 @@ impl OpenAiCompatBackend {
     }
 }
 
+/// `detect()` cached for the process lifetime: probing costs up to 5 HTTP
+/// requests × 800 ms timeout, which a long-lived MCP server must not pay per
+/// query. A server started AFTER this process won't be picked up until restart —
+/// pin one explicitly via CODEGRAPH_LLM_PROVIDER / CODEGRAPH_LLM_BASE_URL.
+fn detected_backend() -> &'static Option<OpenAiCompatBackend> {
+    use std::sync::OnceLock;
+    static BACKEND: OnceLock<Option<OpenAiCompatBackend>> = OnceLock::new();
+    BACKEND.get_or_init(OpenAiCompatBackend::detect)
+}
+
 fn model_ids(resp: reqwest::blocking::Response) -> Vec<String> {
     resp.json::<serde_json::Value>()
         .ok()
@@ -167,7 +177,7 @@ pub fn embed_texts(texts: &[String]) -> Option<(Vec<Vec<f32>>, String)> {
         let v = v.iter().map(|x| codegraph_core::normalize(x)).collect();
         return Some((v, label));
     }
-    let backend = OpenAiCompatBackend::detect().filter(|b| b.embed_model().is_some())?;
+    let backend = detected_backend().as_ref().filter(|b| b.embed_model().is_some())?;
     let model = backend.embed_model().unwrap_or("?").to_string();
     let mut out = Vec::with_capacity(texts.len());
     for t in texts {
@@ -182,29 +192,43 @@ pub fn embedder_available() -> bool {
     if cfg!(feature = "local-embed") {
         return true;
     }
-    OpenAiCompatBackend::detect().is_some_and(|b| b.embed_model().is_some())
+    detected_backend().as_ref().is_some_and(|b| b.embed_model().is_some())
 }
 
 /// Local model choice: `CODEGRAPH_LOCAL_EMBED=code` selects the code-trained
 /// jina-embeddings-v2-base-code (768-d, better for code semantics); default is
 /// bge-small-en-v1.5 (384-d, fast, matches earlier indexes).
+///
+/// The model is loaded ONCE per process (same pattern as `local_gen::ENGINE`) —
+/// ONNX model load costs hundreds of ms to seconds, and a long-lived MCP server
+/// serves many semantic_search calls. Mutex because `embed` needs exclusive access.
+#[cfg(feature = "local-embed")]
+fn local_embedder() -> &'static Option<(std::sync::Mutex<fastembed::TextEmbedding>, String)> {
+    use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+    use std::sync::{Mutex, OnceLock};
+    static MODEL: OnceLock<Option<(Mutex<TextEmbedding>, String)>> = OnceLock::new();
+    MODEL.get_or_init(|| {
+        let (which, label) = match std::env::var("CODEGRAPH_LOCAL_EMBED").as_deref() {
+            Ok("code") => (EmbeddingModel::JinaEmbeddingsV2BaseCode, "jina-code-v2 (local)"),
+            _ => (EmbeddingModel::BGESmallENV15, "bge-small-en-v1.5 (local)"),
+        };
+        let cache = std::env::var_os("CODEGRAPH_CACHE_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache/codegraph")))
+            .unwrap_or_else(|| std::path::PathBuf::from(".codegraph-cache"))
+            .join("fastembed");
+        let _ = std::fs::create_dir_all(&cache);
+        let opts = InitOptions::new(which).with_cache_dir(cache).with_show_download_progress(true);
+        TextEmbedding::try_new(opts).ok().map(|m| (Mutex::new(m), label.to_string()))
+    })
+}
+
 #[cfg(feature = "local-embed")]
 fn local_embed(texts: &[String]) -> Option<(Vec<Vec<f32>>, String)> {
-    use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-    let (which, label) = match std::env::var("CODEGRAPH_LOCAL_EMBED").as_deref() {
-        Ok("code") => (EmbeddingModel::JinaEmbeddingsV2BaseCode, "jina-code-v2 (local)"),
-        _ => (EmbeddingModel::BGESmallENV15, "bge-small-en-v1.5 (local)"),
-    };
-    let cache = std::env::var_os("CODEGRAPH_CACHE_DIR")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache/codegraph")))
-        .unwrap_or_else(|| std::path::PathBuf::from(".codegraph-cache"))
-        .join("fastembed");
-    let _ = std::fs::create_dir_all(&cache);
-    let opts = InitOptions::new(which).with_cache_dir(cache).with_show_download_progress(true);
-    let model = TextEmbedding::try_new(opts).ok()?;
+    let (model, label) = local_embedder().as_ref()?;
     let docs: Vec<&str> = texts.iter().map(String::as_str).collect();
-    model.embed(docs, None).ok().map(|v| (v, label.to_string()))
+    let out = model.lock().ok()?.embed(docs, None).ok()?;
+    Some((out, label.clone()))
 }
 
 
@@ -220,7 +244,7 @@ pub fn generate_text(prompt: &str, max_tokens: usize) -> Option<String> {
 /// Like `generate_text`, but also returns a "provider / model" label so
 /// callers can attribute the answer.
 pub fn generate_text_labeled(prompt: &str, max_tokens: usize) -> Option<(String, String)> {
-    if let Some(b) = OpenAiCompatBackend::detect() {
+    if let Some(b) = detected_backend().as_ref() {
         if let Some(out) = b.generate(prompt, max_tokens) {
             return Some((out, format!("{} / {}", b.provider(), b.model())));
         }
@@ -235,7 +259,7 @@ pub fn generate_text_labeled(prompt: &str, max_tokens: usize) -> Option<(String,
 
 /// True when any generation path exists (server or bundled engine).
 pub fn generator_available() -> bool {
-    cfg!(feature = "local-llm") || OpenAiCompatBackend::detect().is_some()
+    cfg!(feature = "local-llm") || detected_backend().is_some()
 }
 
 #[cfg(feature = "local-llm")]

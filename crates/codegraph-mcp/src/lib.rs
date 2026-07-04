@@ -17,10 +17,73 @@ pub fn mcp_ready() -> bool {
     true
 }
 
-/// The built call graph + its node list — expensive to construct, so cached.
-type GraphSnapshot = (codegraph_graph::LoadedGraph, Vec<codegraph_core::Node>);
-/// Mtime-keyed cache of the built graph, shared across cloned server handles.
-type GraphCache = std::sync::Arc<std::sync::Mutex<Option<(std::time::SystemTime, std::sync::Arc<GraphSnapshot>)>>>;
+/// The built call graph + node list + O(1) lookup maps + semantic vectors —
+/// expensive to construct, so cached per index generation. The maps exist
+/// because several tools used to do LINEAR scans over all nodes inside loops
+/// (context did ~200 × N id comparisons per call).
+pub struct GraphSnapshot {
+    lg: codegraph_graph::LoadedGraph,
+    nodes: Vec<codegraph_core::Node>,
+    by_id: std::collections::HashMap<String, usize>,
+    /// First definition wins — matches the previous `iter().find(...)` semantics.
+    by_name: std::collections::HashMap<String, usize>,
+}
+
+impl GraphSnapshot {
+    fn node_by_id(&self, id: &str) -> Option<&codegraph_core::Node> {
+        self.by_id.get(id).map(|&i| &self.nodes[i])
+    }
+    fn node_by_name(&self, name: &str) -> Option<&codegraph_core::Node> {
+        self.by_name.get(name).map(|&i| &self.nodes[i])
+    }
+}
+
+/// Cache key: the store's monotonic index generation (bumped per committed
+/// index) plus the DB mtime as a fallback for pre-generation DBs — mtime alone
+/// has 1-second granularity on some filesystems.
+type SnapKey = (u64, Option<std::time::SystemTime>);
+type GraphCache = std::sync::Arc<std::sync::Mutex<Option<(SnapKey, std::sync::Arc<GraphSnapshot>)>>>;
+
+/// Identity of the DB file backing a pooled connection: (dev, inode) on unix.
+/// A replaced file (gc + reindex) gets a different inode → the pooled handle
+/// is dropped instead of silently serving the deleted file's content.
+type DbFileId = Option<(u64, u64)>;
+
+#[cfg(unix)]
+fn db_file_id(p: &Path) -> DbFileId {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()))
+}
+#[cfg(not(unix))]
+fn db_file_id(_p: &Path) -> DbFileId {
+    Some((0, 0)) // no cheap inode identity — always reuse (files aren't swapped under open handles on Windows)
+}
+
+type StoreSlot = std::sync::Arc<std::sync::Mutex<Option<(DbFileId, codegraph_store::Store)>>>;
+
+/// A Store checked out of the single-connection pool; returned on drop. Reuse
+/// keeps SQLite's page cache warm across a burst of tool calls instead of
+/// re-opening (and re-checking the schema) per call. Concurrent calls that
+/// find the pool empty just open a fresh connection; the last one back wins.
+pub struct PooledStore {
+    entry: Option<(DbFileId, codegraph_store::Store)>,
+    slot: StoreSlot,
+}
+
+impl std::ops::Deref for PooledStore {
+    type Target = codegraph_store::Store;
+    fn deref(&self) -> &codegraph_store::Store {
+        &self.entry.as_ref().expect("present until drop").1
+    }
+}
+
+impl Drop for PooledStore {
+    fn drop(&mut self) {
+        if let (Some(e), Ok(mut slot)) = (self.entry.take(), self.slot.lock()) {
+            *slot = Some(e);
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct CodeGraphServer {
@@ -31,9 +94,11 @@ pub struct CodeGraphServer {
     refresh: Option<fn(&Path) -> anyhow::Result<()>>,
     /// Debounce so a burst of tool calls in one agent turn re-checks at most once/sec.
     last_fresh: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>,
-    /// Built-graph cache keyed by the DB's mtime — so a burst of graph queries in
-    /// one agent turn builds the petgraph ONCE, not per call. Invalidates on reindex.
+    /// Built-graph cache keyed by the DB's index generation — so a burst of graph
+    /// queries in one agent turn builds the petgraph ONCE, not per call.
     graph_cache: GraphCache,
+    /// Reusable read connection (see `PooledStore`).
+    store_slot: StoreSlot,
     tool_router: ToolRouter<CodeGraphServer>,
 }
 
@@ -130,6 +195,7 @@ impl CodeGraphServer {
             refresh,
             last_fresh: std::sync::Arc::new(std::sync::Mutex::new(None)),
             graph_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            store_slot: std::sync::Arc::new(std::sync::Mutex::new(None)),
             tool_router: Self::tool_router(),
         }
     }
@@ -149,10 +215,19 @@ impl CodeGraphServer {
         }
     }
 
-    fn open(&self) -> Result<codegraph_store::Store, McpError> {
+    fn open(&self) -> Result<PooledStore, McpError> {
         self.maybe_refresh();
-        codegraph_store::Store::open(&self.db_path)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))
+        let id = db_file_id(&self.db_path);
+        if let Ok(mut slot) = self.store_slot.lock() {
+            if let Some((cached, store)) = slot.take() {
+                if id.is_some() && cached == id {
+                    return Ok(PooledStore { entry: Some((id, store)), slot: self.store_slot.clone() });
+                }
+            }
+        }
+        let store = codegraph_store::Store::open(&self.db_path)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(PooledStore { entry: Some((id, store)), slot: self.store_slot.clone() })
     }
 
     #[tool(description = "Locate a symbol by NAME (exact/subword/regex). Use ONLY when you know (part of) the identifier. NOT for: conceptual or docs/wiki questions (use semantic_search), who-calls (callers), task context (context), API surface (routes). Returns exact file:line + node kind; beats grep (no comment/string hits).")]
@@ -217,37 +292,48 @@ impl CodeGraphServer {
         }))?]))
     }
 
-    /// Build (or reuse) the call graph. Cached by the DB mtime: a burst of graph
-    /// queries in one agent turn rebuilds the petgraph once; a reindex bumps the
-    /// mtime and invalidates it. Returns a shared snapshot (cheap to clone).
+    /// Build (or reuse) the call graph. Cached by the index generation (+ mtime):
+    /// a burst of graph queries in one agent turn builds the snapshot once; a
+    /// reindex bumps the generation and invalidates it. Cheap to clone (Arc).
     fn load_graph(&self) -> Result<std::sync::Arc<GraphSnapshot>, McpError> {
         self.maybe_refresh();
-        let mtime = std::fs::metadata(&self.db_path).and_then(|m| m.modified()).ok();
-        if let (Some(mt), Ok(cache)) = (mtime, self.graph_cache.lock()) {
-            if let Some((cached_mt, snap)) = cache.as_ref() {
-                if *cached_mt == mt {
+        let key: SnapKey = (
+            codegraph_store::generation(&self.db_path),
+            std::fs::metadata(&self.db_path).and_then(|m| m.modified()).ok(),
+        );
+        if let Ok(cache) = self.graph_cache.lock() {
+            if let Some((cached_key, snap)) = cache.as_ref() {
+                if *cached_key == key {
                     return Ok(snap.clone());
                 }
             }
         }
-        let store = codegraph_store::Store::open(&self.db_path)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let nodes = store.all_nodes().map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let edges = store.all_edges().map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let snap = std::sync::Arc::new((codegraph_graph::LoadedGraph::load(&nodes, &edges), nodes));
-        if let (Some(mt), Ok(mut cache)) = (mtime, self.graph_cache.lock()) {
-            *cache = Some((mt, snap.clone()));
+        let err = |e: codegraph_store::StoreError| McpError::internal_error(e.to_string(), None);
+        let store = self.open()?;
+        // Light loaders: no Document chunk text, no per-edge JSON parse.
+        let nodes = store.graph_nodes().map_err(err)?;
+        let edges = store.graph_edges().map_err(err)?;
+        let lg = codegraph_graph::LoadedGraph::load(&nodes, &edges);
+        let mut by_id = std::collections::HashMap::with_capacity(nodes.len());
+        let mut by_name = std::collections::HashMap::with_capacity(nodes.len());
+        for (i, n) in nodes.iter().enumerate() {
+            by_id.insert(n.id.clone(), i);
+            by_name.entry(n.name.clone()).or_insert(i);
+        }
+        let snap = std::sync::Arc::new(GraphSnapshot { lg, nodes, by_id, by_name });
+        if let Ok(mut cache) = self.graph_cache.lock() {
+            *cache = Some((key, snap.clone()));
         }
         Ok(snap)
     }
 
     #[tool(description = "Find code AND documentation by MEANING (vector search over all symbols + docs/wiki Document nodes). USE THIS for: conceptual questions ('code that retries with backoff'), docs/wiki lookups ('what does the wiki say about X' — do NOT grep/Read doc files first), and any query where you don't know the identifier. Bundled local embedder, no server. If empty, fall back to search.")]
     async fn semantic_search(&self, args: Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
-        self.maybe_refresh();
-        let db = self.db_path.clone();
+        let snap = self.load_graph()?; // refreshes; nodes for hit hydration
+        let store = self.open()?; // pooled connection, moved into the blocking task
         let q = args.0.query.clone();
         let limit = args.0.limit.unwrap_or(15);
-        let results = tokio::task::spawn_blocking(move || semantic_blocking(&db, &q, limit))
+        let results = tokio::task::spawn_blocking(move || semantic_blocking(&store, &snap, &q, limit))
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::json(results)?]))
@@ -256,10 +342,9 @@ impl CodeGraphServer {
     #[tool(description = "Shortest dependency/call path between two symbols by name: how A reaches B through the call graph.")]
     async fn trace_path(&self, args: Parameters<TwoNamesArgs>) -> Result<CallToolResult, McpError> {
         let g = self.load_graph()?;
-        let (lg, nodes) = (&g.0, &g.1);
-        let find = |name: &str| nodes.iter().find(|n| n.name == name).map(|n| n.id.clone());
+        let find = |name: &str| g.node_by_name(name).map(|n| n.id.clone());
         let path = match (find(&args.0.from), find(&args.0.to)) {
-            (Some(a), Some(b)) => lg.shortest_path(&a, &b).unwrap_or_default(),
+            (Some(a), Some(b)) => g.lg.shortest_path(&a, &b).unwrap_or_default(),
             _ => Vec::new(),
         };
         Ok(CallToolResult::success(vec![Content::json(path)?]))
@@ -268,11 +353,10 @@ impl CodeGraphServer {
     #[tool(description = "Impact / blast-radius: every symbol that (transitively) depends on the given one. Use BEFORE changing or renaming a symbol to see what could break. Includes a `coverage` object — if `may_be_incomplete` is true the radius may miss callers whose calls were dropped; corroborate with text search.")]
     async fn blast_radius(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let g = self.load_graph()?;
-        let (lg, nodes) = (&g.0, &g.1);
         let store = self.open()?;
-        let (affected, coverage) = match nodes.iter().find(|n| n.name == args.0.name) {
+        let (affected, coverage) = match g.node_by_name(&args.0.name) {
             Some(n) => (
-                lg.blast_radius(&n.id, 5),
+                g.lg.blast_radius(&n.id, 5),
                 store
                     .coverage_for_callers(&n.name)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?,
@@ -288,11 +372,10 @@ impl CodeGraphServer {
     #[tool(description = "List the functions a given function CALLS (outgoing call edges). PREFER over reading the body to enumerate its calls. Includes a `coverage` object — `dropped` counts external/unresolved calls absent from the list.")]
     async fn callees(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let g = self.load_graph()?;
-        let (lg, nodes) = (&g.0, &g.1);
         let store = self.open()?;
-        let (out, coverage) = match nodes.iter().find(|n| n.name == args.0.name) {
+        let (out, coverage) = match g.node_by_name(&args.0.name) {
             Some(n) => (
-                lg.callees(&n.id),
+                g.lg.callees(&n.id),
                 store
                     .coverage_for_callees(&n.id)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?,
@@ -322,16 +405,30 @@ impl CodeGraphServer {
         let seeds: Vec<String> =
             store.search_fts(&fts, 12).unwrap_or_default().into_iter().map(|n| n.id).collect();
         let g = self.load_graph()?;
-        let (lg, nodes) = (&g.0, &g.1);
-        let ranked = lg.personalized_pagerank_top(&seeds, 200);
+        let ranked = g.lg.personalized_pagerank_top(&seeds, 200);
         let mut used = 0usize;
         let mut out = Vec::new();
+        // Signature line per symbol (cached per file) — one tool call gives the
+        // agent orientation without a follow-up Read per hit.
+        let mut file_cache: std::collections::HashMap<String, Option<Vec<String>>> =
+            std::collections::HashMap::new();
         for (id, score) in ranked {
-            let Some(n) = nodes.iter().find(|n| n.id == id) else { continue };
+            let Some(n) = g.node_by_id(&id) else { continue };
             if n.label == codegraph_core::NodeLabel::File {
                 continue;
             }
-            let cost = (n.name.len() + n.file_path.len()) / 4 + 4;
+            let snippet = file_cache
+                .entry(n.file_path.clone())
+                .or_insert_with(|| {
+                    std::fs::read_to_string(self.root.join(&n.file_path))
+                        .ok()
+                        .map(|s| s.lines().map(str::to_string).collect())
+                })
+                .as_ref()
+                .and_then(|lines| lines.get(n.line_start.saturating_sub(1) as usize))
+                .map(|l| l.trim().chars().take(120).collect::<String>())
+                .unwrap_or_default();
+            let cost = (n.name.len() + n.file_path.len() + snippet.len()) / 4 + 4;
             if used + cost > budget {
                 break;
             }
@@ -339,6 +436,7 @@ impl CodeGraphServer {
             out.push(serde_json::json!({
                 "name": n.name, "label": format!("{:?}", n.label),
                 "file": n.file_path, "line": n.line_start, "score": score,
+                "snippet": snippet,
             }));
         }
         Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
@@ -349,8 +447,7 @@ impl CodeGraphServer {
     #[tool(description = "The most central/important symbols by PageRank: a fast way to map the core of an unfamiliar codebase.")]
     async fn important(&self, args: Parameters<LimitArgs>) -> Result<CallToolResult, McpError> {
         let g = self.load_graph()?;
-        let lg = &g.0;
-        let top = lg.pagerank_top(args.0.limit.unwrap_or(15));
+        let top = g.lg.pagerank_top(args.0.limit.unwrap_or(15));
         Ok(CallToolResult::success(vec![Content::json(top)?]))
     }
 
@@ -449,18 +546,17 @@ impl CodeGraphServer {
     #[tool(description = "Execution FLOWS: call chains from entry points (route handlers, main, zero-fan-in tasks) ranked by criticality (reach × centrality). Use to map what a service actually DOES, find the most critical paths, or see which flows a change touches.")]
     async fn flows(&self, args: Parameters<LimitArgs>) -> Result<CallToolResult, McpError> {
         let g = self.load_graph()?;
-        let (lg, nodes) = (&g.0, &g.1);
-        let entries = codegraph_graph::detect_entry_points(nodes);
+        let entries = codegraph_graph::detect_entry_points(&g.nodes);
         let mut flows: Vec<serde_json::Value> = entries
             .iter()
             .filter_map(|(n, kind)| {
-                let body = lg.flow_from(&n.id, 6);
+                let body = g.lg.flow_from(&n.id, 6);
                 if body.is_empty() {
                     return None;
                 }
                 let crit: f64 = body
                     .iter()
-                    .filter_map(|id| nodes.iter().find(|x| x.id == *id))
+                    .filter_map(|id| g.node_by_id(id))
                     .map(|x| x.pagerank)
                     .sum::<f64>()
                     * (1.0 + body.len() as f64).ln();
@@ -497,19 +593,21 @@ impl CodeGraphServer {
     }
 }
 
-fn semantic_blocking(db: &std::path::Path, q: &str, limit: usize) -> Vec<serde_json::Value> {
-    let Ok(store) = codegraph_store::Store::open(db) else { return Vec::new() };
+fn semantic_blocking(
+    store: &codegraph_store::Store,
+    snap: &GraphSnapshot,
+    q: &str,
+    limit: usize,
+) -> Vec<serde_json::Value> {
     let Some((qvs, _)) = codegraph_llm::embed_texts(&[q.to_string()]) else { return Vec::new() };
     let Some(qv) = qvs.into_iter().next() else { return Vec::new() };
-    let Ok(vectors) = store.all_vectors() else { return Vec::new() };
-    let mut scored: Vec<(f32, String)> =
-        vectors.iter().map(|(id, v)| (codegraph_core::dot(&qv, v), id.clone())).collect();
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(limit);
-    scored
+    // Indexed KNN via sqlite-vec — no full vector scan, no blob reload per query.
+    store
+        .knn(&qv, limit)
+        .unwrap_or_default()
         .into_iter()
-        .filter_map(|(score, id)| {
-            store.get_node(&id).ok().flatten().map(|n| {
+        .filter_map(|(id, score)| {
+            snap.node_by_id(&id).map(|n| {
                 serde_json::json!({"name": n.name, "label": format!("{:?}", n.label), "file": n.file_path, "line": n.line_start, "score": score})
             })
         })
@@ -530,13 +628,68 @@ COVERAGE: callers/callees/blast_radius are precise but NOT exhaustive — when `
     }
 }
 
+/// Directories whose churn never affects the graph (build output, deps, VCS) —
+/// filtered at the watcher so `cargo build`/`npm install` don't cause wakeups.
+/// The indexer's own walker excludes them too, so a missed filter here is only
+/// a wasted (cheap, stat-only) staleness probe — never a wrong graph.
+const WATCH_SKIP_DIRS: &[&str] = &[
+    ".git", "target", "node_modules", "build", "dist", "out", ".venv", "venv",
+    "__pycache__", "DerivedData", "Pods", ".gradle", ".next", ".cache", "vendor",
+    // Our own graph DB: when it falls back under the repo root (no HOME /
+    // CODEGRAPH_CACHE_DIR), a reindex write must NOT retrigger the watcher.
+    ".codegraph", ".codegraph-cache",
+];
+
+/// Keep the index WARM: watch the repo and heal on quiet (debounced), so by the
+/// time the agent's next tool call arrives the graph is already fresh and the
+/// per-call `maybe_refresh` is a no-op. Best-effort — if the watcher can't
+/// start, queries still self-heal exactly as before. Returns the watcher (must
+/// stay alive for the server's lifetime).
+fn spawn_fs_watcher(
+    root: PathBuf,
+    refresh: fn(&Path) -> anyhow::Result<()>,
+) -> Option<notify::RecommendedWatcher> {
+    use notify::Watcher;
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+        let Ok(ev) = res else { return };
+        if matches!(ev.kind, notify::EventKind::Access(_)) {
+            return;
+        }
+        let relevant = ev.paths.iter().any(|p| {
+            !p.components().any(|c| {
+                c.as_os_str().to_str().is_some_and(|s| WATCH_SKIP_DIRS.contains(&s))
+            })
+        });
+        if relevant {
+            let _ = tx.send(());
+        }
+    })
+    .ok()?;
+    watcher.watch(&root, notify::RecursiveMode::Recursive).ok()?;
+    std::thread::spawn(move || {
+        while rx.recv().is_ok() {
+            // Debounce: drain events until 400ms of quiet (editors and git
+            // checkouts write in bursts), then heal once.
+            while rx.recv_timeout(std::time::Duration::from_millis(400)).is_ok() {}
+            if let Err(e) = refresh(&root) {
+                eprintln!("codegraph: watcher reindex failed ({e}); queries will self-heal");
+            }
+        }
+    });
+    Some(watcher)
+}
+
 /// Run the MCP server over stdio until the client disconnects. `refresh` is the
 /// freshness gate (the CLI passes `index::ensure_fresh`); pass `None` to disable.
+/// When enabled it ALSO drives a filesystem watcher so the index heals in the
+/// background between tool calls instead of on the first query after an edit.
 pub async fn serve_stdio(
     root: PathBuf,
     db_path: PathBuf,
     refresh: Option<fn(&Path) -> anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
+    let _watcher = refresh.and_then(|f| spawn_fs_watcher(root.clone(), f));
     let service = CodeGraphServer::with_refresh(root, db_path, refresh).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())

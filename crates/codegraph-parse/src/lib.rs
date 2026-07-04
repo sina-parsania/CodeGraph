@@ -351,7 +351,7 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
                 }
                 let mut metadata = Metadata::new();
                 if matches!(label, NodeLabel::Function | NodeLabel::Method) {
-                    metadata.insert("complexity".into(), serde_json::json!(cyclomatic(node)));
+                    metadata.insert("complexity".into(), serde_json::json!(cyclomatic(node, ctx.spec.label_for)));
                 }
                 nodes.push(Node {
                     id,
@@ -652,10 +652,17 @@ fn ts_infer_locals(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<RawLocal
 /// Cyclomatic complexity (lite): 1 + decision points in the function's subtree.
 /// Grammar-agnostic by node-kind name — an approximation, consistent across the
 /// 13 languages, good for ranking risk (not for exact McCabe compliance).
-fn cyclomatic(func: TsNode) -> u32 {
+/// Nested NAMED functions are skipped — they get their own node + count, and
+/// counting them here double-bills every ancestor (O(depth × subtree) walks).
+fn cyclomatic(func: TsNode, label_for: fn(&str) -> Option<NodeLabel>) -> u32 {
     let mut n = 1u32;
     let mut stack = vec![func];
     while let Some(node) = stack.pop() {
+        if node.id() != func.id()
+            && matches!(label_for(node.kind()), Some(NodeLabel::Function | NodeLabel::Method))
+        {
+            continue;
+        }
         let k = node.kind();
         if k.contains("if_") || k.starts_with("if") && k.ends_with("statement")
             || k.contains("for_") || k.contains("while")

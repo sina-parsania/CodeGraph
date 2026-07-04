@@ -15,8 +15,10 @@ pub struct Loaded {
 impl Loaded {
     pub fn open(db: &Path) -> Result<Loaded> {
         let store = Store::open(db)?;
-        let nodes = store.all_nodes()?;
-        let edges = store.all_edges()?;
+        // Light loaders: traversal needs structure only — skips Document chunk
+        // text and the per-edge JSON parse.
+        let nodes = store.graph_nodes()?;
+        let edges = store.graph_edges()?;
         let lg = LoadedGraph::load(&nodes, &edges);
         Ok(Loaded { lg, nodes })
     }

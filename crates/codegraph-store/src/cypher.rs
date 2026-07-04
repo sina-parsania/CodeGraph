@@ -99,25 +99,58 @@ pub fn to_sql(q: &str) -> Result<String, String> {
     ))
 }
 
+/// Split a WHERE body on ` AND ` case-insensitively, skipping occurrences
+/// inside single-quoted string values (`name = 'a and b'`).
+fn split_and(w: &str) -> Vec<&str> {
+    let lower = w.to_lowercase();
+    let mut parts = Vec::new();
+    let (mut start, mut from) = (0usize, 0usize);
+    while let Some(p) = lower[from..].find(" and ") {
+        let pos = from + p;
+        if w[..pos].matches('\'').count() % 2 == 1 {
+            from = pos + 5; // inside a quoted value — not a conjunction
+            continue;
+        }
+        parts.push(&w[start..pos]);
+        start = pos + 5;
+        from = start;
+    }
+    parts.push(&w[start..]);
+    parts
+}
+
 /// `a.name = 'x' AND b.file CONTAINS 'auth'` → SQL conjunction (AND-only).
 fn where_to_sql(w: &str) -> Result<String, String> {
     let mut parts = Vec::new();
-    for clause in w.split(" AND ") {
+    for clause in split_and(w) {
         let c = clause.trim();
         let lower = c.to_lowercase();
         let (op_pos, sql_op, op_len, like) = if let Some(p) = lower.find(" contains ") {
-            (p, "LIKE", 10, ("%", "%"))
+            (p, "LIKE", 10, Some(("%", "%")))
         } else if let Some(p) = lower.find(" starts with ") {
-            (p, "LIKE", 13, ("", "%"))
+            (p, "LIKE", 13, Some(("", "%")))
         } else if let Some(p) = c.find('=') {
-            (p, "=", 1, ("", ""))
+            (p, "=", 1, None)
         } else {
             return Err(format!("unsupported WHERE clause: {c} (use =, CONTAINS, STARTS WITH, AND)"));
         };
         let lhs = prop_to_sql(c[..op_pos].trim())?;
         let raw = c[op_pos + op_len..].trim().trim_matches('\'').trim_matches('"');
-        let val = raw.replace('\'', "''");
-        parts.push(format!("{lhs} {sql_op} '{}{}{}'", like.0, val, like.1));
+        match like {
+            // LIKE: escape the user's % _ \ so CONTAINS '100%' matches literally.
+            Some((pre, post)) => {
+                let val = raw
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+                    .replace('\'', "''");
+                parts.push(format!("{lhs} {sql_op} '{pre}{val}{post}' ESCAPE '\\'"));
+            }
+            None => {
+                let val = raw.replace('\'', "''");
+                parts.push(format!("{lhs} {sql_op} '{val}'"));
+            }
+        }
     }
     Ok(format!("({})", parts.join(" AND ")))
 }
@@ -172,5 +205,23 @@ mod tests {
     #[test]
     fn injection_rejected() {
         assert!(to_sql("MATCH (a:Fn'; DROP TABLE nodes;--)-->(b) RETURN a.name").is_err());
+    }
+
+    #[test]
+    fn lowercase_and_splits() {
+        let sql = to_sql("MATCH (a)-->(b) WHERE a.name = 'x' and b.name = 'y' RETURN a.name").unwrap();
+        assert!(sql.contains("a.name = 'x'") && sql.contains("b.name = 'y'"), "{sql}");
+    }
+
+    #[test]
+    fn and_inside_quoted_value_not_split() {
+        let sql = to_sql("MATCH (a)-->(b) WHERE a.name = 'salt and pepper' RETURN a.name").unwrap();
+        assert!(sql.contains("'salt and pepper'"), "{sql}");
+    }
+
+    #[test]
+    fn like_wildcards_escaped() {
+        let sql = to_sql("MATCH (a)-->(b) WHERE a.file CONTAINS '100%_x' RETURN a.name").unwrap();
+        assert!(sql.contains("LIKE '%100\\%\\_x%' ESCAPE '\\'"), "{sql}");
     }
 }

@@ -52,6 +52,8 @@ fn resolve_via_import<'a>(
     callee: &str,
     import_map: &HashMap<(&str, &str), Vec<&'a str>>,
     fn_by_file_name: &HashMap<(&'a str, &'a str), &'a str>,
+    fn_by_name: &HashMap<&'a str, Vec<&'a str>>,
+    by_id: &HashMap<&str, &'a Node>,
 ) -> Option<&'a str> {
     let modules = import_map.get(&(caller.file_path.as_str(), callee))?;
     if modules.len() != 1 {
@@ -75,11 +77,16 @@ fn resolve_via_import<'a>(
             }
         }
     } else if caller.language == "python" {
-        // Python dotted: a.b.c → …/a/b/c.py — match by path suffix (repo-root unknown).
-        let tail = format!("{}.py", module.replace('.', "/"));
-        for (&(file, name), &id) in fn_by_file_name.iter() {
-            let init = format!("{}/__init__.py", module.replace('.', "/"));
-            if name == callee && (file.ends_with(&tail) || file.ends_with(&init)) && !hits.contains(&id) {
+        // Python dotted: a.b.c → …/a/b/c.py — match by path suffix (repo-root
+        // unknown). Iterate the few same-name candidates, not every function in
+        // the repo (this runs once per unresolved import-bound call site).
+        let root = module.replace('.', "/");
+        let tail = format!("{root}.py");
+        let init = format!("{root}/__init__.py");
+        for &id in fn_by_name.get(callee).map(Vec::as_slice).unwrap_or_default() {
+            let Some(n) = by_id.get(id) else { continue };
+            let file = n.file_path.as_str();
+            if (file.ends_with(&tail) || file.ends_with(&init)) && !hits.contains(&id) {
                 hits.push(id);
             }
         }
@@ -103,11 +110,10 @@ fn join_normalize(dir: &str, module: &str) -> String {
 }
 
 
-/// Test-file heuristic shared by TESTS-edge emission (kept conservative).
-fn is_test_path(p: &str) -> bool {
-    let lp = p.to_ascii_lowercase();
-    lp.contains("test") || lp.contains("spec") || lp.contains("__tests__")
-}
+/// Test-file predicate shared with the store's SQL queries (token-aware,
+/// `latest_prices.rs` is not a test) — one definition in codegraph-core so the
+/// TESTS edges and the dead-code/test-coverage queries can never disagree.
+use codegraph_core::is_test_path;
 
 /// Entry points for flow detection: HTTP route handlers (resolved by name within
 /// the route's file), `main`, and zero-fan-in functions that call 3+ others
@@ -116,11 +122,14 @@ pub fn detect_entry_points(nodes: &[Node]) -> Vec<(&Node, &'static str)> {
     use NodeLabel::*;
     let mut out: Vec<(&Node, &'static str)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut fn_by_file_name: HashMap<(&str, &str), &Node> = HashMap::new();
+    for n in nodes.iter().filter(|n| matches!(n.label, Function | Method)) {
+        // first definition wins — matches the previous linear-scan semantics
+        fn_by_file_name.entry((n.file_path.as_str(), n.name.as_str())).or_insert(n);
+    }
     for r in nodes.iter().filter(|n| n.label == Route) {
         if let Some(h) = r.metadata.get("handler").and_then(|v| v.as_str()) {
-            if let Some(f) = nodes.iter().find(|n| {
-                n.name == h && n.file_path == r.file_path && matches!(n.label, Function | Method)
-            }) {
+            if let Some(&f) = fn_by_file_name.get(&(r.file_path.as_str(), h)) {
                 if seen.insert(&f.id) {
                     out.push((f, "route"));
                 }
@@ -141,8 +150,9 @@ pub fn detect_entry_points(nodes: &[Node]) -> Vec<(&Node, &'static str)> {
 
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 
-/// Directed graph of node-id → node-id, edge weight = relation name.
-pub type CodeGraph = StableGraph<String, String>;
+/// Directed graph of node-id → node-id, edge weight = the relation itself
+/// (a Copy enum — integer compares in traversals, no per-edge String alloc).
+pub type CodeGraph = StableGraph<String, EdgeRelation>;
 
 pub struct Built {
     pub graph: CodeGraph,
@@ -163,6 +173,32 @@ pub fn build(
     imports: &[RawImport],
 ) -> Built {
     build_with(nodes, calls, inherits, fields, locals, imports, false)
+}
+
+/// PARTIAL edge rebuild for incremental indexing. Resolution tables are built
+/// from the FULL current inputs (a call's resolution depends on global name
+/// uniqueness, the class hierarchy, and field types — all repo-wide), but only
+/// `calls_in_changed` are resolved, and the result is filtered to edges
+/// ORIGINATING in `changed` files — the slice the indexer deletes and replaces.
+///
+/// Sound ONLY when every changed file's interface signature (node ids/labels,
+/// inherits, fields) is unchanged — the indexer checks this. Then no OTHER
+/// file's resolution environment changed, so its stored edges remain exactly
+/// what a full rebuild would produce, and hyperedges/implementer sets are
+/// untouched. Same code path as `build_with` ⇒ byte-identical edges.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_files(
+    nodes: &[Node],
+    calls_in_changed: &[RawCall],
+    inherits: &[RawInherit],
+    fields: &[RawField],
+    locals: &[RawLocal],
+    imports: &[RawImport],
+    include_ambiguous: bool,
+    changed: &HashSet<String>,
+) -> Vec<Edge> {
+    let built = build_with(nodes, calls_in_changed, inherits, fields, locals, imports, include_ambiguous);
+    built.edges.into_iter().filter(|e| changed.contains(&e.src_file)).collect()
 }
 
 /// `include_ambiguous`: ALSO emit edges for unresolved calls with 2–5 same-name
@@ -201,16 +237,19 @@ pub fn build_with(
     }
     // class_members: class id -> method name -> method ids, by innermost containment.
     // Includes Function nodes too (Swift/Python/Rust/Kotlin label methods Function).
+    // Classes are pre-grouped by file so each method only scans its own file's
+    // classes — the all-classes scan was O(methods × classes) repo-wide.
+    let mut classes_by_file: HashMap<&str, Vec<&Node>> = HashMap::new();
+    for c in &class_nodes {
+        classes_by_file.entry(c.file_path.as_str()).or_default().push(c);
+    }
     let mut class_members: HashMap<&str, HashMap<&str, Vec<&str>>> = HashMap::new();
     for m in nodes.iter().filter(|n| matches!(n.label, NodeLabel::Method | NodeLabel::Function)) {
-        let owner = class_nodes
-            .iter()
-            .filter(|c| {
-                c.file_path == m.file_path
-                    && c.line_start <= m.line_start
-                    && m.line_end <= c.line_end
-                    && c.id != m.id
-            })
+        let owner = classes_by_file
+            .get(m.file_path.as_str())
+            .into_iter()
+            .flatten()
+            .filter(|c| c.line_start <= m.line_start && m.line_end <= c.line_end && c.id != m.id)
             .min_by_key(|c| c.line_end - c.line_start);
         if let Some(c) = owner {
             class_members.entry(c.id.as_str()).or_default().entry(m.name.as_str()).or_default().push(m.id.as_str());
@@ -358,7 +397,7 @@ pub fn build_with(
                 .copied()
                 .map(|id| (id, "SameFileUnique"))
                 .or_else(|| {
-                    resolve_via_import(caller, &c.callee_name, &import_map, &fn_by_file_name)
+                    resolve_via_import(caller, &c.callee_name, &import_map, &fn_by_file_name, &fn_by_name, &by_id)
                         .map(|id| (id, "ImportNarrowed"))
                 })
                 .or_else(|| {
@@ -506,7 +545,7 @@ pub fn build_with(
     }
     for e in &edges {
         if let (Some(&a), Some(&b)) = (idx.get(e.src.as_str()), idx.get(e.dst.as_str())) {
-            graph.add_edge(a, b, format!("{:?}", e.relation));
+            graph.add_edge(a, b, e.relation);
         }
     }
 
@@ -927,7 +966,7 @@ impl LoadedGraph {
         }
         for e in edges {
             if let (Some(&a), Some(&b)) = (idx.get(&e.src), idx.get(&e.dst)) {
-                graph.add_edge(a, b, format!("{:?}", e.relation));
+                graph.add_edge(a, b, e.relation);
             }
         }
         let mut ids = vec![String::new(); graph.node_count()];
@@ -979,7 +1018,7 @@ impl LoadedGraph {
         for _ in 0..max_depth {
             let mut next = Vec::new();
             for &n in &frontier {
-                for e in self.graph.edges(n).filter(|e| e.weight() == "Calls") {
+                for e in self.graph.edges(n).filter(|e| *e.weight() == EdgeRelation::Calls) {
                     let t = e.target();
                     if visited.insert(t) {
                         next.push(t);
@@ -1001,7 +1040,7 @@ impl LoadedGraph {
         let Some(&n) = self.idx.get(of) else { return Vec::new() };
         self.graph
             .edges(n)
-            .filter(|e| e.weight() == "Calls")
+            .filter(|e| *e.weight() == EdgeRelation::Calls)
             .map(|e| self.ids[e.target().index()].clone())
             .collect()
     }
