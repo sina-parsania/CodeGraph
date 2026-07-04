@@ -513,6 +513,15 @@ impl Store {
         Ok(())
     }
 
+    /// Strongest co-change pairs repo-wide (for the report).
+    pub fn top_cochanges(&self, limit: usize) -> Result<Vec<(String, String, u32)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT file_a, file_b, n FROM cochanges ORDER BY n DESC, file_a, file_b LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Files that historically change together with `file`, strongest first.
     pub fn cochanges_for(&self, file: &str, limit: usize) -> Result<Vec<(String, u32)>> {
         let mut stmt = self.conn.prepare(

@@ -60,6 +60,11 @@ A competent agent answering _"who calls this?"_ with grep must read context arou
 
 `rename-symbol old new [--write]` rewrites a symbol + all resolved references — or **refuses** when any occurrence isn't provably accounted for. It never corrupts code to complete an edit.
 
+### 📊 See the graph
+
+- **`codegraph report`** — deterministic Markdown snapshot (no LLM): overview, call-resolution quality by tier, central symbols, strongest co-changes. Reproducible for CI diffs.
+- **`codegraph html [--open]`** — one **self-contained** interactive HTML file (force layout, no CDN, no server): pan/zoom the resolved graph offline. Written next to the cached graph so the repo stays pristine.
+
 ### 📦 Team-ready
 
 - Central cache (`~/.cache/codegraph`) — repos stay pristine. Auto-TTL cleanup.

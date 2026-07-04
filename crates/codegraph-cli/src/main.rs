@@ -6,6 +6,7 @@ mod index;
 mod init;
 mod query;
 mod registry;
+mod viz;
 mod scipcmd;
 
 use std::path::PathBuf;
@@ -155,6 +156,30 @@ enum Command {
     },
     /// Most central symbols by PageRank.
     Important { #[arg(long, default_value = ".")] path: PathBuf, #[arg(long, default_value_t = 15)] limit: usize },
+    /// Deterministic Markdown report: overview, resolution quality, central symbols,
+    /// hotspots + test gaps, communities, flows, API surface, dead code, health.
+    Report {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Write to a file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Self-contained interactive HTML visualization of the graph (force layout,
+    /// search, communities, table view). No external requests — works offline.
+    Html {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Output file (default: graph.html next to the cached graph.db, so the repo stays pristine).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Max symbols shown (top by PageRank).
+        #[arg(long, default_value_t = 300)]
+        limit: usize,
+        /// Open in the default browser after writing.
+        #[arg(long)]
+        open: bool,
+    },
     /// Select the most relevant symbols for a query, ranked by personalized
     /// PageRank over the RESOLVED graph, within a token budget (for LLM context).
     Context {
@@ -351,7 +376,8 @@ fn project_path(cmd: &Command) -> Option<PathBuf> {
         | SemanticIndex { path, .. } | Semantic { path, .. } | Ingest { path, .. } | Mcp { path, .. }
         | Context { path, .. } | RenameSymbol { path, .. } | DeadCode { path, .. }
         | Changes { path, .. } | Export { path, .. } | Import { path, .. } | Flows { path, .. }
-        | Cypher { path, .. } | VerifyDeterminism { path, .. } => Some(path.clone()),
+        | Cypher { path, .. } | VerifyDeterminism { path, .. }
+        | Report { path, .. } | Html { path, .. } => Some(path.clone()),
         Init { repo, .. } | Scip { path: repo } => Some(repo.clone()),
         Install { .. } | Status | Doctor | Gc { .. } | Projects | Config { .. } => None,
     }
@@ -366,6 +392,7 @@ fn needs_fresh(cmd: &Command) -> bool {
             | Important { .. } | Communities { .. } | Routes { .. } | Query { .. }
             | Implementers { .. } | Ask { .. } | Semantic { .. } | Context { .. } | RenameSymbol { .. }
             | DeadCode { .. } | Changes { .. } | Flows { .. } | Cypher { .. }
+            | Report { .. } | Html { .. }
     )
 }
 
@@ -430,6 +457,33 @@ fn main() -> anyhow::Result<()> {
                 if stats.scip_edges > 0 { format!(" (+{} SCIP tier-A)", stats.scip_edges) } else { String::new() },
                 db.display()
             );
+        }
+        Command::Report { path, out } => {
+            let md = viz::report(&path, &index::db_path(&path))?;
+            match out {
+                Some(f) => {
+                    std::fs::write(&f, md)?;
+                    println!("report written to {}", f.display());
+                }
+                None => print!("{md}"),
+            }
+        }
+        Command::Html { path, out, limit, open } => {
+            let db = index::db_path(&path);
+            let html = viz::html(&path, &db, limit)?;
+            // Default next to the cached graph.db — the source repo stays pristine.
+            let out = out.unwrap_or_else(|| db.with_file_name("graph.html"));
+            std::fs::write(&out, html)?;
+            println!("interactive graph written to {}", out.display());
+            if open {
+                #[cfg(target_os = "macos")]
+                let opener = "open";
+                #[cfg(all(unix, not(target_os = "macos")))]
+                let opener = "xdg-open";
+                #[cfg(windows)]
+                let opener = "explorer";
+                let _ = std::process::Command::new(opener).arg(&out).spawn();
+            }
         }
         Command::Search { term, path, limit, rerank, regex } => {
             let db = index::db_path(&path);

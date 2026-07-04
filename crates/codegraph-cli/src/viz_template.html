@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__CODEGRAPH_TITLE__ — CodeGraph</title>
+<style>
+  /* Palette: validated reference instance (dataviz method). Roles, not raw hex, below. */
+  :root {
+    --surface-1: #fcfcfb; --surface-2: #f4f4f2;
+    --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #8a897f;
+    --edge: #d9d8d2; --edge-strong: #b5b4ac; --border: #e4e3dd;
+    --s1: #2a78d6; --s2: #1baf7a; --s3: #eda100; --s4: #008300;
+    --s5: #4a3aa7; --s6: #e34948; --s7: #e87ba4; --s8: #eb6834;
+    --other: #8a897f; --accent: #2a78d6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface-1: #1a1a19; --surface-2: #232322;
+      --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8a897f;
+      --edge: #33332f; --edge-strong: #4a4944; --border: #33332f;
+      --s1: #3987e5; --s2: #199e70; --s3: #c98500; --s4: #008300;
+      --s5: #9085e9; --s6: #e66767; --s7: #d55181; --s8: #d95926;
+      --other: #8a897f; --accent: #3987e5;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    font: 13px/1.45 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--surface-1); color: var(--text-primary);
+  }
+  #topbar {
+    display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+    border-bottom: 1px solid var(--border); background: var(--surface-1);
+    position: relative; z-index: 5; flex-wrap: wrap;
+  }
+  #topbar h1 { font-size: 14px; font-weight: 600; }
+  #topbar .sub { color: var(--text-secondary); font-size: 12px; }
+  #search {
+    padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--surface-2); color: var(--text-primary); width: 220px; font-size: 12px;
+  }
+  #search:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button.tbtn {
+    padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--surface-2); color: var(--text-primary); cursor: pointer; font-size: 12px;
+  }
+  button.tbtn[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: -1px; }
+  #legend { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; font-size: 11px; color: var(--text-secondary); }
+  #legend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
+  #legend .shape { color: var(--text-muted); }
+  #wrap { position: relative; height: calc(100% - 46px); }
+  #canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  #canvas.dragging { cursor: grabbing; }
+  #tooltip {
+    position: absolute; pointer-events: none; display: none; max-width: 360px;
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.18); z-index: 10;
+  }
+  #tooltip .t-name { font-weight: 600; }
+  #tooltip .t-meta { color: var(--text-secondary); }
+  #side {
+    position: absolute; top: 0; right: 0; width: 300px; max-height: 100%;
+    overflow-y: auto; background: var(--surface-1); border-left: 1px solid var(--border);
+    padding: 12px 14px; display: none; z-index: 6;
+  }
+  #side h2 { font-size: 13px; word-break: break-all; }
+  #side .meta { color: var(--text-secondary); font-size: 12px; margin: 4px 0 10px; word-break: break-all; }
+  #side h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); margin: 10px 0 4px; }
+  #side ul { list-style: none; }
+  #side li a { color: var(--accent); text-decoration: none; cursor: pointer; word-break: break-all; }
+  #side li a:hover { text-decoration: underline; }
+  #side .close { float: right; cursor: pointer; color: var(--text-muted); background: none; border: none; font-size: 14px; }
+  #tablewrap {
+    position: absolute; inset: 0; overflow: auto; background: var(--surface-1);
+    display: none; z-index: 4; padding: 14px;
+  }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-secondary); font-weight: 600; position: sticky; top: -14px; background: var(--surface-1); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div id="topbar">
+  <h1>__CODEGRAPH_TITLE__</h1>
+  <span class="sub" id="counts"></span>
+  <input id="search" type="search" placeholder="filter symbols…" aria-label="Filter symbols">
+  <button class="tbtn" id="tableBtn" aria-pressed="false">Table view</button>
+  <span id="legend"></span>
+</div>
+<div id="wrap">
+  <canvas id="canvas"></canvas>
+  <div id="tooltip" role="tooltip"></div>
+  <aside id="side" aria-label="Symbol details"></aside>
+  <div id="tablewrap"><table id="tbl"></table></div>
+</div>
+<script>
+"use strict";
+const DATA = __CODEGRAPH_DATA__;
+/* nodes: {n,l,f,ln,c,pr,fi,fo}; edges: [src,dst,rel]; rels; legend: community labels */
+
+const css = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+let COLORS, EDGE, EDGE_S, TEXT, TEXT2, SURFACE;
+function loadTheme() {
+  COLORS = ["--s1","--s2","--s3","--s4","--s5","--s6","--s7","--s8","--other"].map(css);
+  EDGE = css("--edge"); EDGE_S = css("--edge-strong");
+  TEXT = css("--text-primary"); TEXT2 = css("--text-secondary"); SURFACE = css("--surface-1");
+}
+loadTheme();
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { loadTheme(); draw(); });
+
+const N = DATA.nodes.length;
+const nodes = DATA.nodes.map((d, i) => {
+  // deterministic golden-angle spiral start
+  const a = i * 2.39996, r = 16 * Math.sqrt(i + 1);
+  return { ...d, i, x: Math.cos(a) * r, y: Math.sin(a) * r, vx: 0, vy: 0,
+           r: Math.max(4, Math.min(12, 4 + Math.sqrt(d.pr * N) * 6)) };
+});
+const edges = DATA.edges.map(([s, t, r]) => ({ s: nodes[s], t: nodes[t], r }));
+const adj = nodes.map(() => []);
+for (const e of edges) { adj[e.s.i].push(e); adj[e.t.i].push(e); }
+
+/* ---- force simulation (plain, deterministic) ---- */
+// Community anchors on a ring so clusters separate spatially (color + position
+// agree); the "other" bucket gets the center.
+const nSlots = DATA.legend.length;
+const anchors = DATA.legend.map((_, s) => {
+  if (s === nSlots - 1) return { x: 0, y: 0 };
+  const a = (s / (nSlots - 1)) * 2 * Math.PI - Math.PI / 2;
+  return { x: Math.cos(a) * 300, y: Math.sin(a) * 300 };
+});
+let alpha = 1;
+function tick() {
+  const k = 90; // spring rest length
+  for (const e of edges) { // springs
+    const dx = e.t.x - e.s.x, dy = e.t.y - e.s.y;
+    const d = Math.max(1, Math.hypot(dx, dy));
+    const f = (d - k) / d * 0.02 * alpha;
+    e.s.vx += dx * f; e.s.vy += dy * f;
+    e.t.vx -= dx * f; e.t.vy -= dy * f;
+  }
+  for (let i = 0; i < N; i++) { // n-body repulsion
+    const a = nodes[i];
+    for (let j = i + 1; j < N; j++) {
+      const b = nodes[j];
+      let dx = b.x - a.x, dy = b.y - a.y;
+      let d2 = dx * dx + dy * dy;
+      if (d2 < 1) { dx = (i % 3) - 1 || 0.7; dy = (j % 3) - 1 || -0.7; d2 = 1; }
+      if (d2 > 160000) continue;
+      const f = 900 * alpha / d2;
+      const d = Math.sqrt(d2);
+      dx /= d; dy /= d;
+      a.vx -= dx * f; a.vy -= dy * f;
+      b.vx += dx * f; b.vy += dy * f;
+    }
+    const an = anchors[Math.min(a.c, nSlots - 1)]; // community gravity
+    a.vx += (an.x - a.x) * 0.012 * alpha; a.vy += (an.y - a.y) * 0.012 * alpha;
+    a.vx -= a.x * 0.001 * alpha; a.vy -= a.y * 0.001 * alpha; // weak global centering
+  }
+  for (const n of nodes) {
+    if (n === dragNode) continue;
+    n.x += n.vx; n.y += n.vy; n.vx *= 0.6; n.vy *= 0.6;
+  }
+  alpha = Math.max(0, alpha - 0.004);
+}
+
+/* ---- rendering ---- */
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+let W, H, DPR;
+function resize() {
+  DPR = devicePixelRatio || 1;
+  W = canvas.clientWidth; H = canvas.clientHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  draw();
+}
+addEventListener("resize", resize);
+
+let view = { x: 0, y: 0, z: 1 };
+const toScreen = n => ({ x: (n.x + view.x) * view.z + W / 2, y: (n.y + view.y) * view.z + H / 2 });
+
+let hovered = null, selected = null, query = "";
+const matches = n => !query || n.n.toLowerCase().includes(query) || n.f.toLowerCase().includes(query);
+
+function nodeShape(p, n, dim) {
+  const r = n.r * Math.min(1.6, Math.max(0.7, view.z));
+  ctx.beginPath();
+  const kind = n.l;
+  if (kind === "Class" || kind === "Interface" || kind === "Enum" || kind === "Type") {
+    const s = r * 1.7;
+    if (ctx.roundRect) ctx.roundRect(p.x - s / 2, p.y - s / 2, s, s, 3); else ctx.rect(p.x - s / 2, p.y - s / 2, s, s);
+  } else if (kind === "Route") {
+    ctx.moveTo(p.x, p.y - r); ctx.lineTo(p.x + r, p.y); ctx.lineTo(p.x, p.y + r); ctx.lineTo(p.x - r, p.y); ctx.closePath();
+  } else {
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+  }
+  ctx.globalAlpha = dim ? 0.12 : 1;
+  ctx.fillStyle = COLORS[Math.min(n.c, 8)];
+  ctx.fill();
+  ctx.globalAlpha = dim ? 0.12 : 1;
+  ctx.lineWidth = 2; ctx.strokeStyle = SURFACE; ctx.stroke(); // 2px surface ring (spacer rule)
+  if (n === selected || n === hovered) {
+    ctx.lineWidth = 2; ctx.strokeStyle = TEXT; ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+const labelSet = new Set(nodes.slice().sort((a, b) => b.pr - a.pr).slice(0, 14).map(n => n.i));
+
+function draw() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  const anyQuery = !!query;
+  ctx.lineWidth = 1;
+  for (const e of edges) {
+    const dim = anyQuery && !(matches(e.s) && matches(e.t));
+    const active = (selected && (e.s === selected || e.t === selected)) ||
+                   (hovered && (e.s === hovered || e.t === hovered));
+    ctx.globalAlpha = dim ? 0.06 : active ? 0.9 : 0.35;
+    ctx.strokeStyle = active ? EDGE_S : EDGE;
+    const a = toScreen(e.s), b = toScreen(e.t);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  for (const n of nodes) nodeShape(toScreen(n), n, anyQuery && !matches(n));
+  ctx.font = "11px -apple-system, sans-serif";
+  ctx.textBaseline = "middle";
+  const drawn = []; // label collision boxes — skip overlaps (hover/selected always win)
+  for (const n of nodes) {
+    const priority = n === hovered || n === selected;
+    const show = priority || (labelSet.has(n.i) && !anyQuery) || (anyQuery && matches(n) && view.z > 0.5);
+    if (!show) continue;
+    const p = toScreen(n);
+    const x = p.x + n.r + 5, y = p.y, wpx = ctx.measureText(n.n).width;
+    if (!priority && drawn.some(b => Math.abs(b.y - y) < 13 && x < b.x + b.w + 6 && b.x < x + wpx + 6)) continue;
+    drawn.push({ x, y, w: wpx });
+    ctx.fillStyle = TEXT2;
+    ctx.fillText(n.n, x, y);
+  }
+}
+
+function loop() {
+  if (alpha > 0) { tick(); draw(); }
+  requestAnimationFrame(loop);
+}
+
+/* ---- interaction ---- */
+const tooltip = document.getElementById("tooltip");
+let dragNode = null, panning = false, last = null;
+
+function pick(mx, my) {
+  let best = null, bd = 1e9;
+  for (const n of nodes) {
+    const p = toScreen(n);
+    const d = Math.hypot(p.x - mx, p.y - my);
+    const hit = Math.max(n.r * view.z + 4, 8); // hit target ≥ mark
+    if (d < hit && d < bd) { best = n; bd = d; }
+  }
+  return best;
+}
+canvas.addEventListener("mousemove", ev => {
+  const mx = ev.offsetX, my = ev.offsetY;
+  if (dragNode) {
+    dragNode.x = (mx - W / 2) / view.z - view.x;
+    dragNode.y = (my - H / 2) / view.z - view.y;
+    alpha = Math.max(alpha, 0.1); draw(); return;
+  }
+  if (panning) {
+    view.x += (mx - last.x) / view.z; view.y += (my - last.y) / view.z;
+    last = { x: mx, y: my }; draw(); return;
+  }
+  const n = pick(mx, my);
+  if (n !== hovered) { hovered = n; draw(); }
+  if (n) {
+    tooltip.style.display = "block";
+    tooltip.style.left = Math.min(mx + 14, W - 370) + "px";
+    tooltip.style.top = (my + 14) + "px";
+    tooltip.innerHTML = `<div class="t-name"></div><div class="t-meta"></div>`;
+    tooltip.children[0].textContent = n.n + "  ·  " + n.l;
+    tooltip.children[1].textContent = `${n.f}:${n.ln} — fan-in ${n.fi}, fan-out ${n.fo} — ${DATA.legend[Math.min(n.c, 8)] || "other"}`;
+  } else tooltip.style.display = "none";
+});
+canvas.addEventListener("mousedown", ev => {
+  const n = pick(ev.offsetX, ev.offsetY);
+  if (n) dragNode = n; else { panning = true; last = { x: ev.offsetX, y: ev.offsetY }; canvas.classList.add("dragging"); }
+});
+addEventListener("mouseup", ev => {
+  if (dragNode && Math.abs(ev.movementX) < 2 && Math.abs(ev.movementY) < 2) select(dragNode);
+  dragNode = null; panning = false; canvas.classList.remove("dragging");
+});
+canvas.addEventListener("click", ev => { if (!pick(ev.offsetX, ev.offsetY)) select(null); });
+canvas.addEventListener("wheel", ev => {
+  ev.preventDefault();
+  const f = Math.exp(-ev.deltaY * 0.0015);
+  const mx = ev.offsetX - W / 2, my = ev.offsetY - H / 2;
+  view.x += mx / (view.z * f) - mx / view.z;
+  view.y += my / (view.z * f) - my / view.z;
+  view.z = Math.min(6, Math.max(0.15, view.z * f));
+  draw();
+}, { passive: false });
+
+const side = document.getElementById("side");
+function select(n) {
+  selected = n;
+  if (!n) { side.style.display = "none"; draw(); return; }
+  const inn = adj[n.i].filter(e => e.t === n).map(e => ({ o: e.s, r: DATA.rels[e.r] }));
+  const out = adj[n.i].filter(e => e.s === n).map(e => ({ o: e.t, r: DATA.rels[e.r] }));
+  const li = arr => arr.slice(0, 30).map(x =>
+    `<li><a data-i="${x.o.i}">${esc(x.o.n)}</a> <span style="color:var(--text-muted)">${x.r}</span></li>`).join("") || "<li style='color:var(--text-muted)'>none shown</li>";
+  side.innerHTML = `<button class="close" aria-label="Close">✕</button>
+    <h2>${esc(n.n)}</h2>
+    <div class="meta">${esc(n.l)} — ${esc(n.f)}:${n.ln}<br>
+      pagerank ${n.pr.toFixed(4)} · fan-in ${n.fi} · fan-out ${n.fo}<br>
+      ${esc(DATA.legend[Math.min(n.c, 8)] || "other")}</div>
+    <h3>incoming (${inn.length})</h3><ul>${li(inn)}</ul>
+    <h3>outgoing (${out.length})</h3><ul>${li(out)}</ul>`;
+  side.style.display = "block";
+  side.querySelector(".close").onclick = () => select(null);
+  side.querySelectorAll("a[data-i]").forEach(a => a.onclick = () => {
+    const m = nodes[+a.dataset.i];
+    view.x = -m.x; view.y = -m.y;
+    select(m);
+  });
+  draw();
+}
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+document.getElementById("search").addEventListener("input", ev => {
+  query = ev.target.value.trim().toLowerCase(); draw();
+});
+
+/* ---- legend ---- */
+const legendEl = document.getElementById("legend");
+legendEl.innerHTML = DATA.legend.map((name, i) =>
+  `<span><span class="sw" style="background:${COLORS[i]}"></span>${esc(name)}</span>`).join("") +
+  `<span class="shape">● fn/method &nbsp;▪ class/type &nbsp;◆ route</span>`;
+document.getElementById("counts").textContent =
+  `${N} symbols · ${edges.length} edges (top by PageRank)`;
+
+/* ---- table view (accessibility: identity never color-alone) ---- */
+const tblWrap = document.getElementById("tablewrap");
+const tblBtn = document.getElementById("tableBtn");
+tblBtn.onclick = () => {
+  const on = tblWrap.style.display !== "block";
+  tblWrap.style.display = on ? "block" : "none";
+  tblBtn.setAttribute("aria-pressed", String(on));
+  if (on && !tblWrap.dataset.built) {
+    const rows = nodes.slice().sort((a, b) => b.pr - a.pr).map(n =>
+      `<tr><td>${esc(n.n)}</td><td>${esc(n.l)}</td><td>${esc(n.f)}:${n.ln}</td>
+       <td>${esc(DATA.legend[Math.min(n.c, 8)] || "other")}</td>
+       <td class="num">${n.pr.toFixed(4)}</td><td class="num">${n.fi}</td><td class="num">${n.fo}</td></tr>`).join("");
+    document.getElementById("tbl").innerHTML =
+      `<thead><tr><th>Symbol</th><th>Kind</th><th>Location</th><th>Community</th>
+        <th>PageRank</th><th>Fan-in</th><th>Fan-out</th></tr></thead><tbody>${rows}</tbody>`;
+    tblWrap.dataset.built = "1";
+  }
+};
+
+resize();
+loop();
+</script>
+</body>
+</html>
