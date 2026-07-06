@@ -248,6 +248,177 @@ pub fn report(root: &Path, db: &Path) -> Result<String> {
     Ok(out)
 }
 
+/// A Barnes-Hut quadtree cell (flat-arena node): a leaf holds one point, an
+/// internal cell holds its 4 children + center-of-mass. `theta` decides when a
+/// far cell is summarised by its COM instead of recursed — O(n log n) repulsion.
+#[derive(Clone, Copy)]
+struct BhCell {
+    // bounds
+    x: f32,
+    y: f32,
+    half: f32,
+    // center of mass + count
+    cx: f32,
+    cy: f32,
+    mass: f32,
+    child: [i32; 4], // arena indices, -1 = empty
+    point: i32,      // point index for a leaf, -1 otherwise
+}
+
+impl BhCell {
+    fn empty(x: f32, y: f32, half: f32) -> Self {
+        BhCell { x, y, half, cx: 0.0, cy: 0.0, mass: 0.0, child: [-1; 4], point: -1 }
+    }
+    fn quadrant(&self, px: f32, py: f32) -> usize {
+        (if px >= self.x { 1 } else { 0 }) | (if py >= self.y { 2 } else { 0 })
+    }
+}
+
+fn bh_insert(arena: &mut Vec<BhCell>, cell: usize, p: usize, pos: &[(f32, f32)]) {
+    let (px, py) = pos[p];
+    arena[cell].cx += px; // accumulate COM as we descend
+    arena[cell].cy += py;
+    arena[cell].mass += 1.0;
+    if arena[cell].point == -1 && arena[cell].child == [-1; 4] {
+        arena[cell].point = p as i32; // empty leaf → hold the point
+        return;
+    }
+    if arena[cell].point != -1 {
+        if arena[cell].half < 0.5 {
+            return; // coincident/degenerate: merge into COM, don't subdivide forever
+        }
+        let existing = arena[cell].point; // split: push the existing point down
+        arena[cell].point = -1;
+        bh_place(arena, cell, existing as usize, pos);
+    }
+    bh_place(arena, cell, p, pos);
+}
+
+fn bh_place(arena: &mut Vec<BhCell>, cell: usize, p: usize, pos: &[(f32, f32)]) {
+    let (px, py) = pos[p];
+    let q = arena[cell].quadrant(px, py);
+    let mut child = arena[cell].child[q];
+    if child == -1 {
+        let (cx0, cy0, half) = (arena[cell].x, arena[cell].y, arena[cell].half * 0.5);
+        let nx = cx0 + if q & 1 == 1 { half } else { -half };
+        let ny = cy0 + if q & 2 == 2 { half } else { -half };
+        arena.push(BhCell::empty(nx, ny, half));
+        child = (arena.len() - 1) as i32;
+        arena[cell].child[q] = child;
+    }
+    bh_insert(arena, child as usize, p, pos);
+}
+
+/// Repulsion on point `p` from the tree, Barnes-Hut approximation (theta²=0.81).
+/// `strength` = k²·alpha (ideal-length² × cooling); force = strength·mass/d².
+fn bh_force(arena: &[BhCell], cell: usize, p: usize, pos: &[(f32, f32)], strength: f32, acc: &mut (f32, f32)) {
+    let c = &arena[cell];
+    if c.mass == 0.0 {
+        return;
+    }
+    let (px, py) = pos[p];
+    let (mx, my) = (c.cx / c.mass, c.cy / c.mass);
+    let mut dx = px - mx;
+    let mut dy = py - my;
+    let mut d2 = dx * dx + dy * dy;
+    let is_leaf = c.point != -1;
+    if is_leaf && c.point as usize == p {
+        return;
+    }
+    // Far enough (cell width² < theta² · dist²) OR a leaf → summarise by COM.
+    if is_leaf || (2.0 * c.half) * (2.0 * c.half) < 0.81 * d2 {
+        if d2 < 1.0 {
+            dx = ((p % 3) as f32) - 1.0;
+            dy = 0.7;
+            d2 = 1.0;
+        }
+        let f = strength * c.mass / d2;
+        let d = d2.sqrt();
+        acc.0 += dx / d * f;
+        acc.1 += dy / d * f;
+    } else {
+        for &ch in &c.child {
+            if ch != -1 {
+                bh_force(arena, ch as usize, p, pos, strength, acc);
+            }
+        }
+    }
+}
+
+/// Deterministic force-directed layout computed HERE (Rust), not in the browser:
+/// a 40k-node live sim freezes a page, but native Barnes-Hut (O(n log n)) converges
+/// in ~1s and the browser then just draws static coordinates (smooth pan/zoom at
+/// any size). Deterministic: index-seeded start, fixed traversal order, no RNG.
+fn layout(n: usize, edges: &[[usize; 3]], comm: &[usize], n_slots: usize) -> Vec<(f32, f32)> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let _ = (comm, n_slots); // community drives COLOR, not position — layout is pure force
+    // Fruchterman-Reingold style: repulsion between all nodes (Barnes-Hut),
+    // attraction along edges, gentle centering to keep the drawing framed.
+    let k = 90.0f32; // ideal edge length
+    let mut pos: Vec<(f32, f32)> = (0..n)
+        .map(|i| {
+            let a = i as f32 * 2.399963; // golden-angle disk seed (deterministic)
+            let r = (i as f32).sqrt() * 8.0 + 1.0;
+            (a.cos() * r, a.sin() * r)
+        })
+        .collect();
+    let mut vel = vec![(0.0f32, 0.0f32); n];
+    let iters = 260;
+    let mut alpha = 1.0f32;
+    for _ in 0..iters {
+        // Attraction along edges: f_a = d²/k toward each other (FR).
+        for e in edges {
+            let (s, t) = (e[0], e[1]);
+            let dx = pos[t].0 - pos[s].0;
+            let dy = pos[t].1 - pos[s].1;
+            let d = (dx * dx + dy * dy).sqrt().max(0.01);
+            let f = d / k * alpha; // proportional pull (spring), scaled by cooling
+            let (ux, uy) = (dx / d, dy / d);
+            vel[s].0 += ux * f;
+            vel[s].1 += uy * f;
+            vel[t].0 -= ux * f;
+            vel[t].1 -= uy * f;
+        }
+        // Barnes-Hut repulsion (f_r = k²/d): build the quadtree over positions.
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for &(x, y) in &pos {
+            lo = lo.min(x).min(y);
+            hi = hi.max(x).max(y);
+        }
+        let half = ((hi - lo) * 0.5).max(1.0) + 1.0;
+        let mid = (lo + hi) * 0.5;
+        let mut arena: Vec<BhCell> = Vec::with_capacity(n * 2);
+        arena.push(BhCell::empty(mid, mid, half));
+        for p in 0..n {
+            bh_insert(&mut arena, 0, p, &pos);
+        }
+        let k2 = k * k;
+        for i in 0..n {
+            let mut acc = (0.0f32, 0.0f32);
+            bh_force(&arena, 0, i, &pos, k2 * alpha, &mut acc);
+            vel[i].0 += acc.0;
+            vel[i].1 += acc.1;
+            vel[i].0 -= pos[i].0 * 0.006 * alpha; // gentle centering (no artificial anchors)
+            vel[i].1 -= pos[i].1 * 0.006 * alpha;
+        }
+        // Cooling: cap displacement so it settles instead of oscillating.
+        let cap = 40.0 + 260.0 * alpha;
+        for i in 0..n {
+            let (vx, vy) = (vel[i].0, vel[i].1);
+            let vm = (vx * vx + vy * vy).sqrt().max(0.001);
+            let s = vm.min(cap) / vm;
+            pos[i].0 += vx * s;
+            pos[i].1 += vy * s;
+            vel[i].0 *= 0.85;
+            vel[i].1 *= 0.85;
+        }
+        alpha = (alpha - 1.0 / iters as f32).max(0.02);
+    }
+    pos
+}
+
 pub fn html(root: &Path, db: &Path, limit: usize) -> Result<String> {
     let store = Store::open(db)?;
     let all = store.graph_nodes()?;
@@ -258,10 +429,13 @@ pub fn html(root: &Path, db: &Path, limit: usize) -> Result<String> {
         .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "project".into());
 
-    // Top `limit` symbols by PageRank — the graph a human can actually read.
+    // `limit == 0` renders the WHOLE graph (grid-bucketed force sim handles it);
+    // otherwise the top `limit` symbols by PageRank — a graph a human can read.
     let mut picked: Vec<&Node> = all.iter().filter(|n| is_symbol(n)).collect();
     picked.sort_by(|a, b| b.pagerank.partial_cmp(&a.pagerank).unwrap_or(std::cmp::Ordering::Equal).then(a.id.cmp(&b.id)));
-    picked.truncate(limit);
+    if limit > 0 {
+        picked.truncate(limit);
+    }
     let idx: HashMap<&str, usize> = picked.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
 
     const RELS: [EdgeRelation; 5] = [
@@ -304,12 +478,19 @@ pub fn html(root: &Path, db: &Path, limit: usize) -> Result<String> {
     }
     legend.push("other".into());
 
+    // Precompute the layout server-side (see `layout`): the browser draws static
+    // coordinates instead of running a physics sim that would freeze on 40k nodes.
+    let comm: Vec<usize> =
+        picked.iter().map(|n| n.community.and_then(|c| slot_of.get(&c).copied()).unwrap_or(8)).collect();
+    let pos = layout(picked.len(), &e_out, &comm, legend.len());
+
     let nodes_json: Vec<serde_json::Value> = picked
         .iter()
-        .map(|n| {
+        .enumerate()
+        .map(|(i, n)| {
             serde_json::json!({
                 "n": n.name, "l": format!("{:?}", n.label), "f": n.file_path, "ln": n.line_start,
-                "c": n.community.and_then(|c| slot_of.get(&c).copied()).unwrap_or(8),
+                "c": comm[i], "x": pos[i].0, "y": pos[i].1,
                 "pr": n.pagerank, "fi": meta_u64(n, "fan_in"), "fo": meta_u64(n, "fan_out"),
             })
         })

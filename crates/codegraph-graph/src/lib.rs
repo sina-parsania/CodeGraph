@@ -43,6 +43,19 @@ fn resolve_member<'a>(
     None
 }
 
+/// Top-level path component = the monorepo project boundary for name-based
+/// resolution. `web-app/app/x.ts` → `web-app`; a flat root file (`a.rs`, no
+/// slash) → `""` so single-project / test layouts impose no scoping. Name-based
+/// global resolution is only evidence WITHIN one such segment: a merged monorepo
+/// otherwise makes a name "globally unique" across unrelated services and binds
+/// phantom cross-project edges.
+fn top_segment(path: &str) -> &str {
+    match path.split_once('/') {
+        Some((head, _)) => head,
+        None => "",
+    }
+}
+
 /// T6: bind a bare call to the ONE file its import points at. The import is the
 /// evidence; still unique-or-drop (no def in the resolved file → None, never guess).
 /// TS/JS: relative module → sibling file with known extensions (or /index.*).
@@ -421,6 +434,20 @@ pub fn build_with(
         if let Some((callee_id, justification)) = resolved {
             if callee_id == c.caller_id {
                 continue;
+            }
+            // Name/type-inferred resolution is only evidence WITHIN one language and
+            // one top-level project segment — a merged monorepo otherwise binds
+            // phantom cross-service / cross-language edges via same-name or
+            // same-type-name collisions. `ImportNarrowed` is exempt: the explicit
+            // import IS the cross-boundary evidence (shared-package monorepos).
+            if justification != "ImportNarrowed" {
+                if let Some(cand) = by_id.get(callee_id) {
+                    if cand.language != caller.language
+                        || top_segment(&cand.file_path) != top_segment(&caller.file_path)
+                    {
+                        continue;
+                    }
+                }
             }
             let mut metadata = Metadata::new();
             metadata.insert("justification".to_string(), serde_json::Value::String(justification.to_string()));

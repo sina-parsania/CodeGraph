@@ -796,7 +796,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-cli"
-version = "1.29.0"
+version = "1.30.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-core"
-version = "1.29.0"
+version = "1.30.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -833,7 +833,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-graph"
-version = "1.29.0"
+version = "1.30.0"
 dependencies = [
  "codegraph-core",
  "codegraph-parse",
@@ -844,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-indexstore"
-version = "1.29.0"
+version = "1.30.0"
 dependencies = [
  "anyhow",
  "codegraph-core",
@@ -853,7 +853,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-ingest"
-version = "1.29.0"
+version = "1.30.0"
 dependencies = [
  "codegraph-core",
  "html2text 0.17.1",
@@ -864,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-llm"
-version = "1.29.0"
+version = "1.30.0"
 dependencies = [
  "codegraph-core",
  "fastembed",
@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-mcp"
-version = "1.29.0"
+version = "1.30.0"
 dependencies = [
  "anyhow",
  "codegraph-core",
@@ -893,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-parse"
-version = "1.29.0"
+version = "1.30.0"
 dependencies = [
  "codegraph-core",
  "serde_json",
@@ -915,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-resolve"
-version = "1.29.0"
+version = "1.30.0"
 dependencies = [
  "anyhow",
  "codegraph-core",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-store"
-version = "1.29.0"
+version = "1.30.0"
 dependencies = [
  "codegraph-core",
  "regex",

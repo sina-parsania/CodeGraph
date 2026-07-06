@@ -47,6 +47,13 @@
     background: var(--surface-2); color: var(--text-primary); cursor: pointer; font-size: 12px;
   }
   button.tbtn[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: -1px; }
+  #projects { display: inline-flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-right: 8px; }
+  .projchip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 2px 8px 2px 6px;
+    border: 1px solid var(--border, #3a3a3a); border-radius: 999px; cursor: pointer; user-select: none;
+    color: var(--text-secondary); background: var(--surface, transparent); white-space: nowrap; }
+  .projchip:hover { border-color: var(--accent); }
+  .projchip input { margin: 0; cursor: pointer; }
+  .projchip span { color: var(--text-muted); font-variant-numeric: tabular-nums; }
   #legend { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; font-size: 11px; color: var(--text-secondary); }
   #legend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
   #legend .shape { color: var(--text-muted); }
@@ -88,6 +95,7 @@
   <span class="sub" id="counts"></span>
   <input id="search" type="search" placeholder="filter symbols…" aria-label="Filter symbols">
   <button class="tbtn" id="tableBtn" aria-pressed="false">Table view</button>
+  <span id="projects" aria-label="Filter by project"></span>
   <span id="legend"></span>
 </div>
 <div id="wrap">
@@ -113,9 +121,9 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { lo
 
 const N = DATA.nodes.length;
 const nodes = DATA.nodes.map((d, i) => {
-  // deterministic golden-angle spiral start
-  const a = i * 2.39996, r = 16 * Math.sqrt(i + 1);
-  return { ...d, i, x: Math.cos(a) * r, y: Math.sin(a) * r, vx: 0, vy: 0,
+  // Positions are precomputed server-side (deterministic force layout) — the
+  // browser never runs physics, so even 40k nodes pan/zoom smoothly.
+  return { ...d, i, x: d.x, y: d.y, vx: 0, vy: 0,
            r: Math.max(4, Math.min(12, 4 + Math.sqrt(d.pr * N) * 6)) };
 });
 const edges = DATA.edges.map(([s, t, r]) => ({ s: nodes[s], t: nodes[t], r }));
@@ -131,7 +139,8 @@ const anchors = DATA.legend.map((_, s) => {
   const a = (s / (nSlots - 1)) * 2 * Math.PI - Math.PI / 2;
   return { x: Math.cos(a) * 300, y: Math.sin(a) * 300 };
 });
-let alpha = 1;
+let alpha = 0; // layout is precomputed server-side; no in-browser physics
+const grid = new Map(); // reused per tick for grid-bucketed repulsion
 function tick() {
   const k = 90; // spring rest length
   for (const e of edges) { // springs
@@ -141,19 +150,38 @@ function tick() {
     e.s.vx += dx * f; e.s.vy += dy * f;
     e.t.vx -= dx * f; e.t.vy -= dy * f;
   }
-  for (let i = 0; i < N; i++) { // n-body repulsion
+  // n-body repulsion via a uniform spatial grid: the force cutoff is 400px, so a
+  // node can only interact with nodes in its own + 8 neighbour cells (cell=400).
+  // O(n·local-density) instead of O(n²) — the whole graph (50k+ nodes) stays live.
+  const CELL = 400;
+  grid.clear();
+  for (let i = 0; i < N; i++) {
     const a = nodes[i];
-    for (let j = i + 1; j < N; j++) {
-      const b = nodes[j];
-      let dx = b.x - a.x, dy = b.y - a.y;
-      let d2 = dx * dx + dy * dy;
-      if (d2 < 1) { dx = (i % 3) - 1 || 0.7; dy = (j % 3) - 1 || -0.7; d2 = 1; }
-      if (d2 > 160000) continue;
-      const f = 900 * alpha / d2;
-      const d = Math.sqrt(d2);
-      dx /= d; dy /= d;
-      a.vx -= dx * f; a.vy -= dy * f;
-      b.vx += dx * f; b.vy += dy * f;
+    const key = ((a.x / CELL) | 0) * 73856093 ^ ((a.y / CELL) | 0);
+    let cell = grid.get(key); if (!cell) grid.set(key, cell = []);
+    cell.push(i);
+  }
+  for (let i = 0; i < N; i++) {
+    const a = nodes[i];
+    const cx = (a.x / CELL) | 0, cy = (a.y / CELL) | 0;
+    for (let gx = cx - 1; gx <= cx + 1; gx++) {
+      for (let gy = cy - 1; gy <= cy + 1; gy++) {
+        const cell = grid.get((gx * 73856093) ^ gy);
+        if (!cell) continue;
+        for (const j of cell) {
+          if (j <= i) continue; // each unordered pair once
+          const b = nodes[j];
+          let dx = b.x - a.x, dy = b.y - a.y;
+          let d2 = dx * dx + dy * dy;
+          if (d2 < 1) { dx = (i % 3) - 1 || 0.7; dy = (j % 3) - 1 || -0.7; d2 = 1; }
+          if (d2 > 160000) continue;
+          const f = 900 * alpha / d2;
+          const d = Math.sqrt(d2);
+          dx /= d; dy /= d;
+          a.vx -= dx * f; a.vy -= dy * f;
+          b.vx += dx * f; b.vy += dy * f;
+        }
+      }
     }
     const an = anchors[Math.min(a.c, nSlots - 1)]; // community gravity
     a.vx += (an.x - a.x) * 0.012 * alpha; a.vy += (an.y - a.y) * 0.012 * alpha;
@@ -213,27 +241,44 @@ function draw() {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   ctx.clearRect(0, 0, W, H);
   const anyQuery = !!query;
+  // Project every node ONCE per frame and flag on-screen visibility. Everything
+  // below draws only visible work, so pan/zoom stay smooth at 40k+ nodes — the
+  // old lag was reprojecting + redrawing the whole graph every frame.
+  const M = 60; // margin so partly-visible nodes/labels still draw
+  for (const n of nodes) {
+    n.sx = (n.x + view.x) * view.z + W / 2;
+    n.sy = (n.y + view.y) * view.z + H / 2;
+    n.act = !projFilter || activeProjects.has(n.proj);        // project filter
+    n.vis = n.act && n.sx >= -M && n.sx <= W + M && n.sy >= -M && n.sy <= H + M;
+  }
+  // Edge level-of-detail: zoomed far out on a large graph the edges are an
+  // unreadable hairball — draw only the ones touching hover/selection.
+  const edgesLOD = view.z < 0.4 && nodes.length > 4000;
   ctx.lineWidth = 1;
   for (const e of edges) {
-    const dim = anyQuery && !(matches(e.s) && matches(e.t));
+    if (!e.s.act || !e.t.act) continue; // an endpoint is filtered out by project
     const active = (selected && (e.s === selected || e.t === selected)) ||
                    (hovered && (e.s === hovered || e.t === hovered));
+    if (!active) {
+      if (edgesLOD) continue;
+      if (!e.s.vis && !e.t.vis) continue; // both endpoints off-screen → skip
+    }
+    const dim = anyQuery && !(matches(e.s) && matches(e.t));
     ctx.globalAlpha = dim ? 0.06 : active ? 0.9 : 0.35;
     ctx.strokeStyle = active ? EDGE_S : EDGE;
-    const a = toScreen(e.s), b = toScreen(e.t);
-    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(e.s.sx, e.s.sy); ctx.lineTo(e.t.sx, e.t.sy); ctx.stroke();
   }
   ctx.globalAlpha = 1;
-  for (const n of nodes) nodeShape(toScreen(n), n, anyQuery && !matches(n));
+  for (const n of nodes) if (n.vis) nodeShape({ x: n.sx, y: n.sy }, n, anyQuery && !matches(n));
   ctx.font = "11px -apple-system, sans-serif";
   ctx.textBaseline = "middle";
   const drawn = []; // label collision boxes — skip overlaps (hover/selected always win)
   for (const n of nodes) {
+    if (!n.vis) continue;
     const priority = n === hovered || n === selected;
     const show = priority || (labelSet.has(n.i) && !anyQuery) || (anyQuery && matches(n) && view.z > 0.5);
     if (!show) continue;
-    const p = toScreen(n);
-    const x = p.x + n.r + 5, y = p.y, wpx = ctx.measureText(n.n).width;
+    const x = n.sx + n.r + 5, y = n.sy, wpx = ctx.measureText(n.n).width;
     if (!priority && drawn.some(b => Math.abs(b.y - y) < 13 && x < b.x + b.w + 6 && b.x < x + wpx + 6)) continue;
     drawn.push({ x, y, w: wpx });
     ctx.fillStyle = TEXT2;
@@ -265,7 +310,7 @@ canvas.addEventListener("mousemove", ev => {
   if (dragNode) {
     dragNode.x = (mx - W / 2) / view.z - view.x;
     dragNode.y = (my - H / 2) / view.z - view.y;
-    alpha = Math.max(alpha, 0.1); draw(); return;
+    draw(); return; // static layout — move just this node
   }
   if (panning) {
     view.x += (mx - last.x) / view.z; view.y += (my - last.y) / view.z;
@@ -297,7 +342,7 @@ canvas.addEventListener("wheel", ev => {
   const mx = ev.offsetX - W / 2, my = ev.offsetY - H / 2;
   view.x += mx / (view.z * f) - mx / view.z;
   view.y += my / (view.z * f) - my / view.z;
-  view.z = Math.min(6, Math.max(0.15, view.z * f));
+  view.z = Math.min(6, Math.max(0.03, view.z * f));
   draw();
 }, { passive: false });
 
@@ -337,7 +382,25 @@ legendEl.innerHTML = DATA.legend.map((name, i) =>
   `<span><span class="sw" style="background:${COLORS[i]}"></span>${esc(name)}</span>`).join("") +
   `<span class="shape">● fn/method &nbsp;▪ class/type &nbsp;◆ route</span>`;
 document.getElementById("counts").textContent =
-  `${N} symbols · ${edges.length} edges (top by PageRank)`;
+  `${N} symbols · ${edges.length} edges`;
+
+/* ---- project filter (top-level path segment = monorepo project) ---- */
+for (const n of nodes) { const i = n.f.indexOf("/"); n.proj = i < 0 ? "(root)" : n.f.slice(0, i); }
+const activeProjects = new Set(nodes.map(n => n.proj));
+const projCounts = {};
+for (const n of nodes) projCounts[n.proj] = (projCounts[n.proj] || 0) + 1;
+const projList = Object.keys(projCounts).sort((a, b) => projCounts[b] - projCounts[a]);
+const projFilter = projList.length > 1; // draw() consults this to cull filtered projects
+if (projFilter) {
+  const el = document.getElementById("projects");
+  el.innerHTML = projList.map(p =>
+    `<label class="projchip"><input type="checkbox" checked data-proj="${esc(p)}">${esc(p)} <span>${projCounts[p]}</span></label>`).join("");
+  el.addEventListener("change", ev => {
+    const p = ev.target.getAttribute("data-proj"); if (p === null) return;
+    ev.target.checked ? activeProjects.add(p) : activeProjects.delete(p);
+    draw(); // static layout — just redraw with the new filter
+  });
+}
 
 /* ---- table view (accessibility: identity never color-alone) ---- */
 const tblWrap = document.getElementById("tablewrap");
@@ -358,7 +421,22 @@ tblBtn.onclick = () => {
   }
 };
 
+// Zoom-to-fit: frame the whole precomputed layout on load.
+function fitView() {
+  if (!N) return;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const n of nodes) {
+    if (n.x < minX) minX = n.x; if (n.x > maxX) maxX = n.x;
+    if (n.y < minY) minY = n.y; if (n.y > maxY) maxY = n.y;
+  }
+  const gw = Math.max(1, maxX - minX), gh = Math.max(1, maxY - minY);
+  view.z = Math.min(6, Math.max(0.05, 0.9 * Math.min(W / gw, H / gh)));
+  view.x = -(minX + maxX) / 2;
+  view.y = -(minY + maxY) / 2;
+}
 resize();
+fitView();
+draw();
 loop();
 </script>
 </body>
