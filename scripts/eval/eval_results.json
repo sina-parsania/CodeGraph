@@ -1,0 +1,1090 @@
+[
+  {
+    "repo": "fastapi",
+    "name": "Default",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 1826,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.23076923076923078,
+      "recall": 1.0,
+      "bytes": 6561,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "get_compat_model_name_map",
+    "codegraph": {
+      "precision": 0.25,
+      "recall": 0.5,
+      "bytes": 420,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 294,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "File",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.96,
+      "bytes": 3198,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.7741935483870968,
+      "recall": 0.96,
+      "bytes": 5055,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "create_cloned_field",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.5,
+      "bytes": 298,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 417,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "solve_dependencies",
+    "codegraph": {
+      "precision": 0.3333333333333333,
+      "recall": 0.5,
+      "bytes": 786,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 314,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "_regenerate_error_with_loc",
+    "codegraph": {
+      "precision": 0.5,
+      "recall": 1.0,
+      "bytes": 437,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 254,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "_model_rebuild",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.5,
+      "bytes": 158,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 332,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "get_swagger_ui_oauth2_redirect_html",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 338,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.75,
+      "recall": 1.0,
+      "bytes": 371,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "alias",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.6666666666666666,
+      "bytes": 394,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.3333333333333333,
+      "recall": 0.3333333333333333,
+      "bytes": 545,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "__class__",
+    "codegraph": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "bytes": 88,
+      "answered": false
+    },
+    "grep": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "bytes": 67,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "errors",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 554,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.3,
+      "recall": 1.0,
+      "bytes": 1929,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "fake_answer_to_everything_ml_model",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 221,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 0.5,
+      "bytes": 85,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "_model_dump",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.6666666666666666,
+      "bytes": 213,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 202,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "get_authorization_scheme_param",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 502,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.6666666666666666,
+      "recall": 1.0,
+      "bytes": 693,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "is_pv1_scalar_field",
+    "codegraph": {
+      "precision": 0.2857142857142857,
+      "recall": 1.0,
+      "bytes": 784,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 422,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "get_missing_field_error",
+    "codegraph": {
+      "precision": 0.3333333333333333,
+      "recall": 0.5,
+      "bytes": 445,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 388,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "read",
+    "codegraph": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "bytes": 278,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.6363636363636364,
+      "recall": 1.0,
+      "bytes": 1560,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "create_model_field",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 355,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 472,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "is_body_allowed_for_status_code",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 422,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.75,
+      "recall": 1.0,
+      "bytes": 577,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "generate_unique_id",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 1591,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.2,
+      "recall": 0.5,
+      "bytes": 1186,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "Form",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.9565217391304348,
+      "bytes": 2676,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.88,
+      "recall": 0.9565217391304348,
+      "bytes": 4089,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "get_cached_model_fields",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 383,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.6666666666666666,
+      "recall": 1.0,
+      "bytes": 576,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "_get_model_config",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.6666666666666666,
+      "bytes": 219,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 384,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "is_bytes_field",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.5,
+      "bytes": 168,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 226,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "get_model_fields",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 282,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 465,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "field_annotation_is_scalar",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 307,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 414,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "is_scalar_field",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.6666666666666666,
+      "bytes": 228,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 370,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "exception_handler",
+    "codegraph": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "bytes": 300,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.5714285714285714,
+      "recall": 1.0,
+      "bytes": 2408,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "add_task",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 1299,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.875,
+      "recall": 1.0,
+      "bytes": 1560,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "errors",
+    "codegraph": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "bytes": 554,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.3,
+      "recall": 1.0,
+      "bytes": 1929,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "is_sequence_field",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.5,
+      "bytes": 171,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 375,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "get_redoc_html",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 529,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.8,
+      "recall": 1.0,
+      "bytes": 564,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "deep_dict_update",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.5,
+      "bytes": 298,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 500,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "create_body_model",
+    "codegraph": {
+      "precision": 0.3333333333333333,
+      "recall": 0.5,
+      "bytes": 431,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 175,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "jsonable_encoder",
+    "codegraph": {
+      "precision": 0.3488372093023256,
+      "recall": 0.9375,
+      "bytes": 13792,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 7166,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "close",
+    "codegraph": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "bytes": 281,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.2571428571428571,
+      "recall": 1.0,
+      "bytes": 4635,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "_normalize_errors",
+    "codegraph": {
+      "precision": 0.3333333333333333,
+      "recall": 1.0,
+      "bytes": 845,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 617,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "get_openapi",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 240,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.6666666666666666,
+      "recall": 1.0,
+      "bytes": 206,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "is_bytes_sequence_annotation",
+    "codegraph": {
+      "precision": 0.4,
+      "recall": 1.0,
+      "bytes": 581,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 338,
+      "answered": true
+    }
+  },
+  {
+    "repo": "fastapi",
+    "name": "copy_field_info",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.5,
+      "bytes": 169,
+      "answered": true
+    },
+    "grep": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 290,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "email",
+    "codegraph": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "bytes": 491,
+      "answered": false
+    },
+    "grep": {
+      "precision": 0.4166666666666667,
+      "recall": 1.0,
+      "bytes": 2614,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "nullish",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.5,
+      "bytes": 495,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.5,
+      "recall": 1.0,
+      "bytes": 453,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "parseAsync",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.05555555555555555,
+      "bytes": 514,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.5,
+      "recall": 1.0,
+      "bytes": 12197,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "or",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.5,
+      "bytes": 470,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.07692307692307693,
+      "recall": 1.0,
+      "bytes": 9824,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "toString",
+    "codegraph": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "bytes": 699,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.14285714285714285,
+      "recall": 1.0,
+      "bytes": 6203,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "mergeObjectSync",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 591,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.5,
+      "recall": 1.0,
+      "bytes": 825,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "rest",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.5,
+      "bytes": 484,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.5,
+      "recall": 1.0,
+      "bytes": 571,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "includes",
+    "codegraph": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "bytes": 508,
+      "answered": false
+    },
+    "grep": {
+      "precision": 0.2,
+      "recall": 1.0,
+      "bytes": 2923,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "toUpperCase",
+    "codegraph": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "bytes": 523,
+      "answered": false
+    },
+    "grep": {
+      "precision": 0.375,
+      "recall": 1.0,
+      "bytes": 2185,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "and",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.3333333333333333,
+      "bytes": 475,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.3333333333333333,
+      "recall": 0.6666666666666666,
+      "bytes": 889,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "int",
+    "codegraph": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "bytes": 481,
+      "answered": false
+    },
+    "grep": {
+      "precision": 0.18181818181818182,
+      "recall": 1.0,
+      "bytes": 4425,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "innerType",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.5,
+      "bytes": 513,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.5,
+      "recall": 1.0,
+      "bytes": 325,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "joinValues",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 521,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.5,
+      "recall": 1.0,
+      "bytes": 907,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "pipe",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.5,
+      "bytes": 480,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.5,
+      "recall": 0.5,
+      "bytes": 495,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "safeParseAsync",
+    "codegraph": {
+      "precision": 0.5,
+      "recall": 0.16666666666666666,
+      "bytes": 532,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.5,
+      "recall": 1.0,
+      "bytes": 10014,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "safeParse",
+    "codegraph": {
+      "precision": 0.5,
+      "recall": 0.037037037037037035,
+      "bytes": 509,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.5094339622641509,
+      "recall": 1.0,
+      "bytes": 20856,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "optional",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.10526315789473684,
+      "bytes": 504,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.475,
+      "recall": 1.0,
+      "bytes": 13928,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "toString",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.3333333333333333,
+      "bytes": 699,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.21428571428571427,
+      "recall": 1.0,
+      "bytes": 6203,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "implement",
+    "codegraph": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "bytes": 517,
+      "answered": false
+    },
+    "grep": {
+      "precision": 0.5,
+      "recall": 0.6666666666666666,
+      "bytes": 1318,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "pick",
+    "codegraph": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "bytes": 488,
+      "answered": false
+    },
+    "grep": {
+      "precision": 0.3,
+      "recall": 1.0,
+      "bytes": 6432,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "strict",
+    "codegraph": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "bytes": 498,
+      "answered": false
+    },
+    "grep": {
+      "precision": 0.3181818181818182,
+      "recall": 1.0,
+      "bytes": 3312,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "dirty",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 543,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.5,
+      "recall": 1.0,
+      "bytes": 5255,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "extend",
+    "codegraph": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "bytes": 496,
+      "answered": false
+    },
+    "grep": {
+      "precision": 0.3333333333333333,
+      "recall": 0.6666666666666666,
+      "bytes": 1126,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "_refinement",
+    "codegraph": {
+      "precision": 0.5,
+      "recall": 0.5,
+      "bytes": 513,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.5,
+      "recall": 1.0,
+      "bytes": 653,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "readonly",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.5,
+      "bytes": 502,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.5,
+      "recall": 1.0,
+      "bytes": 6116,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "assertNever",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.6666666666666666,
+      "bytes": 526,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.375,
+      "recall": 1.0,
+      "bytes": 1099,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "nullable",
+    "codegraph": {
+      "precision": 0.6666666666666666,
+      "recall": 0.125,
+      "bytes": 502,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.5,
+      "recall": 1.0,
+      "bytes": 7012,
+      "answered": true
+    }
+  },
+  {
+    "repo": "zod",
+    "name": "transform",
+    "codegraph": {
+      "precision": 1.0,
+      "recall": 0.18181818181818182,
+      "bytes": 507,
+      "answered": true
+    },
+    "grep": {
+      "precision": 0.4583333333333333,
+      "recall": 1.0,
+      "bytes": 6506,
+      "answered": true
+    }
+  }
+]

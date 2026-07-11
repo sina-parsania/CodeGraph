@@ -10,7 +10,7 @@ use tree_sitter::{Language, Node as TsNode, Parser};
 /// Bump whenever parse OUTPUT changes shape (new node kinds, name filters,
 /// import handling). A stamped-version mismatch forces a full reparse so one
 /// graph never mixes two parser behaviors (incremental == full would break).
-pub const PARSER_VERSION: u32 = 2;
+pub const PARSER_VERSION: u32 = 3;
 
 pub struct ParsedFile {
     pub nodes: Vec<Node>,
@@ -425,8 +425,11 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
     }
 
     // At a function/method, infer the static type of its declared-type locals
-    // and typed params for T5 (`x.method()` via the variable's type).
+    // and typed params for T5 (`x.method()` via the variable's type), and
+    // record parameter names as SHADOW bindings (all languages) so a call
+    // through a parameter never binds a same-named free function elsewhere.
     if let Some(fn_id) = my_fn_id.as_deref() {
+        collect_param_shadows(node, src, fn_id, locals);
         match ctx.spec.name {
             "typescript" => ts_infer_locals(node, src, fn_id, locals),
             "kotlin" => kotlin_infer_locals(node, src, fn_id, locals),
@@ -730,6 +733,47 @@ fn ts_infer_locals(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<RawLocal
     for (name, ty) in found {
         if let Some(t) = ty {
             out.push(RawLocal { caller_id: fn_id.into(), var_name: name, type_name: t });
+        }
+    }
+}
+
+/// Parameter names are LOCAL BINDINGS: a call through one (`call_next(...)`,
+/// `cb()`) must never resolve to a same-named free function elsewhere —
+/// audit-caught on a real repo. Emitted as type-less RawLocal rows: shadow
+/// evidence only (an empty type can't type a member call, but it proves the
+/// name is locally bound). Over-collection (e.g. Swift argument labels) only
+/// SUPPRESSES resolution — precision-safe by construction.
+fn collect_param_shadows(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<RawLocal>) {
+    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let is_binding_ident = |k: &str| k == "identifier" || k == "simple_identifier";
+    // arrow-component defs start at the declarator; the fn literal holds the params
+    let root = if func.kind() == "variable_declarator" {
+        func.child_by_field_name("value").unwrap_or(func)
+    } else {
+        func
+    };
+    let mut c = root.walk();
+    for container in root.children(&mut c) {
+        // parameters / formal_parameters / function_value_parameters / parameter_list …
+        if !container.kind().contains("parameter") {
+            continue;
+        }
+        let mut pc = container.walk();
+        for param in container.named_children(&mut pc) {
+            if is_binding_ident(param.kind()) {
+                if let Some(name) = text(param) {
+                    out.push(RawLocal { caller_id: fn_id.into(), var_name: name, type_name: String::new() });
+                }
+                continue;
+            }
+            let mut ic = param.walk();
+            for ch in param.named_children(&mut ic) {
+                if is_binding_ident(ch.kind()) {
+                    if let Some(name) = text(ch) {
+                        out.push(RawLocal { caller_id: fn_id.into(), var_name: name, type_name: String::new() });
+                    }
+                }
+            }
         }
     }
 }

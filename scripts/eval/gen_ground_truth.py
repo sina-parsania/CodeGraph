@@ -49,12 +49,13 @@ def main():
             return sym.rsplit("/", 1)[-1].removesuffix("().").split("#")[-1].split(".")[-1]
 
         for doc in index.get("documents", []):
-            path = doc["relativePath"]
+            # scip CLI emits snake_case; older dumps used camelCase — accept both
+            path = doc.get("relative_path") or doc.get("relativePath", "")
             for occ in doc.get("occurrences", []):
                 sym = occ.get("symbol", "")
                 if not sym.endswith(")."):
                     continue  # functions/methods only
-                if occ.get("symbolRoles", 0) & 1:
+                if (occ.get("symbol_roles") or occ.get("symbolRoles") or 0) & 1:
                     def_count_by_name[bare(sym)] = def_count_by_name.get(bare(sym), 0) + 1
                 else:
                     refs.setdefault(sym, set()).add(path)

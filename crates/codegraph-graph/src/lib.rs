@@ -306,12 +306,18 @@ pub fn build_with(
     }
 
     // local_types: caller fn id -> local var name -> inferred type name (T5).
+    // An EMPTY type is a SHADOW marker (an untyped parameter/local binding):
+    // it can't type a member call, but it proves the name is locally bound —
+    // a typed entry for the same name always outranks it.
     let mut local_types: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
     for l in locals {
-        local_types
-            .entry(l.caller_id.as_str())
-            .or_default()
-            .insert(l.var_name.as_str(), l.type_name.as_str());
+        let m = local_types.entry(l.caller_id.as_str()).or_default();
+        match m.get(l.var_name.as_str()) {
+            Some(t) if !t.is_empty() => {}
+            _ => {
+                m.insert(l.var_name.as_str(), l.type_name.as_str());
+            }
+        }
     }
 
     let mut edges: Vec<Edge> = Vec::new();
@@ -385,6 +391,9 @@ pub fn build_with(
                     .get(c.caller_id.as_str())
                     .and_then(|m| m.get(var.as_str()))
                     .copied()
+                    // a shadow marker (untyped param/local) is a binding without a
+                    // type: it must BLOCK the field fallback (lexical scoping) yet
+                    // resolve nothing — hence kept as Some with an empty type
                     .map(|ty| (ty, "LocalVarType"));
                 let via_field = c
                     .enclosing_class
@@ -408,34 +417,47 @@ pub fn build_with(
             _ => None,
         };
         let resolved: Option<(&str, &'static str)> = receiver_resolved.or_else(|| match &c.receiver {
-            // Unqualified `foo()`: same-file first (locals shadow imports), then the
-            // file's imports (T6 — the import IS the evidence), then Go package
-            // scope (dir == package, a language guarantee), then global-unique.
-            Receiver::Bare => fn_by_file_name
-                .get(&(caller.file_path.as_str(), c.callee_name.as_str()))
-                .copied()
-                .map(|id| (id, "SameFileUnique"))
-                .or_else(|| {
-                    resolve_via_import(caller, &c.callee_name, &import_map, &fn_by_file_name, &fn_by_name, &by_id)
-                        .map(|id| (id, "ImportNarrowed"))
-                })
-                .or_else(|| {
-                    (caller.language == "go")
-                        .then(|| {
-                            let dir = caller.file_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-                            match fn_by_dir_name.get(&(dir, c.callee_name.as_str())) {
-                                Some(ids) if ids.len() == 1 => Some(ids[0]),
-                                _ => None,
-                            }
-                        })
-                        .flatten()
-                        .map(|id| (id, "PackageScope"))
-                })
-                .or_else(|| global_unique().map(|id| (id, "GlobalUnique"))),
+            // Unqualified `foo()`: a LOCAL BINDING (param/var named foo) shadows
+            // everything — calling through it must never bind a free function
+            // (audit-caught: a `call_next` param bound to another file's def).
+            // Otherwise: same-file first, then the file's imports (T6 — the
+            // import IS the evidence), then Go package scope, then global-unique.
+            Receiver::Bare => {
+                if local_types
+                    .get(c.caller_id.as_str())
+                    .and_then(|m| m.get(c.callee_name.as_str()))
+                    .is_some()
+                {
+                    return None;
+                }
+                fn_by_file_name
+                    .get(&(caller.file_path.as_str(), c.callee_name.as_str()))
+                    .copied()
+                    .map(|id| (id, "SameFileUnique"))
+                    .or_else(|| {
+                        resolve_via_import(caller, &c.callee_name, &import_map, &fn_by_file_name, &fn_by_name, &by_id)
+                            .map(|id| (id, "ImportNarrowed"))
+                    })
+                    .or_else(|| {
+                        (caller.language == "go")
+                            .then(|| {
+                                let dir = caller.file_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+                                match fn_by_dir_name.get(&(dir, c.callee_name.as_str())) {
+                                    Some(ids) if ids.len() == 1 => Some(ids[0]),
+                                    _ => None,
+                                }
+                            })
+                            .flatten()
+                            .map(|id| (id, "PackageScope"))
+                    })
+                    .or_else(|| global_unique().map(|id| (id, "GlobalUnique")))
+            }
             // Qualified call we couldn't type (named var / super / dropped self or
-            // field): only a globally-unique name is provably correct — never guess
-            // a same-file member of an unknown receiver type.
-            _ => global_unique().map(|id| (id, "GlobalUnique")),
+            // field): the receiver's EXISTENCE is evidence the callee is a member
+            // of some (unknown) type — binding it to a repo-unique free function
+            // ignores that evidence. Audit measured this guess at 27% precision
+            // on a real Python repo (was tagged GlobalUnique). Drop, never guess.
+            _ => None,
         });
         if let Some((callee_id, justification)) = resolved {
             if callee_id == c.caller_id {
@@ -850,8 +872,11 @@ mod tests {
     }
 
     #[test]
-    fn qualified_named_receiver_globally_unique_resolves() {
-        // obj.persistUniquely() — globally-unique name → provably correct via T4.
+    fn qualified_named_receiver_never_binds_by_name_uniqueness() {
+        // obj.persistUniquely() with an UNKNOWN receiver type: the receiver's
+        // existence is evidence the callee is a member of some type — binding
+        // to a repo-unique method of an unrelated class is a guess. The audit
+        // measured this exact pattern at 27% precision on a real repo. Drop.
         let built = build_swift(&[
             ("a.swift", "class A {\n  func go() { let obj = repo; obj.persistUniquely() }\n}"),
             ("b.swift", "class B {\n  func persistUniquely() {}\n}"),
@@ -861,7 +886,23 @@ mod tests {
             .iter()
             .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".persistuniquely"))
             .count();
-        assert_eq!(resolved, 1, "globally-unique qualified call resolves");
+        assert_eq!(resolved, 0, "unknown-receiver call must drop, never bind by name uniqueness");
+    }
+
+    #[test]
+    fn parameter_shadow_suppresses_bare_resolution() {
+        // `call_next` is a PARAMETER of `handler` — calling it must not bind
+        // the same-named free function defined elsewhere (audit-caught).
+        let built = build_ts(&[
+            ("mw.ts", "export function handler(call_next: Handler) { call_next(); }"),
+            ("other.ts", "export function call_next() {}"),
+        ]);
+        let bound = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".call_next"))
+            .count();
+        assert_eq!(bound, 0, "a locally-bound name must never resolve to a free function");
     }
 
     #[test]

@@ -5,3 +5,4 @@ _probe/
 *.db
 *.db-shm
 *.db-wal
+scripts/eval/work/
