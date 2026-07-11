@@ -151,6 +151,14 @@ pub fn is_stale(root: &Path) -> bool {
         return true;
     }
     let Ok(store) = Store::open(&db) else { return true };
+    // a binary with different parse behavior means EVERY file is effectively
+    // stale — without this, ensure_fresh/MCP would serve an old-parser graph
+    // forever after an upgrade (index_dir's gate only helps if a reindex runs)
+    if store.meta_get("parser_version").ok().flatten().as_deref()
+        != Some(codegraph_parse::PARSER_VERSION.to_string().as_str())
+    {
+        return true;
+    }
     // a new/updated .scip on disk (e.g. a background auto_scip run finished)
     // must be merged before the next query is served
     if scip_file_changed(&store, root, None) {
@@ -242,6 +250,9 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
     // tsconfig `paths` aliases: rewritten imports of UNCHANGED files depend on
     // the alias map, so an alias-map change (content hash) forces a full
     // reparse — a manifest sha can't see it.
+    // ponytail: this walks the repo once more on every index (~tens of ms); it
+    // must run BEFORE the no-change early return because tsconfig-only edits
+    // don't bump `changed`. Gate behind a manifest lookup if profiles complain.
     let (aliases, ts_hash) = crate::tsconfig::load_alias_maps(root);
     full = full || store.meta_get("tsconfig_hash").ok().flatten().as_deref() != Some(ts_hash.as_str());
     store.meta_set("tsconfig_hash", &ts_hash)?;
@@ -545,7 +556,10 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
     // is always precision-safe); anything validate still finds is a real bug and
     // stays loud. Violations never brick the index — a degraded graph beats no
     // graph, and the message tells the user exactly what to report.
-    heal_dangling(&store);
+    if !partial_ok {
+        // the partial branch already healed (before analytics read the edges)
+        heal_dangling(&store);
+    }
     let violations = store.validate_graph()?;
     if !violations.is_empty() {
         eprintln!("codegraph: graph validation found {} issue(s):", violations.len());
@@ -668,12 +682,7 @@ fn fn_diff_names(old: &codegraph_store::FileShape, new: &codegraph_store::FileSh
 #[cfg(feature = "indexstore")]
 fn indexstore_wants_remerge(db: &Store, root: &Path) -> bool {
     let Some(store_path) = find_index_store(root) else { return false };
-    let mtime = std::fs::metadata(&store_path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_default();
+    let mtime = mtime_secs(&store_path);
     let stamped = db.meta_get("indexstore_mtime").ok().flatten().unwrap_or_default();
     !mtime.is_empty() && mtime != stamped
 }
@@ -746,12 +755,25 @@ fn scip_path(root: &Path, explicit: Option<&Path>) -> Option<PathBuf> {
         .find(|p| p.extension().is_some_and(|x| x == "scip"))
 }
 
+/// File mtime as a seconds-since-epoch string ("" if unavailable) — the shared
+/// freshness-stamp currency for the IndexStore/SCIP tiers.
+fn mtime_secs(p: &Path) -> String {
+    std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default()
+}
+
 /// Splice `new` edges in, superseding any existing edge with the same
 /// (src, dst, relation) key — compiler-grade edges outrank tree-sitter ones.
 fn extend_superseding(edges: &mut Vec<Edge>, new: Vec<Edge>) {
-    let superseded: HashSet<(String, String, EdgeRelation)> =
-        new.iter().map(|e| (e.src.clone(), e.dst.clone(), e.relation)).collect();
-    edges.retain(|e| !superseded.contains(&(e.src.clone(), e.dst.clone(), e.relation)));
+    {
+        let superseded: HashSet<(&str, &str, EdgeRelation)> =
+            new.iter().map(|e| (e.src.as_str(), e.dst.as_str(), e.relation)).collect();
+        edges.retain(|e| !superseded.contains(&(e.src.as_str(), e.dst.as_str(), e.relation)));
+    }
     edges.extend(new);
 }
 
@@ -759,6 +781,12 @@ fn extend_superseding(edges: &mut Vec<Edge>, new: Vec<Edge>) {
 /// DROPPING any whose endpoint is gone from the current node set — a reparse can
 /// rename/remove structural node ids, and replaying a stale edge verbatim would
 /// violate the zero-phantom-edge invariant. Returns (reused, dropped).
+///
+/// ponytail: endpoint-existence is necessary, not sufficient — a retargeted
+/// call whose OLD target still exists elsewhere replays a stale edge until the
+/// next compiler run (IndexStore: next Xcode build; SCIP: next HEAD move).
+/// Upgrade path if it bites: stamp per-file freshness on compiler edges and
+/// drop those whose src file changed since the merge.
 fn reuse_persisted_edges(
     db: &Store,
     justification: &str,
@@ -789,12 +817,7 @@ fn scip_file_changed(db: &Store, root: &Path, explicit: Option<&Path>) -> bool {
         return true;
     }
     let Some(p) = scip_path(root, None) else { return false };
-    let mtime = std::fs::metadata(&p)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_default();
+    let mtime = mtime_secs(&p);
     db.meta_get("scip_file_mtime").ok().flatten().unwrap_or_default() != mtime
 }
 
@@ -828,12 +851,8 @@ fn auto_scip(db: &Store, root: &Path, nodes: &[Node], edges: &mut Vec<Edge>, fre
         // remember WHICH .scip was merged so its mere presence stops forcing
         // full rebuilds — only a newer file re-triggers the merge
         if let Some(p) = scip_path(root, None) {
-            if let Some(mtime) = std::fs::metadata(&p)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs().to_string())
-            {
+            let mtime = mtime_secs(&p);
+            if !mtime.is_empty() {
                 let _ = db.meta_set("scip_file_mtime", &mtime);
             }
         }
@@ -907,12 +926,7 @@ fn auto_indexstore(db: &Store, root: &Path, nodes: &[Node], edges: &mut Vec<Edge
         reuse(edges);
         return;
     };
-    let mtime = std::fs::metadata(&store)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_default();
+    let mtime = mtime_secs(&store);
     let stamped = db.meta_get("indexstore_mtime").ok().flatten().unwrap_or_default();
     if !force && !mtime.is_empty() && mtime == stamped {
         reuse(edges);

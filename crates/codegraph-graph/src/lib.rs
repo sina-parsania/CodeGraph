@@ -529,8 +529,12 @@ pub fn build_with(
         }
         // The resolved target's label outranks the parser's syntactic guess:
         // Swift `class A: B` can't tell a superclass from a protocol at parse
-        // time, but the graph knows whether B is an Interface.
+        // time, but the graph knows whether B is an Interface. Exception:
+        // `interface I extends J` is interface REFINEMENT, not implementation —
+        // implementers() must keep returning concrete types only.
+        let imp_label = by_id.get(imp_id).map(|n| n.label);
         let relation = match (by_id.get(sup_id).map(|n| n.label), inh.kind) {
+            (Some(NodeLabel::Interface), _) if imp_label == Some(NodeLabel::Interface) => EdgeRelation::Inherits,
             (Some(NodeLabel::Interface), _) => EdgeRelation::Implements,
             (Some(NodeLabel::Class), _) => EdgeRelation::Inherits,
             (_, InheritKind::Extends) => EdgeRelation::Inherits,

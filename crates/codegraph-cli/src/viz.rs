@@ -112,7 +112,12 @@ pub fn report(root: &Path, db: &Path) -> Result<String> {
     let total_calls = store.all_calls()?.len();
     let external_calls = store.external_bound_call_sites().unwrap_or(0);
     let internal_calls = total_calls.saturating_sub(external_calls);
-    let resolved_calls = edges.iter().filter(|e| e.relation == EdgeRelation::Calls).count();
+    // Ambiguous-tier edges are up-to-5 candidates per SITE — counting them
+    // against a site denominator could exceed 100%.
+    let resolved_calls = edges
+        .iter()
+        .filter(|e| e.relation == EdgeRelation::Calls && e.confidence != codegraph_core::Confidence::Ambiguous)
+        .count();
     w("\n## Call-resolution quality".into());
     if internal_calls > 0 {
         w(format!(
@@ -570,9 +575,14 @@ pub fn html(root: &Path, db: &Path, limit: usize) -> Result<String> {
         "legend": legend,
     });
 
+    // Escape the interpolations: serde_json doesn't escape `<`, so a path/name
+    // containing `</script>` would break out of the inline script block; the
+    // title lands in <title>/<h1> and needs plain HTML escaping.
+    let title = project.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let json = serde_json::to_string(&data)?.replace('<', "\\u003c");
     Ok(HTML_TEMPLATE
-        .replace("__CODEGRAPH_TITLE__", &project)
-        .replace("__CODEGRAPH_DATA__", &serde_json::to_string(&data)?))
+        .replace("__CODEGRAPH_TITLE__", &title)
+        .replace("__CODEGRAPH_DATA__", &json))
 }
 
 #[cfg(test)]

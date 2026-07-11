@@ -430,10 +430,14 @@ fn main() -> anyhow::Result<()> {
             .map(|(r, d)| (r, d, matches!(cmd, Command::Index { .. }))),
     );
 
-    // Identity gate: never serve (or index over) a graph that belongs to a
-    // different repo or a foreign tool. One choke point for every command.
-    if let (Some(r), Some(d)) = (&root, &db) {
-        index::check_identity(r, d)?;
+    // Identity gate: never SERVE from a graph that belongs to a different repo
+    // or a foreign tool. Index/Import are exempt — they are the remediation
+    // (both restamp repo_root), otherwise the error would advise the very
+    // command it blocks.
+    if !matches!(cmd, Command::Index { .. } | Command::Import { .. }) {
+        if let (Some(r), Some(d)) = (&root, &db) {
+            index::check_identity(r, d)?;
+        }
     }
 
     // Freshness gate: reindex before serving so a query never returns a result
@@ -917,8 +921,14 @@ fn main() -> anyhow::Result<()> {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(&db, &bytes)?;
-            // Sanity-open (runs migrations) then heal any drift incrementally.
-            let _ = codegraph_store::Store::open(&db)?;
+            // Sanity-open (runs migrations), ADOPT the graph (the artifact
+            // carries the EXPORTER's repo_root — restamp to ours or every
+            // subsequent command fails the identity gate), then heal drift.
+            {
+                let store = codegraph_store::Store::open(&db)?;
+                let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+                store.meta_set("repo_root", &canon.to_string_lossy())?;
+            }
             index::ensure_fresh(&path)?;
             println!("imported {} -> {} (graph live; drift healed incrementally)", src.display(), db.display());
         }

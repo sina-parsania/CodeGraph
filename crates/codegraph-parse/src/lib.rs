@@ -363,10 +363,13 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
     };
     {
         if let Some((label, name)) = labeled {
-            // A definition name with no letter ($200-style object keys, numeric
+            // A digits-only-ish definition name ($200-style object keys, numeric
             // literals-as-methods) is generated noise, never a real call target —
             // it would only pollute search/ranking/communities. Skip the node.
-            if name.chars().any(char::is_alphabetic) {
+            // Operator definitions (`==`, `+`) have no letters but ARE real —
+            // the gate requires a digit with no letter to reject.
+            if name.chars().any(char::is_alphabetic)
+                || !name.chars().any(|c| c.is_ascii_digit()) {
                 // B1: methods nest under their enclosing class so two same-named
                 // methods in two classes of ONE file get DISTINCT ids
                 // (`project.dir.file.class.method`) — identical ids previously

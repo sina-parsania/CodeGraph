@@ -798,7 +798,7 @@ impl Store {
     const EXTERNAL_BOUND: &'static str = "EXISTS(
         SELECT 1 FROM imports i WHERE i.file_path = c.file_path
         AND (i.name = c.callee_name OR i.name = json_extract(c.receiver,'$.Named'))
-        AND substr(i.module,1,1) NOT IN ('.','/')
+        AND substr(i.module,1,1) NOT IN ('.','/','#')
         AND (i.file_path LIKE '%.ts' OR i.file_path LIKE '%.tsx' OR i.file_path LIKE '%.js'
              OR i.file_path LIKE '%.jsx' OR i.file_path LIKE '%.mjs'))";
 
@@ -835,10 +835,16 @@ impl Store {
             [name],
             |r| r.get(0),
         )?;
+        // resolved applies the SAME site filter as total — otherwise a site that
+        // is both externally-bound and resolved makes resolved > total and
+        // saturating_sub masks real gaps as "complete".
         let resolved: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM calls c WHERE c.callee_name = ?1 AND EXISTS(
-                 SELECT 1 FROM edges e JOIN nodes n ON n.id = e.dst
-                 WHERE e.src = c.caller_id AND e.relation = 'Calls' AND e.confidence <> 'Ambiguous' AND n.name = ?1)",
+            &format!(
+                "SELECT COUNT(*) FROM calls c WHERE c.callee_name = ?1 AND NOT {} AND EXISTS(
+                     SELECT 1 FROM edges e JOIN nodes n ON n.id = e.dst
+                     WHERE e.src = c.caller_id AND e.relation = 'Calls' AND e.confidence <> 'Ambiguous' AND n.name = ?1)",
+                Self::EXTERNAL_BOUND
+            ),
             [name],
             |r| r.get(0),
         )?;
@@ -858,10 +864,15 @@ impl Store {
             [caller_id],
             |r| r.get(0),
         )?;
+        // same site filter as total (see coverage_for_callers)
         let resolved: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM calls c WHERE c.caller_id = ?1 AND EXISTS(
-                 SELECT 1 FROM edges e JOIN nodes n ON n.id = e.dst
-                 WHERE e.src = ?1 AND e.relation = 'Calls' AND e.confidence <> 'Ambiguous' AND n.name = c.callee_name)",
+            &format!(
+                "SELECT COUNT(*) FROM calls c WHERE c.caller_id = ?1 AND NOT ({} OR {}) AND EXISTS(
+                     SELECT 1 FROM edges e JOIN nodes n ON n.id = e.dst
+                     WHERE e.src = ?1 AND e.relation = 'Calls' AND e.confidence <> 'Ambiguous' AND n.name = c.callee_name)",
+                Self::EXTERNAL_BOUND,
+                Self::NO_INREPO_DEF
+            ),
             [caller_id],
             |r| r.get(0),
         )?;
