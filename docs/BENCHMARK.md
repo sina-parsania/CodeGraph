@@ -36,15 +36,18 @@ parameters shadow same-named free functions).
 
 | tool | precision (answered) | recall | answer rate | avg bytes/answer |
 |---|---:|---:|---:|---:|
-| codegraph | **0.78** | 0.54 | 87% | **759** |
+| codegraph (`callers --files`) | **0.75** | 0.87 | 99% | **227** |
 | grep -rn | 0.63 | **0.94** | 100% | 2,701 |
 
-Read this honestly: the graph is the precise, 3.5×-cheaper first answer;
-grep is the exhaustive fallback. That is exactly the contract the MCP server
-teaches agents (`coverage.may_be_incomplete` + `_fallback`): use the graph,
-corroborate with text search when coverage says the list is a lower bound.
-The recall gap is dominated by call-returns (`z.string().email()`) — closable
-per-repo by the auto-maintained SCIP tier, not by guessing.
+The answer is LAYERED, never blended: resolved caller files first, then
+`~`-prefixed **parser-verified unresolved call-site files** — call tokens the
+parser saw (not comments/strings), evidence-filtered (files defining the name
+locally or importing it from an external package are excluded, and with
+multiple same-name definitions each site attributes to its NEAREST definition
+— a vendored mirror's tests attach to the mirror, not the primary). Precision
+without recall starvation, at 12× fewer bytes than grep; grep remains the
+final `_fallback` for the residue. Per-query wall latency ~21 ms including
+process spawn and the freshness probe.
 
 ## Verdict (v1.24, measured + source-audited)
 

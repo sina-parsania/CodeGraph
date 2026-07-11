@@ -23,26 +23,15 @@ def score(predicted: set[str], truth: set[str]):
 
 
 def codegraph_files(repo_dir: pathlib.Path, name: str):
-    # SQL keeps extraction robust (no CLI text parsing); byte cost still uses
-    # the human `callers` output — that's what an agent actually reads.
-    human = subprocess.run(
-        ["codegraph", "callers", name, "--path", str(repo_dir)],
+    # `--files` is the tool's file-level answer: resolved caller files + the
+    # `~`-prefixed parser-verified unresolved call-site files. Same granularity
+    # as file-level rivals — bytes measured on exactly what an agent reads.
+    out = subprocess.run(
+        ["codegraph", "callers", name, "--path", str(repo_dir), "--files"],
         capture_output=True, text=True,
     ).stdout
-    sql = (
-        "SELECT DISTINCT s.file_path FROM edges e "
-        "JOIN nodes s ON s.id = e.src JOIN nodes d ON d.id = e.dst "
-        f"WHERE e.relation = 'Calls' AND d.name = '{name}'"
-    )
-    rows = subprocess.run(
-        ["codegraph", "query", sql, "--path", str(repo_dir), "--limit", "500"],
-        capture_output=True, text=True,
-    ).stdout
-    files = {
-        line.strip() for line in rows.splitlines()
-        if "/" in line and not line.startswith(("file_path", "-"))
-    }
-    return files, len(human.encode())
+    files = {line.strip().lstrip("~") for line in out.splitlines() if line.strip()}
+    return files, len(out.encode())
 
 
 def grep_files(repo_dir: pathlib.Path, name: str):

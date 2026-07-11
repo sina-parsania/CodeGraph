@@ -285,11 +285,35 @@ impl CodeGraphServer {
         }
         let callers = store.callers_of(&args.0.name).map_err(err)?;
         let coverage = store.coverage_for_callers(&args.0.name).map_err(err)?;
+        // Compact rows (name/file/line/id) — the full Node JSON doubled the
+        // token cost of every answer for fields agents never used.
+        let caller_files: std::collections::HashSet<&str> =
+            callers.iter().map(|n| n.file_path.as_str()).collect();
+        let rows: Vec<serde_json::Value> = callers
+            .iter()
+            .map(|n| serde_json::json!({"name": n.name, "file": n.file_path, "line": n.line_start, "id": n.id}))
+            .collect();
+        // TEXTUAL layer: files whose parser-verified CALL SITES name it but did
+        // not resolve into an edge — the recall the resolved list can't give,
+        // clearly separated so it never masquerades as a resolved edge.
+        let mut referencing_files: Vec<String> = store
+            .unresolved_call_site_files(&args.0.name, None)
+            .map_err(err)?
+            .into_iter()
+            .filter(|f| !caller_files.contains(f.as_str()))
+            .collect();
+        referencing_files.sort();
         let mut out = serde_json::json!({
-            "callers": callers,
+            "callers": rows,
             "coverage": coverage,
             "_hints": ["blast_radius(name) before changing it", "co_changes(file) for what usually changes too"],
         });
+        if !referencing_files.is_empty() {
+            out["unresolved_call_site_files"] = serde_json::json!(referencing_files);
+            out["_note"] = serde_json::json!(
+                "unresolved_call_site_files = parser-verified call tokens naming it that did NOT resolve to an edge (textual evidence, not resolved callers)"
+            );
+        }
         if let Some(fb) = fallback_hint(&coverage, &args.0.name) {
             out["_fallback"] = fb;
         }

@@ -1233,6 +1233,48 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Files with a parser-verified CALL SITE naming `name` that plausibly refers
+    /// to the asked symbol — the TEXTUAL recall layer behind resolved callers.
+    /// Evidence-filtered, never a raw grep: a file that DEFINES `name` itself
+    /// binds its own sites locally (they belong to that def's resolved callers),
+    /// and a file that imports `name` from an external package can't be calling
+    /// the in-repo symbol.
+    ///
+    /// With multiple same-name definitions, pass `attribute_to` (a definition's
+    /// file path) to keep only the sites whose NEAREST definition (longest
+    /// shared path prefix) is that one — a vendored mirror's tests attach to
+    /// the mirror, not to the primary source.
+    pub fn unresolved_call_site_files(&self, name: &str, attribute_to: Option<&str>) -> Result<Vec<String>> {
+        let sql = format!(
+            "SELECT DISTINCT c.file_path FROM calls c WHERE c.callee_name = ?1
+             AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.name = ?1 AND n.file_path = c.file_path
+                             AND n.label IN ('Function','Method','Class'))
+             AND NOT {}",
+            Self::EXTERNAL_BOUND
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([name], |r| r.get::<_, String>(0))?;
+        let files: Vec<String> = rows.collect::<rusqlite::Result<_>>()?;
+        let Some(target) = attribute_to else { return Ok(files) };
+        let mut stmt =
+            self.conn.prepare("SELECT DISTINCT file_path FROM nodes WHERE name = ?1 AND label IN ('Function','Method','Class')")?;
+        let def_files: Vec<String> =
+            stmt.query_map([name], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<_>>()?;
+        if def_files.len() <= 1 {
+            return Ok(files); // one definition — everything attributes to it
+        }
+        fn shared_prefix(a: &str, b: &str) -> usize {
+            a.split('/').zip(b.split('/')).take_while(|(x, y)| x == y).count()
+        }
+        Ok(files
+            .into_iter()
+            .filter(|f| {
+                let best = def_files.iter().map(|d| shared_prefix(f, d)).max().unwrap_or(0);
+                shared_prefix(f, target) == best
+            })
+            .collect())
+    }
+
     /// Does any inherit clause reference `name`? A dirty def name colliding with
     /// an inherit name can flip name-uniqueness for INHERITS/IMPLEMENTS edges
     /// and hyperedge membership — the wave path falls back to full in that case.

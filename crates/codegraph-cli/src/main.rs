@@ -271,7 +271,8 @@ enum Command {
     },
     /// Find types that implement or extend a given interface/class.
     Implementers { name: String, #[arg(long, default_value = ".")] path: PathBuf },
-    /// Find functions that call a given function name (reverse CALLS edges).
+    /// Find functions that call a given function name (reverse CALLS edges),
+    /// plus the parser-verified unresolved call-site files (textual layer).
     /// Ambiguous name (several definitions) → lists pinnable candidates instead
     /// of silently merging their callers.
     Callers {
@@ -281,6 +282,10 @@ enum Command {
         /// Pin ONE definition by its node id (from the candidate list).
         #[arg(long)]
         id: Option<String>,
+        /// Minimal token mode: print ONLY the layered file list (resolved caller
+        /// files, then `~`-prefixed unresolved call-site files).
+        #[arg(long)]
+        files: bool,
     },
     /// Ask a natural-language question; answered by a local LLM over the graph (if one is running).
     Ask {
@@ -537,8 +542,39 @@ fn main() -> anyhow::Result<()> {
                 println!("{:<24} {:?}  {}:{}", n.name, n.label, n.file_path, n.line_start);
             }
         }
-        Command::Callers { name, path, id } => {
+        Command::Callers { name, path, id, files } => {
             let store = codegraph_store::Store::open(&index::db_path(&path))?;
+            if files {
+                // like-for-like with file-level tools: resolved caller files
+                // first, then `~` textual (parser-verified, unresolved) files.
+                // Multiple same-name defs: answer for the DOMINANT definition
+                // (most resolved callers — what an agent pins), attributing
+                // textual sites to their NEAREST definition; a vendored
+                // mirror's tests attach to the mirror, not the primary.
+                let defs = store.definitions_of(&name)?;
+                let dominant = defs.iter().max_by_key(|(_, nc)| *nc).map(|(d, _)| d.clone());
+                let callers = match (&dominant, defs.len()) {
+                    (Some(d), n) if n > 1 => store.callers_of_id(&d.id)?,
+                    _ => store.callers_of(&name)?,
+                };
+                let mut resolved: Vec<String> = callers.into_iter().map(|n| n.file_path).collect();
+                resolved.sort();
+                resolved.dedup();
+                for f in &resolved {
+                    println!("{f}");
+                }
+                let attribute_to = if defs.len() > 1 { dominant.as_ref().map(|d| d.file_path.as_str()) } else { None };
+                let mut textual = store.unresolved_call_site_files(&name, attribute_to)?;
+                textual.retain(|f| !resolved.contains(f));
+                textual.sort();
+                for f in textual {
+                    println!("~{f}");
+                }
+                if defs.len() > 1 {
+                    println!("#dominant-of-{}-definitions; pin others with --id", defs.len());
+                }
+                return Ok(());
+            }
             if let Some(pin) = id {
                 // Pinned: callers of exactly ONE definition, never a same-name union.
                 for n in store.callers_of_id(&pin)? {
@@ -558,12 +594,35 @@ fn main() -> anyhow::Result<()> {
             }
             let callers = store.callers_of(&name)?;
             if callers.is_empty() {
-                println!("no callers of {:?}", name);
+                println!("no resolved callers of {:?}", name);
             }
+            let caller_files: std::collections::HashSet<String> =
+                callers.iter().map(|n| n.file_path.clone()).collect();
             for n in callers {
                 println!("{:<24} {:?}  {}:{}", n.name, n.label, n.file_path, n.line_start);
             }
-            print_coverage(&store.coverage_for_callers(&name)?);
+            let coverage = store.coverage_for_callers(&name)?;
+            print_coverage(&coverage);
+            // TEXTUAL layer: files with a CALL SITE naming it that didn't resolve
+            // into an edge. Parser-verified call tokens (not comments/strings) —
+            // recall without polluting the resolved graph. Explicitly labeled.
+            if coverage.may_be_incomplete {
+                let mut extra: Vec<String> = store
+                    .unresolved_call_site_files(&name, None)?
+                    .into_iter()
+                    .filter(|f| !caller_files.contains(f))
+                    .collect();
+                extra.sort();
+                if !extra.is_empty() {
+                    println!("~ textual call sites (unresolved, parser-verified) in {} more file(s):", extra.len());
+                    for f in extra.iter().take(20) {
+                        println!("    {f}");
+                    }
+                    if extra.len() > 20 {
+                        println!("    … {} more", extra.len() - 20);
+                    }
+                }
+            }
         }
         Command::Trace { from, to, path } => {
             let l = query::Loaded::open(&index::db_path(&path))?;
