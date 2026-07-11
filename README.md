@@ -88,7 +88,9 @@ codegraph semantic "retry with backoff"           # meaning search, serverless
 codegraph export                  # commit .codegraph/graph.db.zst for your team
 ```
 
-**MCP (17 tools):** `search`, `callers`, `callees`, `blast_radius`, `trace_path`, `context`, `changes`, `dead_code`, `co_changes`, `implementers`, `routes`, `important`, `semantic_search`, `flows`, `graph_query`, `get_node`, `stats` — each with agent-guidance descriptions, coverage signals, and `_hints`.
+**MCP (18 tools):** `search`, `callers`, `callees`, `blast_radius`, `trace_path`, `context`, `changes`, `dead_code`, `co_changes`, `implementers`, `routes`, `important`, `semantic_search`, `flows`, `graph_query`, `get_node` (with exact-span `snippet`), `architecture`, `stats` — each with agent-guidance descriptions, coverage signals, and `_hints`.
+
+**The layered-answer contract:** every graph answer returns a **precise layer** (resolved edges — never guessed) plus a **labeled textual layer** (parser-verified call tokens the resolver dropped, evidence-filtered: local-binding shadowing, external-import exclusion, nearest-definition attribution) plus coverage and a `_fallback`. Measured on the public eval: recall 0.87 at 227 bytes/answer (grep: 0.94 at 2,701) with precision 0.75 — truth and coverage, separately labeled, never blended. Search is **definition-first**: bm25 + label/exact-name ranking puts the actual definition above the twelfth test that mentions it.
 
 **Navigation Protocol (known unknowns, made actionable):** every edge names its evidence class; `stats` quotes the audit-measured per-tier precision; and whenever a precise answer may be incomplete the response carries a ready-made **`_fallback` grep pattern**, so the agent verifies instead of concluding absence. Coverage denominators exclude call sites **bound to external-package imports** (evidence, not heuristics) — `may_be_incomplete` means something.
 

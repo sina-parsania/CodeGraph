@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.31.0 (continued) — the layered-answer contract
+
+Driven by a reproducible eval (68 who-references questions, SCIP ground
+truth) that exposed resolved-only answers as recall-starved (0.54): agents
+need both truth AND coverage. Every graph answer now follows one contract —
+**precise layer + labeled textual layer + coverage + `_fallback`**:
+
+- `callers`: compact resolved rows + `unresolved_call_site_files` — parser-
+  verified call tokens, evidence-filtered (local-def shadowing, external-
+  import binding, nearest-definition attribution for same-name defs). CLI
+  `--files` prints the dominant definition's layered file list.
+  Eval: recall 0.54→0.87, answer rate 87→99%, bytes/answer 759→227.
+- `callees`: compact rows + `unresolved_calls` (in-repo-plausible dropped
+  names); `blast_radius`: compact rows capped at 200 + `total_affected`.
+- **Definition-first search**: `search_fts` was UNRANKED (rowid + LIMIT could
+  drop the actual definition below tests that mention it) — now bm25 +
+  definition-label boost + exact-name boost + test-path tiebreak penalty.
+- New MCP `architecture` tool (one-call repo orientation: counts, languages,
+  communities with connected key symbols, routes, measured precision) and
+  `get_node(snippet=true)` (the symbol's exact source span, never a whole
+  file). MCP tool count: 17 → 18.
+- Resolver precision (audit-driven): unknown-receiver calls never bind by
+  repo-wide name uniqueness (measured 27% precision — removed); function
+  parameters shadow same-named free functions in all 13 languages.
+
 ## 1.31.0 — the trust & recall leap
 
 Motivated by a real-world audit on a private polyglot monorepo (~8.6k files,
