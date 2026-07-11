@@ -665,7 +665,15 @@ fn main() -> anyhow::Result<()> {
                         println!("{}", l.fmt(&id));
                     }
                     let store = codegraph_store::Store::open(&index::db_path(&path))?;
-                    print_coverage(&store.coverage_for_callees(&n.id)?);
+                    let coverage = store.coverage_for_callees(&n.id)?;
+                    print_coverage(&coverage);
+                    if coverage.may_be_incomplete {
+                        let mut unresolved = store.unresolved_callee_names(&n.id)?;
+                        unresolved.truncate(20);
+                        if !unresolved.is_empty() {
+                            println!("~ unresolved call names in the body (in-repo candidates exist): {}", unresolved.join(", "));
+                        }
+                    }
                 }
                 None => println!("symbol {:?} not found", name),
             }

@@ -826,6 +826,25 @@ impl Store {
         SELECT 1 FROM nodes n WHERE n.name = c.callee_name
         AND n.label IN ('Function','Method','Class'))";
 
+    /// The names a function's body CALLS that did not resolve into any edge —
+    /// the outbound textual layer behind `callees` (in-repo-resolvable names
+    /// only; externally-bound / no-in-repo-def names are excluded as noise).
+    pub fn unresolved_callee_names(&self, caller_id: &str) -> Result<Vec<String>> {
+        let sql = format!(
+            "SELECT DISTINCT c.callee_name FROM calls c WHERE c.caller_id = ?1
+             AND c.callee_name NOT LIKE 'route.%'
+             AND NOT EXISTS (SELECT 1 FROM edges e JOIN nodes n ON n.id = e.dst
+                             WHERE e.src = ?1 AND e.relation = 'Calls' AND n.name = c.callee_name)
+             AND NOT ({} OR {})
+             ORDER BY c.callee_name",
+            Self::EXTERNAL_BOUND,
+            Self::NO_INREPO_DEF
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([caller_id], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Repo-wide count of call sites no in-repo resolver could ever bind:
     /// externally-import-bound OR naming no in-repo definition.
     pub fn external_bound_call_sites(&self) -> Result<usize> {

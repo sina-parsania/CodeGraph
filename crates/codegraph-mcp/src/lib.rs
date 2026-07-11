@@ -411,33 +411,61 @@ impl CodeGraphServer {
             ),
             None => (Vec::new(), codegraph_core::Coverage::callers(&args.0.name, 0, 0)),
         };
+        // compact rows, capped — a hub can reach hundreds of symbols and the
+        // agent needs name/file:line, not full node JSON for each
+        let total = affected.len();
+        let rows: Vec<serde_json::Value> = affected
+            .iter()
+            .take(200)
+            .map(|id| match g.node_by_id(id) {
+                Some(n) => serde_json::json!({"name": n.name, "file": n.file_path, "line": n.line_start}),
+                None => serde_json::json!({"id": id}),
+            })
+            .collect();
         let mut out = serde_json::json!({
-            "affected": affected,
+            "affected": rows,
+            "total_affected": total,
             "coverage": coverage,
         });
+        if total > 200 {
+            out["_note"] = serde_json::json!("truncated to 200 rows — total_affected is the real count");
+        }
         if let Some(fb) = fallback_hint(&coverage, &args.0.name) {
             out["_fallback"] = fb;
         }
         Ok(CallToolResult::success(vec![Content::json(out)?]))
     }
 
-    #[tool(description = "List the functions a given function CALLS (outgoing call edges). PREFER over reading the body to enumerate its calls. Includes a `coverage` object — `dropped` counts external/unresolved calls absent from the list.")]
+    #[tool(description = "List the functions a given function CALLS (outgoing call edges). PREFER over reading the body to enumerate its calls. Layered: resolved callees + `unresolved_calls` (in-repo-plausible call names the resolver dropped). `coverage.dropped` counts what's absent.")]
     async fn callees(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let g = self.load_graph()?;
         let store = self.open()?;
-        let (out, coverage) = match g.node_by_name(&args.0.name) {
-            Some(n) => (
-                g.lg.callees(&n.id),
-                store
-                    .coverage_for_callees(&n.id)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
-            ),
-            None => (Vec::new(), codegraph_core::Coverage::callees(0, 0)),
+        let err = |e: codegraph_store::StoreError| McpError::internal_error(e.to_string(), None);
+        let (rows, coverage, unresolved) = match g.node_by_name(&args.0.name) {
+            Some(n) => {
+                let rows: Vec<serde_json::Value> = g
+                    .lg
+                    .callees(&n.id)
+                    .iter()
+                    .filter_map(|id| g.node_by_id(id))
+                    .map(|c| serde_json::json!({"name": c.name, "file": c.file_path, "line": c.line_start, "id": c.id}))
+                    .collect();
+                let mut unresolved = store.unresolved_callee_names(&n.id).map_err(err)?;
+                unresolved.truncate(30);
+                (rows, store.coverage_for_callees(&n.id).map_err(err)?, unresolved)
+            }
+            None => (Vec::new(), codegraph_core::Coverage::callees(0, 0), Vec::new()),
         };
         let mut body = serde_json::json!({
-            "callees": out,
+            "callees": rows,
             "coverage": coverage,
         });
+        if !unresolved.is_empty() {
+            body["unresolved_calls"] = serde_json::json!(unresolved);
+            body["_note"] = serde_json::json!(
+                "unresolved_calls = call names in the body the resolver DROPPED (in-repo candidates exist) — textual evidence, not resolved edges"
+            );
+        }
         if let Some(fb) = fallback_hint(&coverage, &args.0.name) {
             body["_fallback"] = fb;
         }
