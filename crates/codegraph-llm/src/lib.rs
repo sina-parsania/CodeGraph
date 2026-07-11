@@ -218,7 +218,14 @@ fn local_embedder() -> &'static Option<(std::sync::Mutex<fastembed::TextEmbeddin
             .unwrap_or_else(|| std::path::PathBuf::from(".codegraph-cache"))
             .join("fastembed");
         let _ = std::fs::create_dir_all(&cache);
-        let opts = InitOptions::new(which).with_cache_dir(cache).with_show_download_progress(true);
+        // max_length 256: embed texts are name+signature+context lines, far
+        // below 512 tokens — halving the sequence cap halves every activation
+        // tensor ort allocates (its arena never shrinks; defaults were
+        // observed >16 GB peak on a real machine).
+        let opts = InitOptions::new(which)
+            .with_cache_dir(cache)
+            .with_show_download_progress(true)
+            .with_max_length(256);
         TextEmbedding::try_new(opts).ok().map(|m| (Mutex::new(m), label.to_string()))
     })
 }
@@ -227,7 +234,9 @@ fn local_embedder() -> &'static Option<(std::sync::Mutex<fastembed::TextEmbeddin
 fn local_embed(texts: &[String]) -> Option<(Vec<Vec<f32>>, String)> {
     let (model, label) = local_embedder().as_ref()?;
     let docs: Vec<&str> = texts.iter().map(String::as_str).collect();
-    let out = model.lock().ok()?.embed(docs, None).ok()?;
+    // small batches bound ort's per-shape arena growth — memory, not
+    // throughput, is the binding constraint on user machines
+    let out = model.lock().ok()?.embed(docs, Some(32)).ok()?;
     Some((out, label.clone()))
 }
 
