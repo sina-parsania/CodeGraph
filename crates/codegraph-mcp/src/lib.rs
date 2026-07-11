@@ -128,6 +128,9 @@ pub struct ContextArgs {
 pub struct IdArgs {
     /// Fully-qualified node id (e.g. `proj.src.lib_rs.foo`).
     pub id: String,
+    /// Include the symbol's SOURCE CODE (its exact line span, read from disk).
+    #[serde(default)]
+    pub snippet: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -246,12 +249,29 @@ impl CodeGraphServer {
         }))?]))
     }
 
-    #[tool(description = "Get full details of one symbol by its fully-qualified id (from a prior search/callers result): kind, file:line, language, metadata.")]
+    #[tool(description = "Get full details of one symbol by its fully-qualified id (from a prior search/callers result): kind, file:line, language, metadata. Pass snippet=true to ALSO get its exact source code — cheaper than reading the whole file.")]
     async fn get_node(&self, args: Parameters<IdArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let node = store
             .get_node(&args.0.id)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        if args.0.snippet.unwrap_or(false) {
+            if let Some(n) = &node {
+                let mut out = serde_json::to_value(n)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                // exact span from disk — never a whole-file dump
+                if let Ok(text) = std::fs::read_to_string(self.root.join(&n.file_path)) {
+                    let s = (n.line_start.max(1) as usize) - 1;
+                    let e = (n.line_end as usize).min(s + 400).max(s + 1);
+                    let lines: Vec<&str> = text.lines().collect();
+                    if s < lines.len() {
+                        out["snippet"] =
+                            serde_json::json!(lines[s..e.min(lines.len())].join("\n"));
+                    }
+                }
+                return Ok(CallToolResult::success(vec![Content::json(out)?]));
+            }
+        }
         Ok(CallToolResult::success(vec![Content::json(node)?]))
     }
 
@@ -495,6 +515,80 @@ impl CodeGraphServer {
             })
             .collect();
         Ok(CallToolResult::success(vec![Content::json(top)?]))
+    }
+
+    #[tool(description = "ARCHITECTURE MAP in one call: node/edge counts, languages, resolution quality, measured precision, top communities (dominant directory + key symbols by hub score), and route count. Use to orient in an unfamiliar repo before drilling down with important/flows/callers.")]
+    async fn architecture(&self) -> Result<CallToolResult, McpError> {
+        let g = self.load_graph()?;
+        let store = self.open()?;
+        let err = |e: codegraph_store::StoreError| McpError::internal_error(e.to_string(), None);
+        let mut by_label: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut by_lang: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut comms: std::collections::HashMap<u32, Vec<&codegraph_core::Node>> = Default::default();
+        for n in &g.nodes {
+            *by_label.entry(format!("{:?}", n.label)).or_default() += 1;
+            if !matches!(n.label, codegraph_core::NodeLabel::File | codegraph_core::NodeLabel::Document) {
+                *by_lang.entry(n.language.clone()).or_default() += 1;
+                if let Some(c) = n.community {
+                    comms.entry(c).or_default().push(n);
+                }
+            }
+        }
+        let hub = |n: &codegraph_core::Node| {
+            let fi = n.metadata.get("fan_in").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let fo = n.metadata.get("fan_out").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            codegraph_graph::hub_score(n.pagerank, fi, fo)
+        };
+        let mut comms: Vec<(u32, Vec<&codegraph_core::Node>)> = comms.into_iter().collect();
+        comms.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+        let communities: Vec<serde_json::Value> = comms
+            .iter()
+            .take(8)
+            .map(|(_, members)| {
+                // dominant 2-level dir prefix = the community's human name
+                let mut prefixes: std::collections::BTreeMap<String, usize> = Default::default();
+                for n in members {
+                    let mut it = n.file_path.split('/');
+                    if let (Some(a), Some(b)) = (it.next(), it.next()) {
+                        *prefixes.entry(format!("{a}/{b}")).or_default() += 1;
+                    }
+                }
+                let dir = prefixes.iter().max_by_key(|(_, c)| **c).map(|(p, _)| p.clone()).unwrap_or_default();
+                // key symbols must be CONNECTED ones — a cluster of zero-degree
+                // DTOs would otherwise pick alphabetical noise via the tiebreak
+                let mut top: Vec<&&codegraph_core::Node> = members
+                    .iter()
+                    .filter(|n| {
+                        n.metadata.get("fan_in").and_then(|v| v.as_u64()).unwrap_or(0)
+                            + n.metadata.get("fan_out").and_then(|v| v.as_u64()).unwrap_or(0)
+                            > 0
+                    })
+                    .collect();
+                if top.is_empty() {
+                    top = members.iter().collect();
+                }
+                top.sort_by(|a, b| hub(b).partial_cmp(&hub(a)).unwrap_or(std::cmp::Ordering::Equal).then(a.id.cmp(&b.id)));
+                let key: Vec<&str> = top.iter().take(3).map(|n| n.name.as_str()).collect();
+                serde_json::json!({"dir": dir, "symbols": members.len(), "key_symbols": key})
+            })
+            .collect();
+        let mut out = serde_json::json!({
+            "nodes_by_kind": by_label,
+            "languages": by_lang,
+            "communities": communities,
+            "routes": g.nodes.iter().filter(|n| n.label == codegraph_core::NodeLabel::Route).count(),
+        });
+        if let Ok(Some(raw)) = store.meta_get("audit_result") {
+            if let Ok(audit) = serde_json::from_str::<serde_json::Value>(&raw) {
+                out["measured_precision"] = audit;
+            }
+        }
+        let resolvable = store.external_bound_call_sites().map_err(err)?;
+        out["_note"] = serde_json::json!(format!(
+            "next: important (core symbols) · flows (entry-point chains) · routes (API surface); {} call sites are unresolvable in-repo and excluded from recall accounting",
+            resolvable
+        ));
+        Ok(CallToolResult::success(vec![Content::json(out)?]))
     }
 
     #[tool(description = "Graph size + trust card: node count and, when `codegraph audit` has run, the MEASURED per-tier precision of this repo's resolved edges vs a compiler oracle.")]
