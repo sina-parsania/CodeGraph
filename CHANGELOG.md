@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.31.1 — release-pipeline fixes
+
+- macOS arm64 binary carried ONLY the CI runner's Xcode rpath and crashed with
+  "Library not loaded: libIndexStore.dylib" on user machines — the standard
+  /Applications/Xcode.app toolchain rpath is now added post-build (re-signed).
+- The release workflow creates the GitHub release if a bare tag push has none
+  ("release not found" broke every v1.31.0 asset upload).
+
 ## 1.31.0 (continued) — the layered-answer contract
 
 Driven by a reproducible eval (68 who-references questions, SCIP ground
