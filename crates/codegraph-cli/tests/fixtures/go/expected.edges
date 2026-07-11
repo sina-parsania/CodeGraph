@@ -1,0 +1,2 @@
+CALLS b.go:consume -> a.go:helper
+!CALLS b.go:consume -> sub/o.go:helper

@@ -10,15 +10,15 @@ use anyhow::Result;
 
 use crate::index;
 
-struct Indexer {
+pub(crate) struct Indexer {
     lang: &'static str,
-    bin: &'static str,
-    args: &'static [&'static str],
+    pub(crate) bin: &'static str,
+    pub(crate) args: &'static [&'static str],
     install: &'static str,
 }
 
 /// Pick the SCIP indexer from marker files in the repo root.
-fn detect(root: &Path) -> Option<Indexer> {
+pub(crate) fn detect(root: &Path) -> Option<Indexer> {
     let has = |f: &str| root.join(f).exists();
     if has("tsconfig.json") || has("package.json") {
         Some(Indexer { lang: "typescript", bin: "scip-typescript", args: &["index"], install: "npm i -g @sourcegraph/scip-typescript" })
@@ -35,7 +35,7 @@ fn detect(root: &Path) -> Option<Indexer> {
     }
 }
 
-fn on_path(bin: &str) -> bool {
+pub(crate) fn on_path(bin: &str) -> bool {
     std::env::var_os("PATH")
         .map(|paths| {
             std::env::split_paths(&paths).any(|d| {

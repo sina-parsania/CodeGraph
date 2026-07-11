@@ -1,0 +1,9 @@
+CALLS src/main.ts:go -> src/lib.ts:doThing @ImportNarrowed
+!CALLS src/main.ts:go -> decoy/dup.ts:doThing
+CALLS src/svc.ts:Service.run -> src/svc.ts:Service.step @SelfThisMember
+CALLS src/svc.ts:Controller.handle -> src/svc.ts:Service.run @FieldTypeMember
+CALLS src/main.ts:go -> src/svc.ts:Service.run @LocalVarType
+# TSX: arrow components are real nodes and call each other
+CALLS src/View.tsx:Page -> src/View.tsx:Header
+CALLS src/View.tsx:Header -> src/View.tsx:titleOf @SameFileUnique
+CALLS src/View.tsx:Page -> src/svc.ts:Service.run @LocalVarType

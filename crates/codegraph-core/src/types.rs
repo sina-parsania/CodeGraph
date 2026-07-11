@@ -118,6 +118,26 @@ fn normalize(s: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
+/// Human/agent-facing label that DISAMBIGUATES same-named symbols: prefixes the
+/// enclosing container (from the B1-nested id: `…file.class.method`) when it
+/// adds information, and always appends `(file:line)`. Six `viewDidLoad` entry
+/// points must never render identically.
+pub fn display_label(n: &Node) -> String {
+    let segs: Vec<&str> = n.id.split('.').collect();
+    let container = if segs.len() >= 2 { segs[segs.len() - 2] } else { "" };
+    let file_name = n.file_path.rsplit('/').next().unwrap_or(&n.file_path);
+    let file_stem = file_name.split('.').next().unwrap_or(file_name);
+    let prefix = if !container.is_empty()
+        && container != normalize(&n.name)
+        && container != normalize(file_stem)
+    {
+        format!("{container}.")
+    } else {
+        String::new()
+    };
+    format!("{prefix}{} ({file_name}:{})", n.name, n.line_start)
+}
+
 /// A class/type → supertype reference captured by the parser, resolved into an
 /// INHERITS (extends) or IMPLEMENTS edge by the graph builder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

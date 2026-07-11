@@ -22,6 +22,20 @@ fn meta_u64(n: &Node, key: &str) -> u64 {
     n.metadata.get(key).and_then(|v| v.as_u64()).unwrap_or(0)
 }
 
+/// Kinds eligible for "most central"/"key symbol" rankings — the subset of
+/// `is_symbol` an agent can actually navigate to (matches `LoadedGraph::important`).
+fn is_ranked_symbol(n: &Node) -> bool {
+    matches!(
+        n.label,
+        NodeLabel::Function | NodeLabel::Method | NodeLabel::Class | NodeLabel::Interface | NodeLabel::Route
+    )
+}
+
+/// Hub score from the persisted analytics (same formula as `important`).
+fn damped(n: &Node) -> f64 {
+    codegraph_graph::hub_score(n.pagerank, meta_u64(n, "fan_in") as u32, meta_u64(n, "fan_out") as u32)
+}
+
 /// Most common `a/b` directory prefix of a set of nodes — the human name for a
 /// community ("crates/codegraph-store", "src/auth", …).
 fn dominant_prefix(nodes: &[&Node]) -> String {
@@ -96,13 +110,17 @@ pub fn report(root: &Path, db: &Path) -> Result<String> {
 
     // ---- resolution quality ----
     let total_calls = store.all_calls()?.len();
+    let external_calls = store.external_bound_call_sites().unwrap_or(0);
+    let internal_calls = total_calls.saturating_sub(external_calls);
     let resolved_calls = edges.iter().filter(|e| e.relation == EdgeRelation::Calls).count();
     w("\n## Call-resolution quality".into());
-    if total_calls > 0 {
+    if internal_calls > 0 {
         w(format!(
-            "- {resolved_calls} resolved CALLS edges from {total_calls} textual call sites \
-             ({:.1}% — the rest are external, ambiguous, or unresolved; precision over recall by design)",
-            resolved_calls as f64 * 100.0 / total_calls as f64
+            "- {resolved_calls} resolved CALLS edges from {internal_calls} resolvable call sites \
+             ({:.1}% — {external_calls} sites are excluded as UNRESOLVABLE in-repo: bound to an \
+             external-package import or naming no in-repo definition; the rest are ambiguous or \
+             unresolved; precision over recall by design)",
+            resolved_calls as f64 * 100.0 / internal_calls as f64
         ));
     }
     if let Ok((_, rows)) = codegraph_store::query_readonly(
@@ -120,14 +138,60 @@ pub fn report(root: &Path, db: &Path) -> Result<String> {
             w(format!("- by resolution tier: {}", parts.join(" · ")));
         }
     }
+    // ---- measured precision (codegraph audit) ----
+    if let Ok(Some(raw)) = store.meta_get("audit_result") {
+        if let Ok(audit) = serde_json::from_str::<serde_json::Value>(&raw) {
+            w("\n## Measured precision (vs compiler oracle — `codegraph audit`)".into());
+            if let Some(langs) = audit.get("oracle_languages").and_then(|l| l.as_array()) {
+                let langs: Vec<&str> = langs.iter().filter_map(|v| v.as_str()).collect();
+                w(format!(
+                    "_Lower bound, measured on oracle-covered code only (oracle languages: {}); tiers with checked=0 are not verified by this oracle._",
+                    if langs.is_empty() { "?".into() } else { langs.join(", ") }
+                ));
+            }
+            let audited_gen = audit.get("generation").and_then(|g| g.as_u64()).unwrap_or(0);
+            let current_gen = codegraph_store::generation(db);
+            if audited_gen < current_gen {
+                w(format!(
+                    "> ⚠ audit ran at graph generation {audited_gen}, current is {current_gen} — re-run `codegraph audit` to refresh."
+                ));
+            }
+            if let Some(tiers) = audit.get("tiers").and_then(|t| t.as_object()) {
+                w("| tier | checked | confirmed | precision |".into());
+                w("|---|---:|---:|---:|".into());
+                for (tier, t) in tiers {
+                    let p = t
+                        .get("precision")
+                        .and_then(|p| p.as_f64())
+                        .map(|p| format!("{:.1}%", p * 100.0))
+                        .unwrap_or_else(|| "—".into());
+                    w(format!(
+                        "| {tier} | {} | {} | {p} |",
+                        t.get("checked").and_then(|v| v.as_u64()).unwrap_or(0),
+                        t.get("confirmed").and_then(|v| v.as_u64()).unwrap_or(0),
+                    ));
+                }
+            }
+            if let Some(overall) = audit.get("overall").and_then(|o| o.get("precision")).and_then(|p| p.as_f64()) {
+                w(format!("- overall: **{:.1}%** (sampled {} edges, seed {})",
+                    overall * 100.0,
+                    audit.get("sampled").and_then(|v| v.as_u64()).unwrap_or(0),
+                    audit.get("seed").and_then(|v| v.as_u64()).unwrap_or(0)));
+            }
+        }
+    }
 
     // ---- most central ----
     w("\n## Most central symbols (PageRank)".into());
     w("| symbol | kind | location | fan-in | fan-out |".into());
     w("|---|---|---|---:|---:|".into());
-    let mut central: Vec<&Node> = nodes.iter().filter(|n| is_symbol(n)).collect();
-    central.sort_by(|a, b| b.pagerank.partial_cmp(&a.pagerank).unwrap_or(std::cmp::Ordering::Equal).then(a.id.cmp(&b.id)));
-    for n in central.iter().take(15) {
+    let mut central: Vec<(&Node, f64)> = nodes
+        .iter()
+        .filter(|n| is_ranked_symbol(n))
+        .map(|n| (n, damped(n)))
+        .collect();
+    central.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.id.cmp(&b.0.id)));
+    for (n, _) in central.iter().take(15) {
         w(format!(
             "| `{}` | {:?} | {}:{} | {} | {} |",
             n.name, n.label, n.file_path, n.line_start, meta_u64(n, "fan_in"), meta_u64(n, "fan_out")
@@ -166,9 +230,13 @@ pub fn report(root: &Path, db: &Path) -> Result<String> {
     let mut comms: Vec<(u32, Vec<&Node>)> = comms.into_iter().collect();
     comms.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
     for (cid, members) in comms.iter().take(8) {
-        let mut top = members.clone();
-        top.sort_by(|a, b| b.pagerank.partial_cmp(&a.pagerank).unwrap_or(std::cmp::Ordering::Equal).then(a.id.cmp(&b.id)));
-        let names: Vec<String> = top.iter().take(3).map(|n| format!("`{}`", n.name)).collect();
+        // Key symbols: real ranked symbols under the same sink damping as
+        // `important` — a community keyed by its most-called leaf helper says
+        // nothing about what the cluster does.
+        let mut top: Vec<(&&Node, f64)> =
+            members.iter().filter(|n| is_ranked_symbol(n)).map(|n| (n, damped(n))).collect();
+        top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.id.cmp(&b.0.id)));
+        let names: Vec<String> = top.iter().take(3).map(|(n, _)| format!("`{}`", n.name)).collect();
         w(format!(
             "- **{}** — {} symbols (community {cid}); key: {}",
             dominant_prefix(members),
@@ -192,14 +260,14 @@ pub fn report(root: &Path, db: &Path) -> Result<String> {
                 .filter_map(|id| nodes.iter().find(|x| &x.id == id))
                 .map(|x| x.pagerank)
                 .sum();
-            Some((n.name.clone(), *kind, body.len(), by_id * (1.0 + body.len() as f64).ln()))
+            Some((codegraph_core::display_label(n), *kind, body.len(), by_id * (1.0 + body.len() as f64).ln()))
         })
         .collect();
     flows.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
     if !flows.is_empty() {
         w("\n## Critical execution flows (entry points by reach × centrality)".into());
-        for (name, kind, reach, _) in flows.iter().take(10) {
-            w(format!("- `{name}` [{kind}] — reaches {reach} symbols"));
+        for (label, kind, reach, _) in flows.iter().take(10) {
+            w(format!("- `{label}` [{kind}] — reaches {reach} symbols"));
         }
     }
 

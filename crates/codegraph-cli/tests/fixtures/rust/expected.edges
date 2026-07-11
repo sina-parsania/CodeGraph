@@ -1,0 +1,2 @@
+CALLS b.rs:consume -> a.rs:helper @GlobalUnique
+CALLS a.rs:same_file_caller -> a.rs:local_target @SameFileUnique

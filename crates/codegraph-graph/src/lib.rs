@@ -75,9 +75,15 @@ fn resolve_via_import<'a>(
     let module = modules[0];
     let dir = caller.file_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
     let mut hits: Vec<&str> = Vec::new();
-    if module.starts_with('.') {
+    if module.starts_with('.') || module.starts_with('/') {
         // TS/JS relative: normalize ./ ../ against the caller's dir.
-        let base = join_normalize(dir, module);
+        // A leading `/` is a ROOT-relative module (a tsconfig-paths alias the
+        // indexer already expanded) — same evidence class, same probing.
+        let base = if let Some(root_rel) = module.strip_prefix('/') {
+            join_normalize("", root_rel)
+        } else {
+            join_normalize(dir, module)
+        };
         for cand in [
             format!("{base}.ts"), format!("{base}.tsx"), format!("{base}.js"),
             format!("{base}.jsx"), format!("{base}.mjs"),
@@ -521,9 +527,14 @@ pub fn build_with(
         if imp_id == sup_id {
             continue;
         }
-        let relation = match inh.kind {
-            InheritKind::Extends => EdgeRelation::Inherits,
-            InheritKind::Implements => EdgeRelation::Implements,
+        // The resolved target's label outranks the parser's syntactic guess:
+        // Swift `class A: B` can't tell a superclass from a protocol at parse
+        // time, but the graph knows whether B is an Interface.
+        let relation = match (by_id.get(sup_id).map(|n| n.label), inh.kind) {
+            (Some(NodeLabel::Interface), _) => EdgeRelation::Implements,
+            (Some(NodeLabel::Class), _) => EdgeRelation::Inherits,
+            (_, InheritKind::Extends) => EdgeRelation::Inherits,
+            (_, InheritKind::Implements) => EdgeRelation::Implements,
         };
         push_edge(&mut edges, &mut seen, Edge {
             src: imp_id.to_string(),
@@ -535,7 +546,7 @@ pub fn build_with(
             src_line: by_id.get(imp_id).map(|n| n.line_start).unwrap_or(1),
             metadata: Metadata::new(),
         });
-        if inh.kind == InheritKind::Implements {
+        if relation == EdgeRelation::Implements {
             implementers.entry(sup_id).or_default().push(imp_id.to_string());
         }
     }
@@ -976,6 +987,17 @@ mod tests {
     }
 }
 
+/// Hub score shared by `important` and the report's community/central pickers:
+/// `ln(1+fan_in) × ln(1+fan_out) + pagerank`. A symbol is core when it is both
+/// widely CALLED and widely CALLING (orchestrates) — raw PageRank fails here
+/// twice: pure-utility leaves (huge fan-in, fan-out ≤1) accumulate mass they
+/// never shed, and their private helpers (fan-in 1) inherit that mass. The
+/// degree product zeroes both failure modes; PageRank stays as the tiebreak
+/// (it dominates only when a degree term is 0). Deterministic, threshold-free.
+pub fn hub_score(pagerank: f64, fan_in: u32, fan_out: u32) -> f64 {
+    (1.0 + fan_in as f64).ln() * (1.0 + fan_out as f64).ln() + pagerank
+}
+
 /// An in-memory graph loaded from the persisted store, with id↔index mapping,
 /// for traversal and ranking queries (trace_path, blast-radius, callees, PageRank).
 pub struct LoadedGraph {
@@ -1149,6 +1171,48 @@ impl LoadedGraph {
             .iter()
             .enumerate()
             .map(|(i, id)| (id.clone(), ranks.get(i).copied().unwrap_or(0.0)))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
+        });
+        scored.truncate(k);
+        scored
+    }
+
+    /// Agent-facing importance ranking: `hub_score` restricted to REAL code
+    /// symbols (no File/Document rows). See `hub_score` for why raw PageRank
+    /// surfaces utility leaves instead of the codebase's actual core.
+    pub fn important(&self, k: usize, nodes: &[Node]) -> Vec<(String, f64)> {
+        let keep: HashMap<&str, ()> = nodes
+            .iter()
+            .filter(|n| {
+                matches!(
+                    n.label,
+                    NodeLabel::Function | NodeLabel::Method | NodeLabel::Class | NodeLabel::Interface | NodeLabel::Route
+                )
+            })
+            .map(|n| (n.id.as_str(), ()))
+            .collect();
+        let ranks = self.page_rank();
+        let mut scored: Vec<(String, f64)> = self
+            .ids
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| keep.contains_key(id.as_str()))
+            .map(|(i, id)| {
+                let ni = self.idx[id];
+                let fan_in = self
+                    .graph
+                    .edges_directed(ni, petgraph::Direction::Incoming)
+                    .filter(|e| *e.weight() == EdgeRelation::Calls)
+                    .count() as u32;
+                let fan_out = self
+                    .graph
+                    .edges_directed(ni, petgraph::Direction::Outgoing)
+                    .filter(|e| *e.weight() == EdgeRelation::Calls)
+                    .count() as u32;
+                (id.clone(), hub_score(ranks.get(i).copied().unwrap_or(0.0), fan_in, fan_out))
+            })
             .collect();
         scored.sort_by(|a, b| {
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))

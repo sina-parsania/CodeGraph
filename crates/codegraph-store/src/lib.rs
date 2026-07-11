@@ -238,6 +238,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS imports(
                file_path TEXT, name TEXT, module TEXT);
              CREATE INDEX IF NOT EXISTS idx_imports_file ON imports(file_path);
+             CREATE INDEX IF NOT EXISTS idx_imports_file_name ON imports(file_path, name);
              CREATE TABLE IF NOT EXISTS locals(
                caller_id TEXT, var_name TEXT, type_name TEXT, file_path TEXT);
              CREATE INDEX IF NOT EXISTS idx_locals_file ON locals(file_path);
@@ -789,13 +790,51 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// A call site is EXTERNALLY BOUND when its file imports the callee name —
+    /// or the RECEIVER it is called through (`ns.method()`, `svc.run()`) — from
+    /// a package specifier (TS/JS import that is neither relative nor a
+    /// resolved alias). Such sites can never resolve in-repo — evidence, not a
+    /// guess — so coverage keeps them out of the denominator.
+    const EXTERNAL_BOUND: &'static str = "EXISTS(
+        SELECT 1 FROM imports i WHERE i.file_path = c.file_path
+        AND (i.name = c.callee_name OR i.name = json_extract(c.receiver,'$.Named'))
+        AND substr(i.module,1,1) NOT IN ('.','/')
+        AND (i.file_path LIKE '%.ts' OR i.file_path LIKE '%.tsx' OR i.file_path LIKE '%.js'
+             OR i.file_path LIKE '%.jsx' OR i.file_path LIKE '%.mjs'))";
+
+    /// A call site is UNRESOLVABLE when NO in-repo definition carries the callee
+    /// name at all (jest globals, stdlib/array methods, framework decorators).
+    /// A perfect in-repo resolver could never produce this edge, so it does not
+    /// belong in a recall denominator either. Pure graph evidence.
+    const NO_INREPO_DEF: &'static str = "NOT EXISTS(
+        SELECT 1 FROM nodes n WHERE n.name = c.callee_name
+        AND n.label IN ('Function','Method','Class'))";
+
+    /// Repo-wide count of call sites no in-repo resolver could ever bind:
+    /// externally-import-bound OR naming no in-repo definition.
+    pub fn external_bound_call_sites(&self) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM calls c WHERE {} OR {}",
+                Self::EXTERNAL_BOUND,
+                Self::NO_INREPO_DEF
+            ),
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
     /// Coverage for `callers(name)`: how many of the textual call sites naming
     /// `name` actually resolved into a `Calls` edge to a node of that name. The
     /// difference is the count dropped (ambiguous / external / unresolved) — a
     /// real signal that the precise callers list may be incomplete.
     pub fn coverage_for_callers(&self, name: &str) -> Result<Coverage> {
-        let total: i64 =
-            self.conn.query_row("SELECT COUNT(*) FROM calls WHERE callee_name = ?1", [name], |r| r.get(0))?;
+        let total: i64 = self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM calls c WHERE c.callee_name = ?1 AND NOT {}", Self::EXTERNAL_BOUND),
+            [name],
+            |r| r.get(0),
+        )?;
         let resolved: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM calls c WHERE c.callee_name = ?1 AND EXISTS(
                  SELECT 1 FROM edges e JOIN nodes n ON n.id = e.dst
@@ -810,8 +849,15 @@ impl Store {
     /// sites resolved to an internal definition. Dropped = external (library) or
     /// unresolved calls absent from the callees list.
     pub fn coverage_for_callees(&self, caller_id: &str) -> Result<Coverage> {
-        let total: i64 =
-            self.conn.query_row("SELECT COUNT(*) FROM calls WHERE caller_id = ?1", [caller_id], |r| r.get(0))?;
+        let total: i64 = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM calls c WHERE c.caller_id = ?1 AND NOT ({} OR {})",
+                Self::EXTERNAL_BOUND,
+                Self::NO_INREPO_DEF
+            ),
+            [caller_id],
+            |r| r.get(0),
+        )?;
         let resolved: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM calls c WHERE c.caller_id = ?1 AND EXISTS(
                  SELECT 1 FROM edges e JOIN nodes n ON n.id = e.dst
@@ -1186,6 +1232,17 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok(n > 0)
+    }
+
+    /// Auto-heal: delete edges whose endpoint no longer exists (e.g. compiler-grade
+    /// edges reused across a reindex that renamed/removed their nodes). Dropping is
+    /// always precision-safe; set-based SQL keeps it deterministic. Returns count.
+    pub fn drop_dangling_edges(&self) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM edges WHERE src NOT IN (SELECT id FROM nodes) OR dst NOT IN (SELECT id FROM nodes)",
+            [],
+        )?;
+        Ok(n)
     }
 
     /// Deterministic graph-invariant gate, run before every index commit.

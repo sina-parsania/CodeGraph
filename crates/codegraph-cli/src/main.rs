@@ -1,11 +1,13 @@
 //! CodeGraph CLI. `codegraph mcp` (M6) is one subcommand among many; the CLI is
 //! a real standalone package.
 
+mod audit;
 mod configcmd;
 mod index;
 mod init;
 mod query;
 mod registry;
+mod tsconfig;
 mod viz;
 mod scipcmd;
 
@@ -156,6 +158,21 @@ enum Command {
     },
     /// Most central symbols by PageRank.
     Important { #[arg(long, default_value = ".")] path: PathBuf, #[arg(long, default_value_t = 15)] limit: usize },
+    /// MEASURED per-tier precision: verify sampled tree-sitter CALLS edges
+    /// against the compiler-grade oracle merged into this graph (SCIP/IndexStore).
+    Audit {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Number of tree-sitter edges to sample.
+        #[arg(long, default_value_t = 200)]
+        sample: usize,
+        /// Sampling seed (same seed = same sample, reproducible).
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+        /// Emit the JSON stored in meta instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Deterministic Markdown report: overview, resolution quality, central symbols,
     /// hotspots + test gaps, communities, flows, API surface, dead code, health.
     Report {
@@ -377,7 +394,7 @@ fn project_path(cmd: &Command) -> Option<PathBuf> {
         | Context { path, .. } | RenameSymbol { path, .. } | DeadCode { path, .. }
         | Changes { path, .. } | Export { path, .. } | Import { path, .. } | Flows { path, .. }
         | Cypher { path, .. } | VerifyDeterminism { path, .. }
-        | Report { path, .. } | Html { path, .. } => Some(path.clone()),
+        | Report { path, .. } | Html { path, .. } | Audit { path, .. } => Some(path.clone()),
         Init { repo, .. } | Scip { path: repo } => Some(repo.clone()),
         Install { .. } | Status | Doctor | Gc { .. } | Projects | Config { .. } => None,
     }
@@ -392,7 +409,7 @@ fn needs_fresh(cmd: &Command) -> bool {
             | Important { .. } | Communities { .. } | Routes { .. } | Query { .. }
             | Implementers { .. } | Ask { .. } | Semantic { .. } | Context { .. } | RenameSymbol { .. }
             | DeadCode { .. } | Changes { .. } | Flows { .. } | Cypher { .. }
-            | Report { .. } | Html { .. }
+            | Report { .. } | Html { .. } | Audit { .. }
     )
 }
 
@@ -412,6 +429,12 @@ fn main() -> anyhow::Result<()> {
             .zip(db.as_deref())
             .map(|(r, d)| (r, d, matches!(cmd, Command::Index { .. }))),
     );
+
+    // Identity gate: never serve (or index over) a graph that belongs to a
+    // different repo or a foreign tool. One choke point for every command.
+    if let (Some(r), Some(d)) = (&root, &db) {
+        index::check_identity(r, d)?;
+    }
 
     // Freshness gate: reindex before serving so a query never returns a result
     // that disagrees with the working tree (edits / add / delete / git checkout).
@@ -839,10 +862,13 @@ fn main() -> anyhow::Result<()> {
             flows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             println!("# {} entry points, top {} flows by criticality:\n", entries.len(), limit);
             for (crit, entry, body, kind) in flows.iter().take(limit) {
-                println!("[{kind:<6}] {:<30} reach={:<4} crit={:.4}  {}:{}", entry.name, body.len(), crit, entry.file_path, entry.line_start);
+                println!(
+                    "[{kind:<6}] {:<44} reach={:<4} crit={:.4}",
+                    codegraph_core::display_label(entry), body.len(), crit
+                );
                 for id in body.iter().take(5) {
                     if let Some(x) = l.nodes.iter().find(|n| n.id == *id) {
-                        println!("    → {:<26} {}:{}", x.name, x.file_path, x.line_start);
+                        println!("    → {}", codegraph_core::display_label(x));
                     }
                 }
             }
@@ -968,9 +994,12 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Important { path, limit } => {
             let l = query::Loaded::open(&index::db_path(&path))?;
-            for (id, score) in l.lg.pagerank_top(limit) {
+            for (id, score) in l.lg.important(limit, &l.nodes) {
                 println!("{:.4}  {}", score, l.fmt(&id));
             }
+        }
+        Command::Audit { path, sample, seed, json } => {
+            audit::run(&path, sample, seed, json)?;
         }
         Command::Ask { question, path } => {
             let store = codegraph_store::Store::open(&index::db_path(&path))?;

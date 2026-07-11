@@ -1,0 +1,2 @@
+CALLS app.js:run -> util.js:doIt @ImportNarrowed
+!CALLS app.js:run -> decoy.js:doIt

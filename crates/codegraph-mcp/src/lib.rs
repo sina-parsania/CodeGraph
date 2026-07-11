@@ -285,11 +285,15 @@ impl CodeGraphServer {
         }
         let callers = store.callers_of(&args.0.name).map_err(err)?;
         let coverage = store.coverage_for_callers(&args.0.name).map_err(err)?;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+        let mut out = serde_json::json!({
             "callers": callers,
             "coverage": coverage,
             "_hints": ["blast_radius(name) before changing it", "co_changes(file) for what usually changes too"],
-        }))?]))
+        });
+        if let Some(fb) = fallback_hint(&coverage, &args.0.name) {
+            out["_fallback"] = fb;
+        }
+        Ok(CallToolResult::success(vec![Content::json(out)?]))
     }
 
     /// Build (or reuse) the call graph. Cached by the index generation (+ mtime):
@@ -363,10 +367,14 @@ impl CodeGraphServer {
             ),
             None => (Vec::new(), codegraph_core::Coverage::callers(&args.0.name, 0, 0)),
         };
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+        let mut out = serde_json::json!({
             "affected": affected,
             "coverage": coverage,
-        }))?]))
+        });
+        if let Some(fb) = fallback_hint(&coverage, &args.0.name) {
+            out["_fallback"] = fb;
+        }
+        Ok(CallToolResult::success(vec![Content::json(out)?]))
     }
 
     #[tool(description = "List the functions a given function CALLS (outgoing call edges). PREFER over reading the body to enumerate its calls. Includes a `coverage` object — `dropped` counts external/unresolved calls absent from the list.")]
@@ -382,10 +390,14 @@ impl CodeGraphServer {
             ),
             None => (Vec::new(), codegraph_core::Coverage::callees(0, 0)),
         };
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+        let mut body = serde_json::json!({
             "callees": out,
             "coverage": coverage,
-        }))?]))
+        });
+        if let Some(fb) = fallback_hint(&coverage, &args.0.name) {
+            body["_fallback"] = fb;
+        }
+        Ok(CallToolResult::success(vec![Content::json(body)?]))
     }
 
     #[tool(description = "START HERE when beginning a task/bug/feature: assembles the most relevant symbols (personalized PageRank over resolved call edges, token-budgeted) — the structural neighborhood a plain search misses. Cheaper and more complete than reading files to orient yourself.")]
@@ -444,20 +456,41 @@ impl CodeGraphServer {
         }))?]))
     }
 
-    #[tool(description = "The most central/important symbols by PageRank: a fast way to map the core of an unfamiliar codebase.")]
+    #[tool(description = "The most central/important symbols by PageRank (real code symbols only, utility-sink damped): a fast way to map the core of an unfamiliar codebase.")]
     async fn important(&self, args: Parameters<LimitArgs>) -> Result<CallToolResult, McpError> {
         let g = self.load_graph()?;
-        let top = g.lg.pagerank_top(args.0.limit.unwrap_or(15));
+        let top: Vec<serde_json::Value> = g
+            .lg
+            .important(args.0.limit.unwrap_or(15), &g.nodes)
+            .into_iter()
+            .map(|(id, score)| match g.node_by_id(&id) {
+                Some(n) => serde_json::json!({
+                    "label": codegraph_core::display_label(n), "id": id, "kind": n.label, "score": score,
+                }),
+                None => serde_json::json!({ "id": id, "score": score }),
+            })
+            .collect();
         Ok(CallToolResult::success(vec![Content::json(top)?]))
     }
 
-    #[tool(description = "Graph size (node/edge counts): a quick check that the repository is indexed and how big it is.")]
+    #[tool(description = "Graph size + trust card: node count and, when `codegraph audit` has run, the MEASURED per-tier precision of this repo's resolved edges vs a compiler oracle.")]
     async fn stats(&self) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
-        let n = store
-            .node_count()
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({ "nodes": n }))?]))
+        let err = |e: codegraph_store::StoreError| McpError::internal_error(e.to_string(), None);
+        let n = store.node_count().map_err(err)?;
+        let mut out = serde_json::json!({ "nodes": n });
+        if let Ok(Some(raw)) = store.meta_get("audit_result") {
+            if let Ok(audit) = serde_json::from_str::<serde_json::Value>(&raw) {
+                let current = codegraph_store::generation(&self.db_path);
+                let audited = audit.get("generation").and_then(|g| g.as_u64()).unwrap_or(0);
+                out["measured_precision"] = audit;
+                if audited < current {
+                    out["measured_precision_note"] =
+                        serde_json::json!("audit predates the current index generation — re-run `codegraph audit` to refresh");
+                }
+            }
+        }
+        Ok(CallToolResult::success(vec![Content::json(out)?]))
     }
 
     #[tool(description = "Dead-code CANDIDATES: functions/methods that no call site in the repo even names (entry points, route handlers, and test files excluded). Static view — dynamic dispatch/exports/reflection are invisible, so treat as candidates to verify, not verdicts.")]
@@ -561,7 +594,8 @@ impl CodeGraphServer {
                     .sum::<f64>()
                     * (1.0 + body.len() as f64).ln();
                 Some(serde_json::json!({
-                    "entry": n.name, "kind": kind, "file": n.file_path, "line": n.line_start,
+                    "entry": n.name, "label": codegraph_core::display_label(n), "id": n.id,
+                    "kind": kind, "file": n.file_path, "line": n.line_start,
                     "reach": body.len(), "criticality": crit,
                 }))
             })
@@ -614,6 +648,22 @@ fn semantic_blocking(
         .collect()
 }
 
+/// Actionable "known unknowns" hint: when a precise answer may be incomplete,
+/// hand the agent a ready-made lexical pattern so it verifies instead of
+/// concluding absence. Evidence-gated — only fires when coverage says so.
+fn fallback_hint(coverage: &codegraph_core::Coverage, name: &str) -> Option<serde_json::Value> {
+    if !coverage.may_be_incomplete {
+        return None;
+    }
+    Some(serde_json::json!({
+        "why": format!(
+            "{} in-repo call site(s) naming '{name}' did not resolve — the precise list is a LOWER BOUND",
+            coverage.dropped
+        ),
+        "run": format!("grep -rn \"{name}\\s*(\" --include=\"*.ts\" --include=\"*.tsx\" --include=\"*.js\" --include=\"*.py\" --include=\"*.swift\" --include=\"*.kt\" --include=\"*.java\" --include=\"*.go\" --include=\"*.rb\" --include=\"*.cs\" --include=\"*.rs\""),
+    }))
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for CodeGraphServer {
     fn get_info(&self) -> ServerInfo {
@@ -621,7 +671,8 @@ impl ServerHandler for CodeGraphServer {
         info.instructions = Some(
             "CodeGraph = a resolved code+docs knowledge graph for THIS repo (auto-fresh). ROUTE BY INTENT — do not send everything to `search`: \
 know the identifier → search · conceptual/'how does X work'/docs+wiki → semantic_search · who-calls → callers (ambiguous ⇒ pinnable candidates, re-call with id) · what-does-it-call → callees · what-breaks → blast_radius · path A→B → trace_path · starting a task → context · diff review/risk/test-gaps → changes · unused code → dead_code · co-edited files → co_changes · API surface → routes · interface impls → implementers · repo map → important. \
-COVERAGE: callers/callees/blast_radius are precise but NOT exhaustive — when `coverage.may_be_incomplete` is true treat the list as a lower bound and corroborate with text search. Docs/wiki pages are indexed as Document nodes — query them here instead of reading files."
+NAVIGATION PROTOCOL (evidence classes, not made-up confidence numbers): every edge names WHY it exists. Compiler-grade tiers (justification `Scip` / `IndexStore`) are extracted by a compiler — navigate them freely. Tree-sitter tiers (`SelfThisMember`, `FieldTypeMember`, `LocalVarType`, `ImportNarrowed`, `SameFileUnique`, `GlobalUnique`) are unique-or-drop: never guessed, but not exhaustive. `stats` returns this repo's MEASURED per-tier precision when `codegraph audit` has run — quote it instead of assuming. \
+KNOWN UNKNOWNS: the graph is precise, NOT exhaustive. A missing edge is not evidence of absence. When `coverage.may_be_incomplete` is true or a result is empty, the response carries a `_fallback` lexical pattern — run it (grep/text search) before concluding nobody calls X. Never invent connections the graph did not return. Docs/wiki pages are indexed as Document nodes — query them here instead of reading files."
                 .to_string(),
         );
         info
