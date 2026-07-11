@@ -531,6 +531,14 @@ fn main() -> anyhow::Result<()> {
             for n in hits {
                 println!("{:<24} {:?}  {}:{}", n.name, n.label, n.file_path, n.line_start);
             }
+            // variables/properties aren't nodes — answer declarations directly
+            let fields = store.field_matches(&term)?;
+            if !fields.is_empty() {
+                println!("field/property declarations:");
+                for (f, ty, file) in fields.iter().take(10) {
+                    println!("  {f}: {ty}  {file}");
+                }
+            }
         }
         Command::Implementers { name, path } => {
             let store = codegraph_store::Store::open(&index::db_path(&path))?;

@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.32.0 — every name answers: types, variables, doc keys, files
+
+Driven by a 300-check stress harness over a real polyglot monorepo (functions,
+classes, files, folders, variables, localization keys × swift/ts/kotlin/python)
+— every failure class it found is fixed:
+
+- **Type-usage layer**: `callers` on a class/interface (NestJS DI services,
+  python DTOs) now surfaces WHERE the type is used (DI fields, typed locals,
+  imports incl. python dotted modules, subtypes) — previously answered
+  "no call sites reference this name ✓" for services injected everywhere.
+- **Document content is searchable** (schema v6): FTS gains a `doc_text`
+  column — Swift `.strings` localization keys, wiki/docs text. bm25 column
+  weights keep definitions above docs. Existing graphs migrate on open.
+- **Search answers dotted/hyphenated names**: AND-of-prefixes fallback before
+  OR, plus a verbatim re-rank (exact name / filename stem / doc containing the
+  raw query) — `feature-discovery.controller` and
+  `gem.preparation.failed_to_load` now hit their targets first.
+- **Variables answer**: `search` returns field/property declarations
+  (name: Type file) from the fields/locals tables — variables aren't graph
+  nodes, but "where is X declared" deserves a real answer.
+- semantic-index: chunked embedding (flat memory, progress, resumable) and a
+  12× embedder memory fix (16.8 GB → 1.4 GB peak, 4× faster).
+- MCP: exhaustive-listing affordance advertised (graph_query high-LIMIT filter).
+
 ## 1.31.1 — release-pipeline fixes
 
 - macOS arm64 binary carried ONLY the CI runner's Xcode rpath and crashed with

@@ -5,8 +5,8 @@ pub mod cypher;
 use std::path::Path;
 
 use codegraph_core::{
-    Coverage, Edge, Hyperedge, HyperedgeMember, InheritKind, Metadata, Node, RawCall, RawField, RawImport,
-    RawInherit, RawLocal,
+    Coverage, Edge, Hyperedge, HyperedgeMember, InheritKind, Metadata, Node, NodeLabel, RawCall, RawField,
+    RawImport, RawInherit, RawLocal,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
@@ -24,7 +24,7 @@ pub enum StoreError {
 
 type Result<T> = std::result::Result<T, StoreError>;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Register the sqlite-vec extension for EVERY connection this process opens
 /// (auto_extension is process-global). Powers the `vec_nodes` KNN virtual table.
@@ -51,20 +51,20 @@ fn register_vec_extension() {
 /// (community/pagerank/betweenness/data) don't churn the FTS index.
 const FTS_DDL: &str = "
     CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
-      name, parts, label, language, content='nodes', content_rowid='rowid');
+      name, parts, doc_text, label, language, content='nodes', content_rowid='rowid');
     CREATE TRIGGER IF NOT EXISTS nodes_fts_ai AFTER INSERT ON nodes BEGIN
-      INSERT INTO nodes_fts(rowid, name, parts, label, language)
-      VALUES (new.rowid, new.name, new.parts, new.label, new.language);
+      INSERT INTO nodes_fts(rowid, name, parts, doc_text, label, language)
+      VALUES (new.rowid, new.name, new.parts, new.doc_text, new.label, new.language);
     END;
     CREATE TRIGGER IF NOT EXISTS nodes_fts_ad AFTER DELETE ON nodes BEGIN
-      INSERT INTO nodes_fts(nodes_fts, rowid, name, parts, label, language)
-      VALUES ('delete', old.rowid, old.name, old.parts, old.label, old.language);
+      INSERT INTO nodes_fts(nodes_fts, rowid, name, parts, doc_text, label, language)
+      VALUES ('delete', old.rowid, old.name, old.parts, old.doc_text, old.label, old.language);
     END;
-    CREATE TRIGGER IF NOT EXISTS nodes_fts_au AFTER UPDATE OF name, parts, label, language ON nodes BEGIN
-      INSERT INTO nodes_fts(nodes_fts, rowid, name, parts, label, language)
-      VALUES ('delete', old.rowid, old.name, old.parts, old.label, old.language);
-      INSERT INTO nodes_fts(rowid, name, parts, label, language)
-      VALUES (new.rowid, new.name, new.parts, new.label, new.language);
+    CREATE TRIGGER IF NOT EXISTS nodes_fts_au AFTER UPDATE OF name, parts, doc_text, label, language ON nodes BEGIN
+      INSERT INTO nodes_fts(nodes_fts, rowid, name, parts, doc_text, label, language)
+      VALUES ('delete', old.rowid, old.name, old.parts, old.doc_text, old.label, old.language);
+      INSERT INTO nodes_fts(rowid, name, parts, doc_text, label, language)
+      VALUES (new.rowid, new.name, new.parts, new.doc_text, new.label, new.language);
     END;";
 
 /// Split an identifier into lowercase subwords: camelCase, PascalCase, snake_case,
@@ -193,7 +193,7 @@ impl Store {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS nodes(
-               id TEXT PRIMARY KEY, name TEXT, parts TEXT, label TEXT, language TEXT, file_path TEXT,
+               id TEXT PRIMARY KEY, name TEXT, parts TEXT, doc_text TEXT, label TEXT, language TEXT, file_path TEXT,
                line_start INTEGER, line_end INTEGER, community INTEGER, pagerank REAL,
                betweenness REAL, data TEXT NOT NULL);
              CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_path);
@@ -254,6 +254,7 @@ impl Store {
             "ALTER TABLE calls ADD COLUMN receiver TEXT",
             "ALTER TABLE calls ADD COLUMN enclosing_class TEXT",
             "ALTER TABLE nodes ADD COLUMN parts TEXT",
+            "ALTER TABLE nodes ADD COLUMN doc_text TEXT",
         ] {
             let _ = self.conn.execute(stmt, []);
         }
@@ -281,8 +282,14 @@ impl Store {
                      DROP TRIGGER IF EXISTS nodes_fts_au;
                      DROP TABLE IF EXISTS nodes_fts;",
                 )?;
-                // Populate `parts` BEFORE the triggers exist (no pointless FTS churn).
+                // Populate `parts` + `doc_text` BEFORE the triggers exist (no FTS churn).
+                // v6: Document CONTENT becomes searchable (localization keys,
+                // wiki text) — capped to bound the index.
                 self.conn.execute("UPDATE nodes SET parts = cg_subwords(name)", [])?;
+                self.conn.execute(
+                    "UPDATE nodes SET doc_text = substr(json_extract(data,'$.metadata.text'),1,8000) WHERE label = 'Document'",
+                    [],
+                )?;
                 self.conn.execute_batch(FTS_DDL)?;
                 self.rebuild_fts()?;
                 self.migrate_legacy_vectors()?;
@@ -360,9 +367,9 @@ impl Store {
         let data = serde_json::to_string(n)?;
         let label = enum_str(&n.label)?;
         self.conn.execute(
-            "INSERT INTO nodes(id,name,parts,label,language,file_path,line_start,line_end,community,pagerank,betweenness,data)
-             VALUES(?1,?2,cg_subwords(?2),?3,?4,?5,?6,?7,?8,?9,?10,?11)
-             ON CONFLICT(id) DO UPDATE SET name=?2,parts=cg_subwords(?2),label=?3,language=?4,file_path=?5,line_start=?6,line_end=?7,community=?8,pagerank=?9,betweenness=?10,data=?11",
+            "INSERT INTO nodes(id,name,parts,doc_text,label,language,file_path,line_start,line_end,community,pagerank,betweenness,data)
+             VALUES(?1,?2,cg_subwords(?2),substr(json_extract(?11,'$.metadata.text'),1,8000),?3,?4,?5,?6,?7,?8,?9,?10,?11)
+             ON CONFLICT(id) DO UPDATE SET name=?2,parts=cg_subwords(?2),doc_text=substr(json_extract(?11,'$.metadata.text'),1,8000),label=?3,language=?4,file_path=?5,line_start=?6,line_end=?7,community=?8,pagerank=?9,betweenness=?10,data=?11",
             params![n.id, n.name, label, n.language, n.file_path, n.line_start, n.line_end, n.community, n.pagerank, n.betweenness, data],
         )?;
         Ok(())
@@ -664,7 +671,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT n.data FROM nodes_fts f JOIN nodes n ON n.rowid = f.rowid
              WHERE nodes_fts MATCH ?1
-             ORDER BY bm25(nodes_fts)
+             ORDER BY bm25(nodes_fts, 10.0, 6.0, 1.0, 0.0, 0.0)
                - CASE n.label
                    WHEN 'Function' THEN 6.0 WHEN 'Method' THEN 6.0
                    WHEN 'Class' THEN 5.0 WHEN 'Interface' THEN 5.0
@@ -683,34 +690,74 @@ impl Store {
         Ok(out)
     }
 
-    /// Forgiving search: exact FTS first (precise), and if that's empty fall back
-    /// to an OR-of-prefixes over the query's identifier tokens — so a camelCase
-    /// fragment like `OrderCheckout` finds `OrderCheckoutSession` (one FTS token).
-    /// Multiple words are OR'd (multi-term search). FTS special chars are stripped.
+    /// Forgiving search: exact FTS first (precise), then AND-of-prefixes over
+    /// the query's identifier subwords (all terms must hit — the right answer
+    /// for dotted/hyphenated names like `gem.preparation.failed_to_load` or
+    /// `feature-discovery.controller`), then OR-of-prefixes as the loosest
+    /// net. A final RUST re-rank pushes verbatim matches to the top: exact
+    /// name, filename stem, or a Document whose text contains the raw query.
     pub fn search_smart(&self, raw: &str, limit: usize) -> Result<Vec<Node>> {
-        let exact = self.search_fts(raw, limit)?;
-        if !exact.is_empty() {
-            return Ok(exact);
+        let over = limit.saturating_mul(3).max(24);
+        let mut hits = self.search_fts(raw, over).unwrap_or_default();
+        if hits.is_empty() {
+            let mut seen = std::collections::HashSet::new();
+            let terms: Vec<String> = raw
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .flat_map(|t| {
+                    let sw = subwords(t);
+                    if sw.is_empty() { vec![t.to_string()] } else { sw.split(' ').map(str::to_string).collect() }
+                })
+                .filter(|t| t.len() > 1)
+                .filter(|t| seen.insert(t.to_lowercase()))
+                .map(|t| format!("{t}*"))
+                .collect();
+            if terms.is_empty() {
+                return Ok(hits);
+            }
+            hits = self.search_fts(&terms.join(" AND "), over).unwrap_or_default();
+            if hits.is_empty() && terms.len() > 1 {
+                hits = self.search_fts(&terms.join(" OR "), over).unwrap_or_default();
+            }
         }
-        // Fallback: split the query into identifier subwords (camel/snake aware —
-        // `OrderCheckout` → order checkout) and OR-prefix them; the FTS `parts`
-        // column indexes node names the same way, so mid-identifier words match.
-        let mut seen = std::collections::HashSet::new();
-        let fts = raw
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .flat_map(|t| {
-                let sw = subwords(t);
-                if sw.is_empty() { vec![t.to_string()] } else { sw.split(' ').map(str::to_string).collect() }
-            })
-            .filter(|t| t.len() > 1)
-            .filter(|t| seen.insert(t.to_lowercase()))
-            .map(|t| format!("{t}*"))
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        if fts.is_empty() {
-            return Ok(exact);
-        }
-        self.search_fts(&fts, limit)
+        // Verbatim re-rank (stable): FTS relevance decided the pool; exactness
+        // decides the podium.
+        let q = raw.trim().to_lowercase();
+        let bonus = |n: &Node| -> i32 {
+            let name = n.name.to_lowercase();
+            let file_name = n.file_path.rsplit('/').next().unwrap_or("").to_lowercase();
+            let stem = file_name.rsplit_once('.').map(|(s, _)| s).unwrap_or(&file_name);
+            if name == q {
+                return 3;
+            }
+            if stem == q || file_name == q {
+                return 2;
+            }
+            if matches!(n.label, NodeLabel::Document)
+                && n.metadata.get("text").and_then(|v| v.as_str()).is_some_and(|t| t.to_lowercase().contains(&q))
+            {
+                return 1;
+            }
+            0
+        };
+        let mut ranked: Vec<(i32, usize, Node)> =
+            hits.into_iter().enumerate().map(|(i, n)| (bonus(&n), i, n)).collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        Ok(ranked.into_iter().take(limit).map(|(_, _, n)| n).collect())
+    }
+
+    /// Field/property declarations matching a name — variables aren't graph
+    /// nodes (by design: noise), but "where is variable X declared" deserves a
+    /// real answer: (field, declared type, file).
+    pub fn field_matches(&self, name: &str) -> Result<Vec<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT field_name, type_name, file_path FROM fields WHERE field_name = ?1
+             UNION SELECT var_name, type_name, file_path FROM locals WHERE var_name = ?1 AND type_name <> ''
+             LIMIT 25",
+        )?;
+        let rows = stmt.query_map([name], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Regex search over symbol names (anywhere in the name, not just a prefix) —
@@ -833,7 +880,7 @@ impl Store {
     /// worst kind of miss (confident absence). Returns (file, evidence) pairs.
     pub fn type_usages(&self, name: &str) -> Result<Vec<(String, String)>> {
         let mut out: Vec<(String, String)> = Vec::new();
-        let mut push_all = |sql: &str, evidence: &str, out: &mut Vec<(String, String)>| -> Result<()> {
+        let push_all = |sql: &str, evidence: &str, out: &mut Vec<(String, String)>| -> Result<()> {
             let mut stmt = self.conn.prepare(sql)?;
             let rows = stmt.query_map([name], |r| r.get::<_, String>(0))?;
             for r in rows {
@@ -843,8 +890,13 @@ impl Store {
         };
         push_all("SELECT DISTINCT file_path FROM fields WHERE type_name = ?1", "field/DI type", &mut out)?;
         push_all("SELECT DISTINCT file_path FROM locals WHERE type_name = ?1", "typed local", &mut out)?;
+        // in-repo imports only — python modules are dotted (not './'-prefixed),
+        // so exclude ONLY the TS/JS external-package shape, not python
         push_all(
-            "SELECT DISTINCT file_path FROM imports WHERE name = ?1 AND substr(module,1,1) IN ('.','/')",
+            "SELECT DISTINCT file_path FROM imports WHERE name = ?1 AND NOT (
+                substr(module,1,1) NOT IN ('.','/')
+                AND (file_path LIKE '%.ts' OR file_path LIKE '%.tsx' OR file_path LIKE '%.js'
+                     OR file_path LIKE '%.jsx' OR file_path LIKE '%.mjs'))",
             "import",
             &mut out,
         )?;
@@ -1526,9 +1578,9 @@ impl Store {
 
     pub fn bulk_upsert_nodes(&self, nodes: &[Node]) -> Result<()> {
         let mut stmt = self.conn.prepare(
-            "INSERT INTO nodes(id,name,parts,label,language,file_path,line_start,line_end,community,pagerank,betweenness,data)
-             VALUES(?1,?2,cg_subwords(?2),?3,?4,?5,?6,?7,?8,?9,?10,?11)
-             ON CONFLICT(id) DO UPDATE SET name=?2,parts=cg_subwords(?2),label=?3,language=?4,file_path=?5,line_start=?6,line_end=?7,community=?8,pagerank=?9,betweenness=?10,data=?11",
+            "INSERT INTO nodes(id,name,parts,doc_text,label,language,file_path,line_start,line_end,community,pagerank,betweenness,data)
+             VALUES(?1,?2,cg_subwords(?2),substr(json_extract(?11,'$.metadata.text'),1,8000),?3,?4,?5,?6,?7,?8,?9,?10,?11)
+             ON CONFLICT(id) DO UPDATE SET name=?2,parts=cg_subwords(?2),doc_text=substr(json_extract(?11,'$.metadata.text'),1,8000),label=?3,language=?4,file_path=?5,line_start=?6,line_end=?7,community=?8,pagerank=?9,betweenness=?10,data=?11",
         )?;
         for n in nodes {
             let data = serde_json::to_string(n)?;

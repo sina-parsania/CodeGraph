@@ -243,10 +243,20 @@ impl CodeGraphServer {
             store.search_smart(&args.0.query, limit)
         }
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+        // variables/properties aren't nodes — surface their declarations too
+        let fields = store.field_matches(&args.0.query).unwrap_or_default();
+        let mut out = serde_json::json!({
             "hits": hits,
             "_hints": ["get_node(id) for full details", "callers(name) to trace usage", "context(query) to assemble task context"],
-        }))?]))
+        });
+        if !fields.is_empty() {
+            let rows: Vec<serde_json::Value> = fields
+                .iter()
+                .map(|(f, ty, file)| serde_json::json!({"field": f, "type": ty, "file": file}))
+                .collect();
+            out["field_declarations"] = serde_json::json!(rows);
+        }
+        Ok(CallToolResult::success(vec![Content::json(out)?]))
     }
 
     #[tool(description = "Get full details of one symbol by its fully-qualified id (from a prior search/callers result): kind, file:line, language, metadata. Pass snippet=true to ALSO get its exact source code — cheaper than reading the whole file.")]
