@@ -1,0 +1,2 @@
+CALLS A.swift:Engine.start -> A.swift:Engine.ignite @SelfThisMember
+CALLS A.swift:Car.drive -> A.swift:Engine.start @FieldTypeMember

@@ -9,8 +9,9 @@ pub use config::{
 };
 pub use llm::{LlmClient, VisionLlmClient};
 pub use types::{
-    Confidence, Coverage, Edge, EdgeRelation, Hyperedge, HyperedgeMember, HyperedgeRelation, InheritKind, Metadata,
-    Node, NodeLabel, QualifiedName, RawCall, RawField, RawImport, RawInherit, RawLocal, Receiver, ResolutionTier,
+    display_label, Confidence, Coverage, Edge, EdgeRelation, Hyperedge, HyperedgeMember, HyperedgeRelation,
+    InheritKind, Metadata, Node, NodeLabel, QualifiedName, RawCall, RawField, RawImport, RawInherit, RawLocal,
+    Receiver, ResolutionTier,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -42,6 +43,53 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     acc
 }
 
+/// Is `path` a test file? Token-based, NOT substring-based: `latest_prices.rs`,
+/// `contest.py`, `attestation.go` are NOT tests; `foo_test.go`, `FooTests.swift`,
+/// `__tests__/x.ts`, `spec/y.rb` are. Splits path segments on `/ _ - .` and
+/// camelCase boundaries, then matches whole tokens only. Shared by the graph
+/// builder (TESTS edges) and the store (dead-code / test-coverage queries) so
+/// the two views never disagree.
+pub fn is_test_path(path: &str) -> bool {
+    let mut token = String::new();
+    let mut prev_lower = false;
+    let mut upper_run = 0usize; // consecutive uppercase chars in the current token
+    let check = |t: &mut String| {
+        let hit = matches!(t.as_str(), "test" | "tests" | "spec" | "specs" | "testing");
+        t.clear();
+        hit
+    };
+    for c in path.chars() {
+        if c.is_alphanumeric() {
+            if c.is_uppercase() && prev_lower && !token.is_empty() && check(&mut token) {
+                return true;
+            }
+            // acronym→word boundary (…UIT|ests): an upper followed by a lower
+            // after an uppercase RUN starts a new word AT that upper — split
+            // "UITests" into "ui" + "tests" instead of swallowing the T.
+            if c.is_lowercase() && upper_run >= 2 {
+                let last = token.pop(); // the upper that belongs to the new word
+                if !token.is_empty() && check(&mut token) {
+                    return true;
+                }
+                token.clear();
+                if let Some(l) = last {
+                    token.push(l);
+                }
+            }
+            upper_run = if c.is_uppercase() { upper_run + 1 } else { 0 };
+            prev_lower = c.is_lowercase();
+            token.push(c.to_ascii_lowercase());
+        } else {
+            prev_lower = false;
+            upper_run = 0;
+            if !token.is_empty() && check(&mut token) {
+                return true;
+            }
+        }
+    }
+    !token.is_empty() && check(&mut token)
+}
+
 /// Return an L2-normalized copy (unit length) so dot == cosine. Zero vectors pass through.
 pub fn normalize(v: &[f32]) -> Vec<f32> {
     let mag = v.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -49,6 +97,28 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
         v.to_vec()
     } else {
         v.iter().map(|x| x / mag).collect()
+    }
+}
+
+#[cfg(test)]
+mod test_path_tests {
+    use super::is_test_path;
+    #[test]
+    fn tokens_not_substrings() {
+        for p in [
+            "src/foo_test.go", "Tests/AuthTests.swift", "src/__tests__/x.ts",
+            "spec/y_spec.rb", "tests/test_foo.py", "src/user.spec.ts", "FooTest.java",
+            // acronym-adjacent: the T of Tests must not be swallowed by the run
+            "LoginUITests.swift", "APITests.java", "HTTPTests.kt",
+        ] {
+            assert!(is_test_path(p), "{p} IS a test path");
+        }
+        for p in [
+            "src/latest_prices.rs", "src/contest.py", "pkg/attestation.go",
+            "src/spectrum.ts", "app/protester.rb", "src/inspection.java",
+        ] {
+            assert!(!is_test_path(p), "{p} is NOT a test path");
+        }
     }
 }
 

@@ -1,0 +1,3 @@
+CALLS b.py:consume -> pkg/a.py:helper @ImportNarrowed
+!CALLS b.py:consume -> decoy.py:helper
+CALLS pkg/a.py:Worker.go -> pkg/a.py:Worker.step @SelfThisMember

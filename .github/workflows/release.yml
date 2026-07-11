@@ -1,7 +1,7 @@
 name: release
 on:
   push:
-    tags: ["v*"]
+    tags: ['v*']
 permissions:
   contents: write
 jobs:
@@ -10,32 +10,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, target: aarch64-apple-darwin }
-          - { os: macos-13, target: x86_64-apple-darwin }
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: macos-14,     target: aarch64-apple-darwin,       name: codegraph-macos-arm64,  features: "indexstore,local-embed,local-llm" }
+          # macos-13 (Intel) runners are retired — cross-compile x64 from the arm64 runner.
+          - { os: macos-14,     target: x86_64-apple-darwin,        name: codegraph-macos-x64,    features: "local-embed,local-llm" }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu,   name: codegraph-linux-x64,    features: "local-embed,local-llm" }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, name: codegraph-linux-arm64, features: "local-embed,local-llm" }
+          - { os: windows-2022, target: x86_64-pc-windows-msvc,     name: codegraph-windows-x64.exe, features: "local-embed,local-llm" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - name: Linux arm64 cross linker
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-      - run: cargo build --release --target ${{ matrix.target }} -p codegraph-cli
-      - name: Package
+        with: { targets: "${{ matrix.target }}" }
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release -p codegraph-cli --target ${{ matrix.target }} --features "${{ matrix.features }}"
+      - name: Rename
         shell: bash
-        run: |
-          name="codegraph-${{ matrix.target }}"
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/codegraph.exe" "${name}.exe"
-          else
-            cp "target/${{ matrix.target }}/release/codegraph" "${name}"
-          fi
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: codegraph-${{ matrix.target }}*
+        run: cp target/${{ matrix.target }}/release/codegraph${{ contains(matrix.os, 'windows') && '.exe' || '' }} ${{ matrix.name }}
+      - name: Upload to release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        shell: bash
+        run: gh release upload "${GITHUB_REF_NAME}" "${{ matrix.name }}" --clobber

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 codegraph-core.workspace = true
+serde_json.workspace = true
 scip = "0.8.1"
 protobuf = "=3.7.2"
 anyhow.workspace = true

@@ -71,21 +71,27 @@ independent mechanisms guarantee this:
 - **Central cache** (`~/.cache/codegraph/`, keyed by project path) so repos stay pristine and a
   graph is never committed/shared (team-safety, above); legacy in-repo `.codegraph/` is auto-migrated.
 
-## Roadmap (research-backed, deferred with concrete triggers)
+## Shipped (was the roadmap)
 
-- **LoadedGraph cache in the MCP server** — the headline perf win: memoize the built petgraph
-  per (db_path, graph.db generation), invalidate on reindex, LRU-bound. Skips the all_nodes +
-  all_edges + rebuild on every traversal call in a session.
-- **Warm connection per project DB** in the MCP session (cache prepared statements) instead of
-  `Store::open` per call.
-- **Vector cheap wins**: store L2-normalized vectors (cosine → a single dot product), batch-fetch
-  hits via `WHERE id IN (...)` instead of N+1. **Trigger for `sqlite-vec` (ANN)**: vector count
-  past ~100k (when "any input" embeddings grow) — single C file, preserves the one-file model.
-  Reject `sqlite-vss` and an mmap sidecar.
-- **Incremental per-file FTS** (delete-by-file + reinsert) instead of full rebuild each reindex.
+- **LoadedGraph cache in the MCP server** — the built petgraph is memoized per index generation
+  (+ mtime fallback), invalidated on reindex; a burst of traversals in one turn rebuilds once.
+  The snapshot also carries `by_id`/`by_name` maps (O(1) lookups) and the vectors.
+- **Warm connection per project DB** — `PooledStore`, a single-connection pool keyed by the DB
+  file's inode, so a gc'd-and-recreated file is never served stale. Reused across all tools.
+- **`sqlite-vec` (indexed KNN)** — vectors moved out of the blob table into a `vec0` virtual
+  table (`vec_nodes`); stored L2-normalized so the reported score is still cosine. Single C file
+  built via `cc` (no cmake) — the one-binary model holds. `sqlite-vss`/mmap sidecar rejected.
+- **External-content FTS5** — `nodes_fts` synced by triggers on `nodes`; `parts` is a real
+  column computed by `cg_subwords` at write time. Incremental (per-changed-file) either way.
+- **Typed-column graph loaders** — `graph_nodes`/`graph_edges` read structure from columns
+  (no per-row JSON parse), Document chunk text stripped; analytics persisted via `json_set`
+  (SQLite edits the JSON in C) instead of re-serializing every node in Rust.
+
+## Roadmap (still deferred, with triggers)
+
 - **MCP project→db registry** + read-only `ATTACH` for opt-in cross-project queries.
-- **JSON/typed-column de-duplication** + external-content FTS5 — worth doing before "any input"
-  multiplies node counts, but it touches every read path: a follow-up, not a cheap-now change.
+- **`sqlite-vec` ANN quantization / larger `k` tuning** — only once "any input" embeddings push
+  vector counts far past today's indexed-KNN comfort zone.
 
 ## Known boundaries (honest)
 

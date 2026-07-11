@@ -1,18 +1,20 @@
 //! CodeGraph CLI. `codegraph mcp` (M6) is one subcommand among many; the CLI is
 //! a real standalone package.
 
+mod audit;
 mod configcmd;
-mod cypher;
 mod index;
 mod init;
 mod query;
 mod registry;
+mod tsconfig;
+mod viz;
 mod scipcmd;
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use codegraph_core::{Config, LlmClient};
+use codegraph_core::Config;
 
 #[derive(Parser)]
 #[command(name = "codegraph", version, about = "Project-agnostic code-intelligence graph + MCP server")]
@@ -77,6 +79,14 @@ enum Command {
         /// recently built DerivedData. Needs `--features indexstore` (macOS + Xcode).
         #[arg(long)]
         indexstore: bool,
+        /// ALSO emit edges for unresolved calls with 2-5 same-name candidates,
+        /// tagged Confidence::Ambiguous (honest opt-in recall; sticky until
+        /// --no-include-ambiguous). Coverage and the default graph stay precise.
+        #[arg(long)]
+        include_ambiguous: bool,
+        /// Turn the sticky ambiguous tier back off.
+        #[arg(long, conflicts_with = "include_ambiguous")]
+        no_include_ambiguous: bool,
     },
     /// Full-text search the indexed graph for a term.
     Search {
@@ -148,6 +158,45 @@ enum Command {
     },
     /// Most central symbols by PageRank.
     Important { #[arg(long, default_value = ".")] path: PathBuf, #[arg(long, default_value_t = 15)] limit: usize },
+    /// MEASURED per-tier precision: verify sampled tree-sitter CALLS edges
+    /// against the compiler-grade oracle merged into this graph (SCIP/IndexStore).
+    Audit {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Number of tree-sitter edges to sample.
+        #[arg(long, default_value_t = 200)]
+        sample: usize,
+        /// Sampling seed (same seed = same sample, reproducible).
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+        /// Emit the JSON stored in meta instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Deterministic Markdown report: overview, resolution quality, central symbols,
+    /// hotspots + test gaps, communities, flows, API surface, dead code, health.
+    Report {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Write to a file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Self-contained interactive HTML visualization of the graph (force layout,
+    /// search, communities, table view). No external requests — works offline.
+    Html {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Output file (default: graph.html next to the cached graph.db, so the repo stays pristine).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Max symbols shown (top by PageRank).
+        #[arg(long, default_value_t = 300)]
+        limit: usize,
+        /// Open in the default browser after writing.
+        #[arg(long)]
+        open: bool,
+    },
     /// Select the most relevant symbols for a query, ranked by personalized
     /// PageRank over the RESOLVED graph, within a token budget (for LLM context).
     Context {
@@ -186,6 +235,12 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
+    /// Prove the determinism guarantee: index the repo twice into fresh temp
+    /// caches and compare canonical graph hashes (must be byte-identical).
+    VerifyDeterminism {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
     /// Export the graph as a shareable zstd artifact (.codegraph/graph.db.zst).
     /// Deterministic graphs make this safe to commit: teammates `import` and skip
     /// the full reindex (incremental heals any drift).
@@ -216,7 +271,8 @@ enum Command {
     },
     /// Find types that implement or extend a given interface/class.
     Implementers { name: String, #[arg(long, default_value = ".")] path: PathBuf },
-    /// Find functions that call a given function name (reverse CALLS edges).
+    /// Find functions that call a given function name (reverse CALLS edges),
+    /// plus the parser-verified unresolved call-site files (textual layer).
     /// Ambiguous name (several definitions) → lists pinnable candidates instead
     /// of silently merging their callers.
     Callers {
@@ -226,6 +282,10 @@ enum Command {
         /// Pin ONE definition by its node id (from the candidate list).
         #[arg(long)]
         id: Option<String>,
+        /// Minimal token mode: print ONLY the layered file list (resolved caller
+        /// files, then `~`-prefixed unresolved call-site files).
+        #[arg(long)]
+        files: bool,
     },
     /// Ask a natural-language question; answered by a local LLM over the graph (if one is running).
     Ask {
@@ -307,35 +367,6 @@ enum ConfigAction {
 /// `(byte_start, byte_end, line)` to rewrite).
 type RenameFilePlan = (String, String, Vec<(usize, usize, u32)>);
 
-/// Entry points for flow detection: HTTP route handlers (resolved by name within
-/// the route's file), `main`, and zero-fan-in functions that call 3+ others
-/// (likely tasks/jobs). Each tagged with its kind.
-fn detect_entry_points(nodes: &[codegraph_core::Node]) -> Vec<(&codegraph_core::Node, &'static str)> {
-    use codegraph_core::NodeLabel::*;
-    let mut out: Vec<(&codegraph_core::Node, &'static str)> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for r in nodes.iter().filter(|n| n.label == Route) {
-        if let Some(h) = r.metadata.get("handler").and_then(|v| v.as_str()) {
-            if let Some(f) = nodes.iter().find(|n| {
-                n.name == h && n.file_path == r.file_path && matches!(n.label, Function | Method)
-            }) {
-                if seen.insert(&f.id) {
-                    out.push((f, "route"));
-                }
-            }
-        }
-    }
-    for f in nodes.iter().filter(|n| matches!(n.label, Function | Method)) {
-        let fan_in = f.metadata.get("fan_in").and_then(|v| v.as_u64()).unwrap_or(0);
-        let fan_out = f.metadata.get("fan_out").and_then(|v| v.as_u64()).unwrap_or(0);
-        let is_main = f.name == "main";
-        if (is_main || (fan_in == 0 && fan_out >= 3)) && seen.insert(&f.id) {
-            out.push((f, if is_main { "main" } else { "task" }));
-        }
-    }
-    out
-}
-
 /// Print a one-line coverage signal under a call-graph result so the agent (or
 /// human) knows when the precise list may be incomplete and should grep instead.
 fn print_coverage(c: &codegraph_core::Coverage) {
@@ -367,7 +398,8 @@ fn project_path(cmd: &Command) -> Option<PathBuf> {
         | SemanticIndex { path, .. } | Semantic { path, .. } | Ingest { path, .. } | Mcp { path, .. }
         | Context { path, .. } | RenameSymbol { path, .. } | DeadCode { path, .. }
         | Changes { path, .. } | Export { path, .. } | Import { path, .. } | Flows { path, .. }
-        | Cypher { path, .. } => Some(path.clone()),
+        | Cypher { path, .. } | VerifyDeterminism { path, .. }
+        | Report { path, .. } | Html { path, .. } | Audit { path, .. } => Some(path.clone()),
         Init { repo, .. } | Scip { path: repo } => Some(repo.clone()),
         Install { .. } | Status | Doctor | Gc { .. } | Projects | Config { .. } => None,
     }
@@ -382,6 +414,7 @@ fn needs_fresh(cmd: &Command) -> bool {
             | Important { .. } | Communities { .. } | Routes { .. } | Query { .. }
             | Implementers { .. } | Ask { .. } | Semantic { .. } | Context { .. } | RenameSymbol { .. }
             | DeadCode { .. } | Changes { .. } | Flows { .. } | Cypher { .. }
+            | Report { .. } | Html { .. } | Audit { .. }
     )
 }
 
@@ -401,6 +434,16 @@ fn main() -> anyhow::Result<()> {
             .zip(db.as_deref())
             .map(|(r, d)| (r, d, matches!(cmd, Command::Index { .. }))),
     );
+
+    // Identity gate: never SERVE from a graph that belongs to a different repo
+    // or a foreign tool. Index/Import are exempt — they are the remediation
+    // (both restamp repo_root), otherwise the error would advise the very
+    // command it blocks.
+    if !matches!(cmd, Command::Index { .. } | Command::Import { .. }) {
+        if let (Some(r), Some(d)) = (&root, &db) {
+            index::check_identity(r, d)?;
+        }
+    }
 
     // Freshness gate: reindex before serving so a query never returns a result
     // that disagrees with the working tree (edits / add / delete / git checkout).
@@ -425,19 +468,54 @@ fn main() -> anyhow::Result<()> {
                 cfg.llm.model,
             );
         }
-        Command::Index { path, full, scip, indexstore } => {
+        Command::Index { path, full, scip, indexstore, include_ambiguous, no_include_ambiguous } => {
             let db = index::db_path(&path);
-            let stats = index::index_dir(&path, &db, full, scip.as_deref(), indexstore)?;
+            let ambiguous = if include_ambiguous {
+                Some(true)
+            } else if no_include_ambiguous {
+                Some(false)
+            } else {
+                None
+            };
+            let stats = index::index_dir(&path, &db, full, scip.as_deref(), indexstore, ambiguous)?;
             println!(
-                "indexed {} files ({} changed{}) → {} nodes, {} edges{}  ({})",
+                "indexed {} files ({} changed{}{}) → {} nodes, {} edges{}  ({})",
                 stats.files,
                 stats.changed,
                 if stats.pruned > 0 { format!(", {} pruned", stats.pruned) } else { String::new() },
+                if stats.partial { ", partial edge rebuild" } else { "" },
                 stats.nodes,
                 stats.edges,
                 if stats.scip_edges > 0 { format!(" (+{} SCIP tier-A)", stats.scip_edges) } else { String::new() },
                 db.display()
             );
+        }
+        Command::Report { path, out } => {
+            let md = viz::report(&path, &index::db_path(&path))?;
+            match out {
+                Some(f) => {
+                    std::fs::write(&f, md)?;
+                    println!("report written to {}", f.display());
+                }
+                None => print!("{md}"),
+            }
+        }
+        Command::Html { path, out, limit, open } => {
+            let db = index::db_path(&path);
+            let html = viz::html(&path, &db, limit)?;
+            // Default next to the cached graph.db — the source repo stays pristine.
+            let out = out.unwrap_or_else(|| db.with_file_name("graph.html"));
+            std::fs::write(&out, html)?;
+            println!("interactive graph written to {}", out.display());
+            if open {
+                #[cfg(target_os = "macos")]
+                let opener = "open";
+                #[cfg(all(unix, not(target_os = "macos")))]
+                let opener = "xdg-open";
+                #[cfg(windows)]
+                let opener = "explorer";
+                let _ = std::process::Command::new(opener).arg(&out).spawn();
+            }
         }
         Command::Search { term, path, limit, rerank, regex } => {
             let db = index::db_path(&path);
@@ -445,9 +523,7 @@ fn main() -> anyhow::Result<()> {
             let mut hits =
                 if regex { store.search_regex(&term, limit)? } else { store.search_smart(&term, limit)? };
             if rerank || cfg.llm.rerank {
-                if let Some(llm) = codegraph_llm::OpenAiCompatBackend::detect() {
-                    hits = query::rerank(&term, hits, &llm);
-                }
+                hits = query::rerank(&term, hits);
             }
             if hits.is_empty() {
                 println!("no matches for {:?}", term);
@@ -466,8 +542,39 @@ fn main() -> anyhow::Result<()> {
                 println!("{:<24} {:?}  {}:{}", n.name, n.label, n.file_path, n.line_start);
             }
         }
-        Command::Callers { name, path, id } => {
+        Command::Callers { name, path, id, files } => {
             let store = codegraph_store::Store::open(&index::db_path(&path))?;
+            if files {
+                // like-for-like with file-level tools: resolved caller files
+                // first, then `~` textual (parser-verified, unresolved) files.
+                // Multiple same-name defs: answer for the DOMINANT definition
+                // (most resolved callers — what an agent pins), attributing
+                // textual sites to their NEAREST definition; a vendored
+                // mirror's tests attach to the mirror, not the primary.
+                let defs = store.definitions_of(&name)?;
+                let dominant = defs.iter().max_by_key(|(_, nc)| *nc).map(|(d, _)| d.clone());
+                let callers = match (&dominant, defs.len()) {
+                    (Some(d), n) if n > 1 => store.callers_of_id(&d.id)?,
+                    _ => store.callers_of(&name)?,
+                };
+                let mut resolved: Vec<String> = callers.into_iter().map(|n| n.file_path).collect();
+                resolved.sort();
+                resolved.dedup();
+                for f in &resolved {
+                    println!("{f}");
+                }
+                let attribute_to = if defs.len() > 1 { dominant.as_ref().map(|d| d.file_path.as_str()) } else { None };
+                let mut textual = store.unresolved_call_site_files(&name, attribute_to)?;
+                textual.retain(|f| !resolved.contains(f));
+                textual.sort();
+                for f in textual {
+                    println!("~{f}");
+                }
+                if defs.len() > 1 {
+                    println!("#dominant-of-{}-definitions; pin others with --id", defs.len());
+                }
+                return Ok(());
+            }
             if let Some(pin) = id {
                 // Pinned: callers of exactly ONE definition, never a same-name union.
                 for n in store.callers_of_id(&pin)? {
@@ -487,12 +594,35 @@ fn main() -> anyhow::Result<()> {
             }
             let callers = store.callers_of(&name)?;
             if callers.is_empty() {
-                println!("no callers of {:?}", name);
+                println!("no resolved callers of {:?}", name);
             }
+            let caller_files: std::collections::HashSet<String> =
+                callers.iter().map(|n| n.file_path.clone()).collect();
             for n in callers {
                 println!("{:<24} {:?}  {}:{}", n.name, n.label, n.file_path, n.line_start);
             }
-            print_coverage(&store.coverage_for_callers(&name)?);
+            let coverage = store.coverage_for_callers(&name)?;
+            print_coverage(&coverage);
+            // TEXTUAL layer: files with a CALL SITE naming it that didn't resolve
+            // into an edge. Parser-verified call tokens (not comments/strings) —
+            // recall without polluting the resolved graph. Explicitly labeled.
+            if coverage.may_be_incomplete {
+                let mut extra: Vec<String> = store
+                    .unresolved_call_site_files(&name, None)?
+                    .into_iter()
+                    .filter(|f| !caller_files.contains(f))
+                    .collect();
+                extra.sort();
+                if !extra.is_empty() {
+                    println!("~ textual call sites (unresolved, parser-verified) in {} more file(s):", extra.len());
+                    for f in extra.iter().take(20) {
+                        println!("    {f}");
+                    }
+                    if extra.len() > 20 {
+                        println!("    … {} more", extra.len() - 20);
+                    }
+                }
+            }
         }
         Command::Trace { from, to, path } => {
             let l = query::Loaded::open(&index::db_path(&path))?;
@@ -535,7 +665,15 @@ fn main() -> anyhow::Result<()> {
                         println!("{}", l.fmt(&id));
                     }
                     let store = codegraph_store::Store::open(&index::db_path(&path))?;
-                    print_coverage(&store.coverage_for_callees(&n.id)?);
+                    let coverage = store.coverage_for_callees(&n.id)?;
+                    print_coverage(&coverage);
+                    if coverage.may_be_incomplete {
+                        let mut unresolved = store.unresolved_callee_names(&n.id)?;
+                        unresolved.truncate(20);
+                        if !unresolved.is_empty() {
+                            println!("~ unresolved call names in the body (in-repo candidates exist): {}", unresolved.join(", "));
+                        }
+                    }
                 }
                 None => println!("symbol {:?} not found", name),
             }
@@ -602,7 +740,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Command::Cypher { query: cq, path } => {
-            let sql = match cypher::to_sql(&cq) {
+            let sql = match codegraph_store::cypher::to_sql(&cq) {
                 Ok(s) => s,
                 Err(e) => {
                     println!("cypher-lite: {e}");
@@ -777,7 +915,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Flows { path, limit } => {
             let l = query::Loaded::open(&index::db_path(&path))?;
-            let entries = detect_entry_points(&l.nodes);
+            let entries = codegraph_graph::detect_entry_points(&l.nodes);
             let mut flows: Vec<(f64, &codegraph_core::Node, Vec<String>, &str)> = entries
                 .iter()
                 .map(|(n, kind)| {
@@ -795,12 +933,32 @@ fn main() -> anyhow::Result<()> {
             flows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             println!("# {} entry points, top {} flows by criticality:\n", entries.len(), limit);
             for (crit, entry, body, kind) in flows.iter().take(limit) {
-                println!("[{kind:<6}] {:<30} reach={:<4} crit={:.4}  {}:{}", entry.name, body.len(), crit, entry.file_path, entry.line_start);
+                println!(
+                    "[{kind:<6}] {:<44} reach={:<4} crit={:.4}",
+                    codegraph_core::display_label(entry), body.len(), crit
+                );
                 for id in body.iter().take(5) {
                     if let Some(x) = l.nodes.iter().find(|n| n.id == *id) {
-                        println!("    → {:<26} {}:{}", x.name, x.file_path, x.line_start);
+                        println!("    → {}", codegraph_core::display_label(x));
                     }
                 }
+            }
+        }
+        Command::VerifyDeterminism { path } => {
+            let tmp = std::env::temp_dir().join(format!("cg-verify-{}", std::process::id()));
+            let mut hashes = Vec::new();
+            for run in 1..=2u8 {
+                let db = tmp.join(format!("run{run}")).join("graph.db");
+                index::index_dir(&path, &db, true, None, false, Some(false))?;
+                let store = codegraph_store::Store::open(&db)?;
+                hashes.push(store.canonical_hash()?);
+            }
+            let _ = std::fs::remove_dir_all(&tmp);
+            if hashes[0] == hashes[1] {
+                println!("✓ deterministic: two full indexes produced byte-identical graphs ({})", &hashes[0][..16]);
+            } else {
+                println!("✗ NON-DETERMINISTIC: {} vs {}", &hashes[0][..16], &hashes[1][..16]);
+                std::process::exit(1);
             }
         }
         Command::Export { path, out } => {
@@ -822,6 +980,12 @@ fn main() -> anyhow::Result<()> {
             );
         }
         Command::Import { path, file } => {
+            // `codegraph import .` is a natural spelling: a DIRECTORY as the
+            // positional means "the repo", not the artifact file.
+            let (path, file) = match file {
+                Some(f) if f.is_dir() => (f, None),
+                other => (path, other),
+            };
             let src = file.unwrap_or_else(|| path.join(".codegraph/graph.db.zst"));
             let compressed = std::fs::read(&src)?;
             let bytes = zstd::decode_all(&compressed[..])?;
@@ -830,8 +994,14 @@ fn main() -> anyhow::Result<()> {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(&db, &bytes)?;
-            // Sanity-open (runs migrations) then heal any drift incrementally.
-            let _ = codegraph_store::Store::open(&db)?;
+            // Sanity-open (runs migrations), ADOPT the graph (the artifact
+            // carries the EXPORTER's repo_root — restamp to ours or every
+            // subsequent command fails the identity gate), then heal drift.
+            {
+                let store = codegraph_store::Store::open(&db)?;
+                let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+                store.meta_set("repo_root", &canon.to_string_lossy())?;
+            }
             index::ensure_fresh(&path)?;
             println!("imported {} -> {} (graph live; drift healed incrementally)", src.display(), db.display());
         }
@@ -907,9 +1077,12 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Important { path, limit } => {
             let l = query::Loaded::open(&index::db_path(&path))?;
-            for (id, score) in l.lg.pagerank_top(limit) {
+            for (id, score) in l.lg.important(limit, &l.nodes) {
                 println!("{:.4}  {}", score, l.fmt(&id));
             }
+        }
+        Command::Audit { path, sample, seed, json } => {
+            audit::run(&path, sample, seed, json)?;
         }
         Command::Ask { question, path } => {
             let store = codegraph_store::Store::open(&index::db_path(&path))?;
@@ -922,21 +1095,16 @@ fn main() -> anyhow::Result<()> {
                     context.push_str(&format!("```\n{}\n```\n", snip));
                 }
             }
-            match codegraph_llm::OpenAiCompatBackend::detect() {
-                Some(llm) => {
-                    let prompt = format!(
-                        "You are a code assistant answering questions about a codebase using its symbol graph. \
-                         Use ONLY the context below; if it is insufficient, say so. Be concise.\n\n\
-                         Context (relevant symbols):\n{}\n\nQuestion: {}\n\nAnswer:",
-                        context, question
-                    );
-                    match llm.generate(&prompt, 600) {
-                        Some(ans) => println!("{}\n\n[{} / {}]", ans.trim(), llm.provider(), llm.model()),
-                        None => println!("LLM request failed. Relevant symbols:\n{}", context),
-                    }
-                }
+            let prompt = format!(
+                "You are a code assistant answering questions about a codebase using its symbol graph. \
+                 Use ONLY the context below; if it is insufficient, say so. Be concise.\n\n\
+                 Context (relevant symbols):\n{}\n\nQuestion: {}\n\nAnswer:",
+                context, question
+            );
+            match codegraph_llm::generate_text_labeled(&prompt, 600) {
+                Some((ans, label)) => println!("{}\n\n[{}]", ans.trim(), label),
                 None => println!(
-                    "No local LLM detected (start LM Studio or Ollama, or set CODEGRAPH_LLM_BASE_URL).\n\nRelevant symbols:\n{}",
+                    "No LLM available (start MLX/LM Studio/Ollama, set an API key, or install a build with --features local-llm).\n\nRelevant symbols:\n{}",
                     context
                 ),
             }
@@ -947,7 +1115,7 @@ fn main() -> anyhow::Result<()> {
             let items: Vec<(&codegraph_core::Node, String)> = nodes
                 .iter()
                 .filter(|n| n.label != codegraph_core::NodeLabel::File)
-                .map(|n| (n, format!("{} {:?} in {}", n.name, n.label, n.file_path)))
+                .map(|n| (n, index::embed_text_for(n)))
                 .collect();
             let texts: Vec<String> = items.iter().map(|(_, t)| t.clone()).collect();
             match codegraph_llm::embed_texts(&texts) {
@@ -965,11 +1133,13 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Semantic { query: q, path, limit, hyde } => {
             let store = codegraph_store::Store::open(&index::db_path(&path))?;
-            // HyDE rewrites the query via a chat model (needs a server); skip if none.
+            // HyDE rewrites the query via a chat model (server or bundled); skip if none.
             let query_text = if hyde || cfg.llm.hyde {
-                codegraph_llm::OpenAiCompatBackend::detect()
-                    .and_then(|b| b.generate(&format!("Write a short code documentation snippet that would answer this query (no preamble): {q}"), 200))
-                    .unwrap_or_else(|| q.clone())
+                codegraph_llm::generate_text(
+                    &format!("Write a short code documentation snippet that would answer this query (no preamble): {q}"),
+                    200,
+                )
+                .unwrap_or_else(|| q.clone())
             } else {
                 q.clone()
             };
@@ -986,17 +1156,13 @@ fn main() -> anyhow::Result<()> {
                     return Ok(());
                 }
             }
-            let vectors = store.all_vectors()?;
-            if vectors.is_empty() {
+            // Indexed KNN via sqlite-vec (stored L2-normalized → score is cosine).
+            let hits = store.knn(&qv, limit)?;
+            if hits.is_empty() {
                 println!("no vectors yet - run `codegraph semantic-index` first");
                 return Ok(());
             }
-            // Stored vectors are L2-normalized, so dot == cosine (cheaper).
-            let mut scored: Vec<(f32, String)> =
-                vectors.iter().map(|(id, v)| (codegraph_core::dot(&qv, v), id.clone())).collect();
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            scored.truncate(limit);
-            for (score, id) in scored {
+            for (id, score) in hits {
                 if let Some(n) = store.get_node(&id)? {
                     println!("{:.3}  {:<22} {:?}  {}:{}", score, n.name, n.label, n.file_path, n.line_start);
                 }
@@ -1018,13 +1184,23 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 None => {
-                    println!("chat model (ask/rerank/HyDE):  ✗ no local provider (start LM Studio/Ollama, or set an API key)");
+                    if cfg!(feature = "local-llm") {
+                        println!("chat model (ask/rerank/HyDE):  ✓ bundled mistral.rs engine (no server needed)");
+                    } else {
+                        println!("chat model (ask/rerank/HyDE):  ✗ no local provider (start MLX/LM Studio/Ollama, or set an API key)");
+                    }
                     println!("embedding model (semantic):    ✗ none");
                 }
             }
             #[cfg(feature = "local-embed")]
             println!("local embeddings:  ✓ compiled in (--features local-embed)");
+            #[cfg(feature = "local-llm")]
+            println!("local chat engine: ✓ compiled in (--features local-llm, mistral.rs)");
             println!("\nsetup:  codegraph init   |   config: .codegraph.toml (env CODEGRAPH_* overrides)");
+            println!("env knobs:");
+            println!("  CODEGRAPH_CACHE_DIR   central graph cache root (default ~/.cache/codegraph)");
+            println!("  CODEGRAPH_TTL_DAYS    delete graphs of projects idle this long (default 30; 0 = never)");
+            println!("  CODEGRAPH_AUTO_SCIP   =0 disables the background SCIP re-index on HEAD move");
         }
         Command::Ingest { input, path } => {
             let chunks = codegraph_ingest::ingest(&input).map_err(anyhow::Error::msg)?;
@@ -1032,7 +1208,7 @@ fn main() -> anyhow::Result<()> {
             for (i, ch) in chunks.iter().enumerate() {
                 store.upsert_node(&index::document_node_from_chunk(ch, i))?;
             }
-            store.rebuild_fts()?;
+            // FTS stays in sync via the nodes_fts triggers — no rebuild needed.
             println!("ingested {} chunk(s) from {} as Document nodes (searchable by title; semantic over content)", chunks.len(), input);
         }
         Command::Init { repo, yes, no_index, no_mcp, force, print, uninstall } => {

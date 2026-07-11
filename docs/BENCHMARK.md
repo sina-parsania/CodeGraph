@@ -11,6 +11,44 @@ supersede: **codebase-memory-mcp**, **graphify**, **qmd**, **codebase-index**.
 > source is the authoritative spec). `codebase-index` and `qmd` were run live; the
 > rest are compared on documented capabilities. Gaps are called out, not hidden.
 
+## Measured precision & who-references eval (v1.31, reproducible)
+
+Everything in this section reproduces from `scripts/eval/` (pinned repo SHAs,
+seeded sampling, SCIP ground truth). No other tool in this space publishes —
+or can publish — a compiler-verified precision number for its own edges.
+
+### `codegraph audit` — per-tier precision vs a compiler oracle
+
+| repo (oracle) | ImportNarrowed | SameFileUnique | SelfThisMember | overall |
+| --- | ---: | ---: | ---: | ---: |
+| zod `v3.23.8` (scip-typescript) | **100%** (62/62) | 93.9% | **100%** (57/57) | **98.7%** |
+| fastapi `0.115.0` (scip-python) | 91.1% | 97.0% | 82.4% | **93.8%** |
+| private 55k-node polyglot monorepo (Xcode IndexStore) | — | 95.5% | **100%** | **95.0%** |
+
+Numbers are LOWER BOUNDS (an oracle disagreement counts against us even when
+the compiler bound a related-but-different target). The audit is also how we
+find our own bugs: it measured the old unknown-receiver→global-unique fallback
+at **27% precision** on fastapi — that tier was removed, not defended
+(`qualified obj.method()` with an untypeable receiver now drops, and function
+parameters shadow same-named free functions).
+
+### who-references vs grep (68 questions, SCIP ground truth)
+
+| tool | precision (answered) | recall | answer rate | avg bytes/answer |
+|---|---:|---:|---:|---:|
+| codegraph (`callers --files`) | **0.75** | 0.87 | 99% | **227** |
+| grep -rn | 0.63 | **0.94** | 100% | 2,701 |
+
+The answer is LAYERED, never blended: resolved caller files first, then
+`~`-prefixed **parser-verified unresolved call-site files** — call tokens the
+parser saw (not comments/strings), evidence-filtered (files defining the name
+locally or importing it from an external package are excluded, and with
+multiple same-name definitions each site attributes to its NEAREST definition
+— a vendored mirror's tests attach to the mirror, not the primary). Precision
+without recall starvation, at 12× fewer bytes than grep; grep remains the
+final `_fallback` for the residue. Per-query wall latency ~21 ms including
+process spawn and the freshness probe.
+
 ## Verdict (v1.24, measured + source-audited)
 
 Live 3-way runs on the same repos (binaries: codebase-memory-mcp v0.8.1, code-review-graph 2.3.6):

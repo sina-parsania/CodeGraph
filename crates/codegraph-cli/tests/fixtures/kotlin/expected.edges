@@ -1,0 +1,4 @@
+CALLS Repo.kt:Repo.load -> Repo.kt:Api.fetch @FieldTypeMember
+CALLS Repo.kt:Repo.load -> Repo.kt:Maker.build @LocalVarType
+CALLS Repo.kt:Caller.run -> Repo.kt:Runner.exec @LocalVarType
+CALLS Repo.kt:Caller.run -> Repo.kt:Maker.build @LocalVarType

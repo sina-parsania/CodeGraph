@@ -1,0 +1,17 @@
+# Pinned OSS corpora for the reproducible eval. Each repo is cloned at the
+# exact SHA, indexed with its SCIP indexer (ground truth), then questioned.
+# Add repos freely — the eval scales with the list.
+
+[[repo]]
+name = "fastapi"
+url = "https://github.com/tiangolo/fastapi"
+sha = "0.115.0"            # tag or commit sha
+indexer = "scip-python"    # must be on PATH (npm i -g @sourcegraph/scip-python)
+lang = "python"
+
+[[repo]]
+name = "zod"
+url = "https://github.com/colinhacks/zod"
+sha = "v3.23.8"
+indexer = "scip-typescript" # npm i -g @sourcegraph/scip-typescript
+lang = "typescript"

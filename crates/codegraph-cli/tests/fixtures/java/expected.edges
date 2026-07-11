@@ -1,0 +1,2 @@
+CALLS A.java:App.main -> A.java:Svc.run @FieldTypeMember
+CALLS A.java:App.main -> A.java:App.helper

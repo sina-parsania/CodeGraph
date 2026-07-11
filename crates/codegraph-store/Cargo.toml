@@ -7,11 +7,13 @@ license.workspace = true
 [dependencies]
 codegraph-core.workspace = true
 rusqlite.workspace = true
+sqlite-vec.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 zstd.workspace = true
 regex = "1"
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

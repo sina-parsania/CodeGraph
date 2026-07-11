@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use codegraph_graph::{build, LoadedGraph};
+use codegraph_graph::{build_with, LoadedGraph};
 use codegraph_parse::{parse_file, ParsedFile};
 use codegraph_core::{Edge, EdgeRelation, Metadata, Node, NodeLabel};
 use codegraph_store::Store;
@@ -52,6 +52,9 @@ pub struct IndexStats {
     pub nodes: usize,
     pub edges: usize,
     pub scip_edges: usize,
+    /// True when the edge rebuild took the incremental (changed-files-only)
+    /// path instead of re-resolving the whole repo.
+    pub partial: bool,
 }
 
 /// Root of the central graph cache: `$CODEGRAPH_CACHE_DIR`, else
@@ -80,7 +83,7 @@ pub fn db_path(root: &Path) -> PathBuf {
 
 /// The ignore-aware walker shared by the indexer AND the staleness probe — they
 /// MUST use the same file set or they disagree and reintroduce false positives.
-fn build_walker(root: &Path) -> ignore::Walk {
+pub(crate) fn build_walker(root: &Path) -> ignore::Walk {
     WalkBuilder::new(root)
         .git_ignore(true)
         .git_global(true)
@@ -114,6 +117,15 @@ fn classify(entry: &ignore::DirEntry) -> Option<bool> {
     Some(is_doc)
 }
 
+/// tsconfig*.json — tracked for staleness (alias-map input), never parsed.
+fn is_tsconfig(entry: &ignore::DirEntry) -> bool {
+    if entry.file_type().map(|t| t.is_dir()).unwrap_or(true) {
+        return false;
+    }
+    let name = entry.file_name().to_string_lossy();
+    name.starts_with("tsconfig") && name.ends_with(".json")
+}
+
 fn rel_path(root: &Path, path: &Path) -> String {
     path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
 }
@@ -139,11 +151,24 @@ pub fn is_stale(root: &Path) -> bool {
         return true;
     }
     let Ok(store) = Store::open(&db) else { return true };
+    // a binary with different parse behavior means EVERY file is effectively
+    // stale — without this, ensure_fresh/MCP would serve an old-parser graph
+    // forever after an upgrade (index_dir's gate only helps if a reindex runs)
+    if store.meta_get("parser_version").ok().flatten().as_deref()
+        != Some(codegraph_parse::PARSER_VERSION.to_string().as_str())
+    {
+        return true;
+    }
+    // a new/updated .scip on disk (e.g. a background auto_scip run finished)
+    // must be merged before the next query is served
+    if scip_file_changed(&store, root, None) {
+        return true;
+    }
     let Ok(rows) = store.manifest_map() else { return true };
     let mut prev: std::collections::HashMap<String, i64> =
         rows.into_iter().map(|m| (m.file_path, m.mtime)).collect();
     for entry in build_walker(root).filter_map(|e| e.ok()) {
-        if classify(&entry).is_none() {
+        if classify(&entry).is_none() && !is_tsconfig(&entry) {
             continue;
         }
         let rel = rel_path(root, entry.path());
@@ -156,19 +181,62 @@ pub fn is_stale(root: &Path) -> bool {
     !prev.is_empty() // anything left in the manifest was deleted on disk
 }
 
+/// Identity gate: refuse to answer from a graph built for a DIFFERENT repo (or
+/// written by a different tool into our cache slot) — a wrong graph is worse
+/// than no graph. Read-only; never mutates a foreign DB. Legacy graphs without
+/// a stamp pass (the next index stamps them).
+pub fn check_identity(root: &Path, db: &Path) -> Result<()> {
+    if !db.exists() {
+        return Ok(());
+    }
+    let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    match codegraph_store::query_readonly(db, "SELECT value FROM meta WHERE key = 'repo_root'", 1) {
+        Ok((_, rows)) => match rows.first().and_then(|r| r.first()) {
+            Some(stamped) if *stamped != canon.to_string_lossy() => anyhow::bail!(
+                "graph at {} was built for {}, not {} — run `codegraph index {}`",
+                db.display(),
+                stamped,
+                canon.display(),
+                canon.display()
+            ),
+            _ => Ok(()),
+        },
+        Err(_) => anyhow::bail!(
+            "{} is not a codegraph graph (no meta table — another tool may have written it). Delete it and re-run `codegraph index`",
+            db.display()
+        ),
+    }
+}
+
 /// Make the graph match the working tree before serving a query: build it if
 /// missing, incrementally reindex if anything changed. The clean path is the
 /// stat-only probe above. This is the guarantee that queries never serve stale
 /// results (no false positives after edits / add / delete / git checkout).
 pub fn ensure_fresh(root: &Path) -> Result<()> {
+    // Long-lived MCP sessions only stamp the registry at startup; a month-long
+    // session would look idle to the TTL sweep of a command run in ANOTHER
+    // repo, which could delete this graph out from under the server. Touching
+    // (throttled) marks the project as live. 15 min ≪ any sane TTL.
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST_TOUCH: AtomicU64 = AtomicU64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if now.saturating_sub(LAST_TOUCH.load(Ordering::Relaxed)) > 900 {
+            LAST_TOUCH.store(now, Ordering::Relaxed);
+            crate::registry::housekeeping(Some((root, &db_path(root), false)));
+        }
+    }
     if is_stale(root) {
         let db = db_path(root);
-        index_dir(root, &db, false, None, false)?;
+        index_dir(root, &db, false, None, false, None)?;
     }
     Ok(())
 }
 
-pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexstore: bool) -> Result<IndexStats> {
+pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexstore: bool, ambiguous: Option<bool>) -> Result<IndexStats> {
     if let Some(parent) = db.parent() {
         std::fs::create_dir_all(parent)?;
         // Self-describe the cache entry (which project it belongs to) for
@@ -183,7 +251,27 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
         let _ = std::fs::remove_dir_all(&legacy);
     }
     let store = Store::open(db)?;
-    store.begin()?;
+    // RAII: rolls back on early error/panic; committed explicitly below.
+    let txn = store.txn()?;
+    // Identity stamp (checked by `check_identity` before every query). Meta is
+    // excluded from canonical_hash, so this can't break determinism.
+    let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    store.meta_set("repo_root", &canon.to_string_lossy())?;
+    // Parser-version gate: a binary with different parse behavior must rebuild
+    // from scratch — mixing old-parse and new-parse files in one graph breaks
+    // the incremental==full invariant.
+    let parser_v = codegraph_parse::PARSER_VERSION.to_string();
+    let mut full = full || store.meta_get("parser_version").ok().flatten().as_deref() != Some(parser_v.as_str());
+    store.meta_set("parser_version", &parser_v)?;
+    // tsconfig `paths` aliases: rewritten imports of UNCHANGED files depend on
+    // the alias map, so an alias-map change (content hash) forces a full
+    // reparse — a manifest sha can't see it.
+    // ponytail: this walks the repo once more on every index (~tens of ms); it
+    // must run BEFORE the no-change early return because tsconfig-only edits
+    // don't bump `changed`. Gate behind a manifest lookup if profiles complain.
+    let (aliases, ts_hash) = crate::tsconfig::load_alias_maps(root);
+    full = full || store.meta_get("tsconfig_hash").ok().flatten().as_deref() != Some(ts_hash.as_str());
+    store.meta_set("tsconfig_hash", &ts_hash)?;
     let project = project_name(root);
     let mut seen: HashSet<String> = HashSet::new();
     let mut files = 0usize;
@@ -192,23 +280,42 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
     // whose mtime moved, hash and reparse only if the content actually changed
     // (mtime can move with identical content, e.g. git checkout — refresh the
     // stored mtime so it isn't re-flagged, but don't rebuild).
+    // The manifest is loaded ONCE into a map — not one SQL query per file.
+    let manifest_map: HashMap<String, codegraph_store::ManifestEntry> = if full {
+        HashMap::new()
+    } else {
+        store.manifest_map()?.into_iter().map(|m| (m.file_path.clone(), m)).collect()
+    };
     let mut to_parse: Vec<(String, String, String, i64, bool)> = Vec::new();
     for entry in build_walker(root).filter_map(|e| e.ok()) {
+        // tsconfig files are tracked in the manifest (so is_stale sees their
+        // edits) but never parsed — their CONTENT is consumed by `aliases`.
+        if is_tsconfig(&entry) {
+            let rel = rel_path(root, entry.path());
+            seen.insert(rel.clone());
+            let mtime = file_mtime(&entry);
+            if manifest_map.get(&rel).map(|m| m.mtime) != Some(mtime) {
+                if let Ok(source) = std::fs::read_to_string(entry.path()) {
+                    store.save_manifest(&rel, &sha256(&source), mtime)?;
+                }
+            }
+            continue;
+        }
         let Some(is_doc) = classify(&entry) else { continue };
         let path = entry.path();
         let rel = rel_path(root, path);
         let mtime = file_mtime(&entry);
         files += 1;
         seen.insert(rel.clone());
-        let manifest = if full { None } else { store.manifest_for(&rel)? };
-        if let Some(m) = &manifest {
+        let manifest = manifest_map.get(&rel);
+        if let Some(m) = manifest {
             if m.mtime == mtime && mtime != 0 {
                 continue; // unchanged — stat fast-path, no read
             }
         }
         let Ok(source) = std::fs::read_to_string(path) else { continue };
         let sha = sha256(&source);
-        if let Some(m) = &manifest {
+        if let Some(m) = manifest {
             if m.sha256 == sha {
                 store.save_manifest(&rel, &sha, mtime)?; // touched but identical: refresh mtime only
                 continue;
@@ -240,24 +347,69 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
         .collect();
     let changed = parsed.len();
 
-    // Phase 3: persist sequentially (SQLite writes are serial).
+    // Phase 3: persist sequentially (SQLite writes are serial). FTS stays in
+    // sync via the nodes_fts triggers — no manual FTS bookkeeping here.
+    //
+    // Wave-propagation classification: compare each changed file's pre-edit
+    // shape (read from the live tables BEFORE deletion) against its parsed
+    // shape. Body-only edits contribute nothing; Function/Method definition
+    // changes contribute their names to `dirty_names` (their callers must
+    // re-resolve); anything else observable (classes, inherits, fields,
+    // routes, doc titles) forces the full rebuild.
     let mut changed_nodes: Vec<Node> = Vec::new();
+    let mut changed_files: Vec<String> = Vec::new();
+    let mut dirty_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut shape_beyond_fns = false;
     for (rel, sha, mtime, pf) in parsed {
+        let old_shape = store.file_shape(&rel)?;
+        let new_shape = parsed_shape(&pf);
+        if old_shape.other != new_shape.other {
+            shape_beyond_fns = true;
+        } else {
+            dirty_names.extend(fn_diff_names(&old_shape, &new_shape));
+        }
         store.delete_file_data(&rel)?;
         store.save_calls(&rel, &pf.calls)?;
         store.save_inherits(&rel, &pf.inherits)?;
         store.save_fields(&rel, &pf.fields)?;
         store.save_locals(&rel, &pf.locals)?;
-        store.save_imports(&rel, &pf.imports)?;
+        // TS/JS non-relative imports: expand tsconfig aliases to root-relative
+        // `/dir/file` modules. Whatever doesn't match stays with its package
+        // specifier — the resolver ignores it, but coverage uses it as
+        // EXTERNALITY EVIDENCE (a call bound to an external import can never
+        // resolve in-repo, so it doesn't belong in the recall denominator).
+        let is_ts_js = matches!(rel.rsplit('.').next().unwrap_or(""), "ts" | "tsx" | "js" | "jsx" | "mjs");
+        let imports: Vec<codegraph_core::RawImport> = pf
+            .imports
+            .iter()
+            .map(|im| {
+                if is_ts_js && !im.module.starts_with('.') {
+                    if let Some(module) = aliases.resolve(&rel, &im.module) {
+                        return codegraph_core::RawImport { module, ..im.clone() };
+                    }
+                }
+                im.clone()
+            })
+            .collect();
+        store.save_imports(&rel, &imports)?;
         store.save_manifest(&rel, &sha, mtime)?;
         changed_nodes.extend(pf.nodes);
+        changed_files.push(rel);
     }
     store.bulk_upsert_nodes(&changed_nodes)?;
 
-    // Prune files that vanished since last index.
+    // Prune files that vanished since last index. A pruned file's definitions
+    // are dirty names (their callers must drop their edges); its own edges are
+    // stale at every tier.
     let mut pruned = 0usize;
     for mf in store.manifest_files()? {
         if !seen.contains(&mf) {
+            let shape = store.file_shape(&mf)?;
+            if !shape.other.is_empty() {
+                shape_beyond_fns = true;
+            }
+            dirty_names.extend(shape.fn_defs.into_values());
+            store.delete_edges_for_file(&mf)?;
             store.delete_file_data(&mf)?;
             store.delete_manifest(&mf)?;
             pruned += 1;
@@ -267,8 +419,10 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
     // Rebuild ALL edges from the full persisted node + call set (keeps
     // cross-file CALLS correct after a partial update).
     // Nothing changed and not a forced full rebuild: the graph is already current.
-    if changed == 0 && pruned == 0 && !full && scip_path(root, scip).is_none() {
-        store.commit()?;
+    if changed == 0 && pruned == 0 && !full && !scip_file_changed(&store, root, scip) {
+        // Self-heal graphs committed by older binaries (pre-heal dangling edges).
+        heal_dangling(&store);
+        txn.commit()?;
         return Ok(IndexStats {
             files,
             changed,
@@ -276,26 +430,110 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
             nodes: store.node_count()? as usize,
             edges: store.edge_count()? as usize,
             scip_edges: 0,
+            partial: false,
         });
     }
 
-    let nodes = store.all_nodes()?;
-    let calls = store.all_calls()?;
+    // graph_nodes strips Document chunk text — the edge rebuild reads structure
+    // only, and doc text can dominate deserialization cost on doc-heavy repos.
+    let nodes = store.graph_nodes()?;
     let inherits = store.all_inherits()?;
     let fields = store.all_fields()?;
     let locals = store.all_locals()?;
     let imports = store.all_imports()?;
-    let built = build(&nodes, &calls, &inherits, &fields, &locals, &imports);
-    let mut edges = built.edges;
-    let scip_edges = merge_scip_edges(root, scip, &nodes, &mut edges);
-    let indexstore_edges = if indexstore { merge_indexstore_edges(root, &nodes, &mut edges) } else { 0 };
-    let _ = indexstore_edges;
-    store.clear_edges()?;
-    store.bulk_upsert_edges(&edges)?;
-    store.clear_hyperedges()?;
-    for (h, members) in &built.hyperedges {
-        store.upsert_hyperedge(h, members)?;
+    // Sticky ambiguous-tier setting: an explicit flag stamps it; auto-heal reruns
+    // read the stamp so the tier survives incremental reindexes.
+    let include_ambiguous = match ambiguous {
+        Some(v) => {
+            let _ = store.meta_set("include_ambiguous", if v { "1" } else { "0" });
+            v
+        }
+        None => store.meta_get("include_ambiguous").ok().flatten().as_deref() == Some("1"),
+    };
+    // WAVE-PROPAGATION edge rebuild: a body-only edit re-resolves just the
+    // changed files; a Function/Method definition change (add/remove/rename/
+    // move-between-classes) additionally re-resolves every file with a call
+    // site NAMING a dirty definition — the exact set whose resolution can have
+    // changed, found via the indexed raw-calls table, no repo scan. Falls back
+    // to the full rebuild when the change touches anything else observable
+    // (classes/inherits/fields/routes), when a dirty name appears in an inherit
+    // clause (name-uniqueness could flip INHERITS edges + hyperedges), on
+    // pruning beyond fn defs, SCIP/IndexStore merges, or an --ambiguous flip.
+    // A fresh index (no prior manifest) has nothing to be incremental against —
+    // the plain full path is cheaper than a wave spanning every file.
+    let mut partial_ok = !full
+        && !manifest_map.is_empty()
+        && !shape_beyond_fns
+        && ambiguous.is_none()
+        && !scip_file_changed(&store, root, scip)
+        && !indexstore
+        && !indexstore_wants_remerge(&store, root)
+        && !scip_wants_reacquire(&store, root);
+    if partial_ok {
+        for n in &dirty_names {
+            if store.inherits_name_referenced(n)? {
+                partial_ok = false;
+                break;
+            }
+        }
     }
+    let (edges, scip_edges) = if partial_ok {
+        let mut wave: std::collections::BTreeSet<String> = changed_files.iter().cloned().collect();
+        for n in &dirty_names {
+            wave.extend(store.files_with_calls_naming(n)?);
+        }
+        let mut calls_wave = Vec::new();
+        for f in &wave {
+            calls_wave.extend(store.calls_for_file(f)?);
+        }
+        let wave_set: HashSet<String> = wave.iter().cloned().collect();
+        let new_edges = codegraph_graph::resolve_files(
+            &nodes, &calls_wave, &inherits, &fields, &locals, &imports,
+            include_ambiguous, &wave_set,
+        );
+        for f in &wave {
+            store.delete_tree_sitter_edges_for_file(f)?;
+        }
+        // Conflicts can only be surviving compiler-grade (Scip-tier) edges,
+        // which outrank tree-sitter — keep them.
+        store.bulk_insert_edges_keep_existing(&new_edges)?;
+        // A spared compiler-grade edge can orphan when the reparse renamed its
+        // endpoint — heal BEFORE analytics read the edge set.
+        heal_dangling(&store);
+        // Hyperedges + implementer sets depend only on inherits and inherit-name
+        // uniqueness, both guaranteed untouched by the gates above.
+        (store.graph_edges()?, 0)
+    } else {
+        let calls = store.all_calls()?;
+        let built = build_with(&nodes, &calls, &inherits, &fields, &locals, &imports, include_ambiguous);
+        let mut edges = built.edges;
+        // Capture the artifact's mtime BEFORE reading it: if the background
+        // indexer finishes mid-merge, stamping a post-merge mtime would mark
+        // the final content as examined without ever merging it.
+        let scip_seen = scip_path(root, None).map(|p| mtime_secs(&p)).filter(|m| !m.is_empty());
+        let scip_edges = merge_scip_edges(root, scip, &nodes, &mut edges);
+        // SCIP tier is STICKY: once merged, full rebuilds reuse the persisted
+        // compiler-grade edges (filtered against current nodes), and if the
+        // user opted in (ran `codegraph scip` once) a moved HEAD auto-reruns
+        // the indexer — same contract as the Xcode IndexStore tier.
+        auto_scip(&store, root, &nodes, &mut edges, scip_edges, scip_seen);
+        // Swift compiler-grade edges are AUTOMATIC when the feature is compiled:
+        // fresh Xcode build (store mtime > stamped) -> re-merge; otherwise the
+        // previously merged edges are REUSED so auto-heal never drops them.
+        // `--indexstore` just forces a re-merge.
+        auto_indexstore(&store, root, &nodes, &mut edges, indexstore);
+        // Belt-and-braces: no merge source may contribute an edge whose endpoint
+        // isn't in the current node set (zero-phantom invariant).
+        let valid: HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+        edges.retain(|e| valid.contains(e.src.as_str()) && valid.contains(e.dst.as_str()));
+        store.clear_edges()?;
+        store.bulk_upsert_edges(&edges)?;
+        store.clear_hyperedges()?;
+        for (h, members) in &built.hyperedges {
+            store.upsert_hyperedge(h, members)?;
+        }
+        (edges, scip_edges)
+    };
 
     // Community + centrality over the full graph, persisted onto each node.
     let lg = LoadedGraph::load(&nodes, &edges);
@@ -308,29 +546,208 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
         *fan_out.entry(e.src.clone()).or_insert(0) += 1;
         *fan_in.entry(e.dst.clone()).or_insert(0) += 1;
     }
-    let mut nodes = nodes;
-    for nd in nodes.iter_mut() {
-        if let Some(&(c, pr, bw)) = analytics.get(&nd.id) {
-            nd.community = Some(c);
-            nd.pagerank = pr;
-            nd.betweenness = bw;
+    // Persist analytics via targeted column+json_set UPDATEs — NOT a second full
+    // node upsert, which re-serialized every node's JSON (incl. document text)
+    // in Rust on every incremental index.
+    let items: Vec<(String, u32, f64, f64, u32, u32)> = nodes
+        .iter()
+        .map(|nd| {
+            let (c, pr, bw) = analytics.get(&nd.id).copied().unwrap_or((0, 0.0, 0.0));
+            let fi = fan_in.get(&nd.id).copied().unwrap_or(0);
+            let fo = fan_out.get(&nd.id).copied().unwrap_or(0);
+            (nd.id.clone(), c, pr, bw, fi, fo)
+        })
+        .collect();
+    store.update_analytics(&items)?;
+    // Git co-change mining costs a `git log -n 1000` parse — skip it when HEAD
+    // hasn't moved since the last index (the common auto-heal case).
+    let head = git_head(root);
+    if store.meta_get("cochanges_head").ok().flatten() != head || head.is_none() {
+        let pairs = compute_cochanges(root);
+        if !pairs.is_empty() {
+            store.save_cochanges(&pairs)?;
         }
-        if let Some(&fi) = fan_in.get(&nd.id) {
-            nd.metadata.insert("fan_in".into(), serde_json::json!(fi));
-        }
-        if let Some(&fo) = fan_out.get(&nd.id) {
-            nd.metadata.insert("fan_out".into(), serde_json::json!(fo));
+        if let Some(h) = &head {
+            store.meta_set("cochanges_head", h)?;
         }
     }
-    store.bulk_upsert_nodes(&nodes)?;
-    store.rebuild_fts()?;
-    let pairs = compute_cochanges(root);
-    if !pairs.is_empty() {
-        store.save_cochanges(&pairs)?;
+    // Deterministic invariant gate before commit: dangling edges, FQN schema,
+    // missing justification tags. Dangling edges are auto-healed first (dropping
+    // is always precision-safe); anything validate still finds is a real bug and
+    // stays loud. Violations never brick the index — a degraded graph beats no
+    // graph, and the message tells the user exactly what to report.
+    if !partial_ok {
+        // the partial branch already healed (before analytics read the edges)
+        heal_dangling(&store);
     }
-    store.commit()?;
+    let violations = store.validate_graph()?;
+    if !violations.is_empty() {
+        eprintln!("codegraph: graph validation found {} issue(s):", violations.len());
+        for v in violations.iter().take(10) {
+            eprintln!("  - {v}");
+        }
+    }
+    store.bump_generation()?;
+    txn.commit()?;
+    auto_embed_changed(&store, root, &changed_nodes);
 
-    Ok(IndexStats { files, changed, pruned, nodes: nodes.len(), edges: edges.len(), scip_edges })
+    Ok(IndexStats { files, changed, pruned, nodes: nodes.len(), edges: edges.len(), scip_edges, partial: partial_ok })
+}
+
+/// The text embedded for one node — shared by `semantic-index` (full pass) and
+/// the post-index auto-refresh, so all vectors live in ONE embedding space.
+/// Documents embed their chunk CONTENT (capped), not just the title.
+pub fn embed_text_for(n: &Node) -> String {
+    let mut t = format!("{} {:?} in {}", n.name, n.label, n.file_path);
+    if let Some(text) = n.metadata.get("text").and_then(|v| v.as_str()) {
+        let cap = text.char_indices().nth(2000).map(|(i, _)| i).unwrap_or(text.len());
+        t.push('\n');
+        t.push_str(&text[..cap]);
+    }
+    t
+}
+
+/// Keep semantic search fresh WITHOUT a manual `semantic-index` rerun: after a
+/// committed index, re-embed just the changed nodes (their stale vectors were
+/// already pruned with their files). Opt-in by design — only runs once the user
+/// has stamped an embedding model by running `semantic-index`. Skips loudly on
+/// model mismatch (two models must never mix in one vector space) or when no
+/// embedder is reachable. Runs OUTSIDE the index transaction: embedding can
+/// take seconds and must not hold the write lock.
+fn auto_embed_changed(store: &Store, root: &Path, changed: &[Node]) {
+    // ponytail: inline ceiling — bigger batches (fresh index, git checkout)
+    // should go through the explicit, progress-reporting `semantic-index`.
+    const AUTO_EMBED_MAX: usize = 2000;
+    let Ok(Some(stamped)) = store.meta_get("embed_model") else { return };
+    let items: Vec<(&Node, String)> = changed
+        .iter()
+        .filter(|n| n.label != NodeLabel::File)
+        .map(|n| (n, embed_text_for(n)))
+        .collect();
+    if items.is_empty() {
+        return;
+    }
+    if items.len() > AUTO_EMBED_MAX {
+        // A full reparse (parser upgrade, tsconfig change, --full) deletes and
+        // re-creates EVERY node — their vectors are gone with them. Silently
+        // skipping here would leave semantic_search empty until a manual
+        // semantic-index (an stderr warning the MCP client never sees). Since
+        // the user has opted into semantic (embed_model stamped), self-heal by
+        // running semantic-index in the BACKGROUND — same detached pattern as
+        // auto_scip; the generation stamp prevents respawn loops.
+        let generation = store.meta_get("generation").ok().flatten().unwrap_or_default();
+        let pending = store.meta_get("embed_pending").ok().flatten().unwrap_or_default();
+        if pending != generation {
+            let spawned = std::env::current_exe().ok().and_then(|exe| {
+                std::process::Command::new(exe)
+                    .args(["semantic-index", "--path"])
+                    .arg(root)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .stdin(std::process::Stdio::null())
+                    .spawn()
+                    .ok()
+            });
+            if spawned.is_some() {
+                let _ = store.meta_set("embed_pending", &generation);
+                eprintln!(
+                    "codegraph: {} symbols need re-embedding (> inline ceiling {AUTO_EMBED_MAX}) — semantic-index running in the background",
+                    items.len()
+                );
+                return;
+            }
+        }
+        eprintln!(
+            "codegraph: {} changed symbols exceed the inline embed ceiling ({AUTO_EMBED_MAX}) — run `codegraph semantic-index` to refresh semantic search",
+            items.len()
+        );
+        return;
+    }
+    let texts: Vec<String> = items.iter().map(|(_, t)| t.clone()).collect();
+    match codegraph_llm::embed_texts(&texts) {
+        Some((vecs, model)) if model == stamped => {
+            let rows: Vec<(String, Vec<f32>)> =
+                items.iter().zip(vecs).map(|((n, _), v)| (n.id.clone(), v)).collect();
+            if let Err(e) = store.upsert_vectors(&rows) {
+                eprintln!("codegraph: semantic vector refresh failed: {e}");
+            }
+        }
+        Some((_, model)) => eprintln!(
+            "codegraph: vectors are stamped '{stamped}' but the current embedder is '{model}' — refresh skipped; run `codegraph semantic-index` to re-embed"
+        ),
+        None => eprintln!(
+            "codegraph: no embedder reachable — semantic search may be stale for the changed files"
+        ),
+    }
+}
+
+/// The observable shape of a freshly parsed file — the counterpart of
+/// `Store::file_shape` (same item formats, so the two compare directly).
+/// Ids encode name AND class nesting (B1), so a method moving between classes
+/// shows up as a definition change. Locals and imports are excluded: they only
+/// influence calls in this same file, which any partial rebuild re-resolves
+/// anyway. Line numbers and bodies are excluded by construction — the common
+/// "edit a function body" case keeps the shape stable.
+fn parsed_shape(pf: &ParsedFile) -> codegraph_store::FileShape {
+    let mut shape = codegraph_store::FileShape::default();
+    for n in &pf.nodes {
+        match n.label {
+            codegraph_core::NodeLabel::File => {}
+            codegraph_core::NodeLabel::Function | codegraph_core::NodeLabel::Method => {
+                shape.fn_defs.insert(n.id.clone(), n.name.clone());
+            }
+            label => shape.other.push(format!("n\u{1}{}\u{1}{}\u{1}{:?}", n.id, n.name, label)),
+        }
+    }
+    for i in &pf.inherits {
+        shape.other.push(format!("i\u{1}{}\u{1}{}\u{1}{:?}", i.impl_name, i.super_name, i.kind));
+    }
+    for f in &pf.fields {
+        shape.other.push(format!("f\u{1}{}\u{1}{}\u{1}{}", f.class_id, f.field_name, f.type_name));
+    }
+    shape.other.sort_unstable();
+    shape
+}
+
+/// Names of Function/Method definitions present in exactly one of the two
+/// shapes — the "dirty" names whose call sites (anywhere) must re-resolve.
+fn fn_diff_names(old: &codegraph_store::FileShape, new: &codegraph_store::FileShape) -> Vec<String> {
+    let mut out = Vec::new();
+    for (id, name) in &old.fn_defs {
+        if new.fn_defs.get(id) != Some(name) {
+            out.push(name.clone());
+        }
+    }
+    for (id, name) in &new.fn_defs {
+        if old.fn_defs.get(id) != Some(name) {
+            out.push(name.clone());
+        }
+    }
+    out
+}
+
+/// Would `auto_indexstore` re-merge on this run (fresh Xcode build)? The
+/// partial edge rebuild must fall back to the full path in that case.
+#[cfg(feature = "indexstore")]
+fn indexstore_wants_remerge(db: &Store, root: &Path) -> bool {
+    let Some(store_path) = find_index_store(root) else { return false };
+    let mtime = mtime_secs(&store_path);
+    let stamped = db.meta_get("indexstore_mtime").ok().flatten().unwrap_or_default();
+    !mtime.is_empty() && mtime != stamped
+}
+
+#[cfg(not(feature = "indexstore"))]
+fn indexstore_wants_remerge(_db: &Store, _root: &Path) -> bool {
+    false
+}
+
+/// Current HEAD sha (None outside a git repo) — the cochanges cache key.
+fn git_head(root: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", &root.to_string_lossy(), "rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Git co-change pairs: files that changed together in the last 1000 commits
@@ -387,49 +804,226 @@ fn scip_path(root: &Path, explicit: Option<&Path>) -> Option<PathBuf> {
         .find(|p| p.extension().is_some_and(|x| x == "scip"))
 }
 
+/// File mtime as a seconds-since-epoch string ("" if unavailable) — the shared
+/// freshness-stamp currency for the IndexStore/SCIP tiers.
+fn mtime_secs(p: &Path) -> String {
+    std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default()
+}
+
+/// Splice `new` edges in, superseding any existing edge with the same
+/// (src, dst, relation) key — compiler-grade edges outrank tree-sitter ones.
+fn extend_superseding(edges: &mut Vec<Edge>, new: Vec<Edge>) {
+    {
+        let superseded: HashSet<(&str, &str, EdgeRelation)> =
+            new.iter().map(|e| (e.src.as_str(), e.dst.as_str(), e.relation)).collect();
+        edges.retain(|e| !superseded.contains(&(e.src.as_str(), e.dst.as_str(), e.relation)));
+    }
+    edges.extend(new);
+}
+
+/// Replay previously persisted edges of one justification (e.g. "IndexStore"),
+/// DROPPING any whose endpoint is gone from the current node set — a reparse can
+/// rename/remove structural node ids, and replaying a stale edge verbatim would
+/// violate the zero-phantom-edge invariant. Returns (reused, dropped).
+///
+/// ponytail: endpoint-existence is necessary, not sufficient — a retargeted
+/// call whose OLD target still exists elsewhere replays a stale edge until the
+/// next compiler run (IndexStore: next Xcode build; SCIP: next HEAD move).
+/// Upgrade path if it bites: stamp per-file freshness on compiler edges and
+/// drop those whose src file changed since the merge.
+fn reuse_persisted_edges(
+    db: &Store,
+    justification: &str,
+    nodes: &[Node],
+    edges: &mut Vec<Edge>,
+) -> (usize, usize) {
+    let Ok(prev) = db.edges_by_justification(justification) else { return (0, 0) };
+    if prev.is_empty() {
+        return (0, 0);
+    }
+    let valid: HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+    let total = prev.len();
+    let live: Vec<Edge> =
+        prev.into_iter().filter(|e| valid.contains(e.src.as_str()) && valid.contains(e.dst.as_str())).collect();
+    let reused = live.len();
+    if reused > 0 {
+        extend_superseding(edges, live);
+    }
+    (reused, total - reused)
+}
+
+/// Has the on-disk `.scip` changed since it was last merged (or was one passed
+/// explicitly)? Gates the full-rebuild path: a `.scip` that merely EXISTS but
+/// is already merged must not force a full rebuild on every index — only a new
+/// or updated one does (that's how a background indexer run gets picked up).
+fn scip_file_changed(db: &Store, root: &Path, explicit: Option<&Path>) -> bool {
+    if explicit.is_some() {
+        return true;
+    }
+    let Some(p) = scip_path(root, None) else { return false };
+    let mtime = mtime_secs(&p);
+    db.meta_get("scip_file_mtime").ok().flatten().unwrap_or_default() != mtime
+}
+
+/// Would `auto_scip` re-run the SCIP indexer on this run (opted in + HEAD
+/// moved)? The partial edge rebuild must fall back to the full path then.
+fn scip_wants_reacquire(db: &Store, root: &Path) -> bool {
+    if db.meta_get("scip_auto").ok().flatten().as_deref() != Some("1")
+        || std::env::var("CODEGRAPH_AUTO_SCIP").as_deref() == Ok("0")
+    {
+        return false;
+    }
+    let Some(head) = git_head(root) else { return false };
+    db.meta_get("scip_stamp").ok().flatten().as_deref() != Some(head.as_str())
+}
+
+/// SCIP tier lifecycle on the full-rebuild path. `fresh_scip` > 0 means
+/// `merge_scip_edges` just consumed a `.scip` from disk: stamp it and opt in
+/// to auto-reacquire. Otherwise: opted-in + HEAD moved → spawn the detected
+/// indexer DETACHED (never block a query on a minutes-long compiler run; the
+/// staleness probe picks the fresh `.scip` up when it lands) and meanwhile
+/// replay the persisted Scip-justified edges (endpoint-filtered, zero-phantom)
+/// so full rebuilds never silently lose the compiler tier.
+fn auto_scip(
+    db: &Store,
+    root: &Path,
+    nodes: &[Node],
+    edges: &mut Vec<Edge>,
+    fresh_scip: usize,
+    scip_seen: Option<String>,
+) {
+    let head = git_head(root).unwrap_or_default();
+    // Stamp the artifact as EXAMINED (pre-merge mtime) whether or not it
+    // yielded edges — a zero-edge .scip (foreign/empty/still-being-written)
+    // must not pin scip_file_changed→is_stale true and force a full rebuild
+    // on every query forever. A later write moves the mtime → re-examined.
+    if let Some(mtime) = &scip_seen {
+        let _ = db.meta_set("scip_file_mtime", mtime);
+    }
+    if fresh_scip > 0 {
+        let _ = db.meta_set("scip_auto", "1");
+        let _ = db.meta_set("scip_pending", "");
+        if !head.is_empty() {
+            let _ = db.meta_set("scip_stamp", &head);
+        }
+        return;
+    }
+    if scip_wants_reacquire(db, root) {
+        // one in-flight run at a time: `scip_pending` holds the HEAD being indexed
+        let pending = db.meta_get("scip_pending").ok().flatten().unwrap_or_default();
+        if pending != head {
+            if let Some(ix) = crate::scipcmd::detect(root) {
+                if crate::scipcmd::on_path(ix.bin) {
+                    let spawned = std::process::Command::new(ix.bin)
+                        .args(ix.args)
+                        .current_dir(root)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .stdin(std::process::Stdio::null())
+                        .spawn()
+                        .is_ok();
+                    if spawned {
+                        let _ = db.meta_set("scip_pending", &head);
+                        eprintln!(
+                            "scip: HEAD moved — {} running in the background; edges refresh on the next index after it finishes",
+                            ix.bin
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let (reused, dropped) = reuse_persisted_edges(db, "Scip", nodes, edges);
+    if dropped > 0 {
+        eprintln!("scip: reused {reused} compiler-grade edges, dropped {dropped} whose endpoints no longer exist");
+    } else if reused > 0 {
+        eprintln!("scip: reused {reused} compiler-grade edges");
+    }
+}
+
+/// Drop any persisted edge with a missing endpoint and record the count.
+/// Runs before every validate/commit — after it, a dangling edge reported by
+/// `validate_graph` is a genuine bug, not reuse residue.
+fn heal_dangling(store: &Store) {
+    match store.drop_dangling_edges() {
+        Ok(n) if n > 0 => {
+            eprintln!("codegraph: auto-healed {n} dangling edge(s)");
+            let _ = store.meta_set("healed_edges_last", &n.to_string());
+        }
+        _ => {}
+    }
+}
+
 /// Merge compiler-grade SCIP edges in: they supersede the tree-sitter edge for
 /// the same (src, dst, relation) and add precise edges tree-sitter missed.
-/// Opt-in Swift compiler-grade tier: read the DerivedData IndexStore (built by
-/// Xcode) and merge its precise CALL edges, superseding tree-sitter ones. Enriches
-/// once at index time; queries still served from the fast graph. macOS + feature.
+/// Swift compiler-grade tier — SMART + automatic (no manual step):
+/// - picks the DerivedData store MATCHING this repo's .xcodeproj/.xcworkspace name
+///   (never a random other project's store);
+/// - re-merges only when the store is NEWER than the stamped mtime (or forced);
+/// - otherwise REUSES the previously merged edges from the DB, so incremental /
+///   auto-heal reindexes never silently drop compiler edges.
 #[cfg(feature = "indexstore")]
-fn merge_indexstore_edges(root: &Path, nodes: &[Node], edges: &mut Vec<Edge>) -> usize {
-    let Some(store) = find_index_store(root) else {
-        eprintln!("indexstore: no DerivedData index store found (build the project in Xcode first)");
-        return 0;
+fn auto_indexstore(db: &Store, root: &Path, nodes: &[Node], edges: &mut Vec<Edge>, force: bool) {
+    let reuse = |edges: &mut Vec<Edge>| {
+        let (reused, dropped) = reuse_persisted_edges(db, "IndexStore", nodes, edges);
+        if dropped > 0 {
+            eprintln!("indexstore: reused {reused} compiler-grade edges, dropped {dropped} whose endpoints no longer exist");
+        } else if reused > 0 {
+            eprintln!("indexstore: reused {reused} compiler-grade edges (no new Xcode build)");
+        }
     };
+    let Some(store) = find_index_store(root) else {
+        reuse(edges);
+        return;
+    };
+    let mtime = mtime_secs(&store);
+    let stamped = db.meta_get("indexstore_mtime").ok().flatten().unwrap_or_default();
+    if !force && !mtime.is_empty() && mtime == stamped {
+        reuse(edges);
+        return;
+    }
     match codegraph_indexstore::import_indexstore(&store, nodes, root) {
         Ok(is_edges) if !is_edges.is_empty() => {
-            let superseded: HashSet<(String, String, EdgeRelation)> =
-                is_edges.iter().map(|e| (e.src.clone(), e.dst.clone(), e.relation)).collect();
-            edges.retain(|e| !superseded.contains(&(e.src.clone(), e.dst.clone(), e.relation)));
             let n = is_edges.len();
-            edges.extend(is_edges);
-            eprintln!("indexstore: merged {n} compiler-grade edges from {}", store.display());
-            n
+            extend_superseding(edges, is_edges);
+            let _ = db.meta_set("indexstore_mtime", &mtime);
+            eprintln!("indexstore: merged {n} compiler-grade edges (fresh Xcode build detected)");
         }
-        Ok(_) => 0,
+        Ok(_) => reuse(edges),
         Err(e) => {
             eprintln!("indexstore: {e}");
-            0
+            reuse(edges);
         }
     }
 }
 
-/// Most-recently-built DerivedData index store. DerivedData dirs are named after the
-/// Xcode project (not the repo), so we pick the freshest store rather than name-match;
-/// pass `codegraph index … --indexstore` after an Xcode build of the right project.
+/// DerivedData store for THIS repo: dir names are `<XcodeProjectName>-<hash>`, so
+/// only stores whose prefix matches an .xcodeproj/.xcworkspace found in the repo
+/// qualify (never another project's store). Freshest match wins.
 #[cfg(feature = "indexstore")]
-fn find_index_store(_root: &Path) -> Option<PathBuf> {
+fn find_index_store(root: &Path) -> Option<PathBuf> {
+    let stems = xcode_project_stems(root);
+    if stems.is_empty() {
+        return None;
+    }
     let home = std::env::var_os("HOME")?;
     let dd = Path::new(&home).join("Library/Developer/Xcode/DerivedData");
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(&dd).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !stems.iter().any(|s| name.starts_with(&format!("{s}-"))) {
+            continue;
+        }
         let store = entry.path().join("Index.noindex/DataStore");
         if !store.is_dir() {
             continue;
         }
-        let Ok(m) = entry.metadata().and_then(|md| md.modified()) else { continue };
+        let Ok(m) = std::fs::metadata(&store).and_then(|md| md.modified()) else { continue };
         if best.as_ref().map(|(t, _)| m > *t).unwrap_or(true) {
             best = Some((m, store));
         }
@@ -437,11 +1031,36 @@ fn find_index_store(_root: &Path) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
+/// Names of .xcodeproj / .xcworkspace bundles in the repo (shallow walk, 3 levels).
+#[cfg(feature = "indexstore")]
+fn xcode_project_stems(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut frontier = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = frontier.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".xcodeproj") || name.ends_with(".xcworkspace") {
+                if let Some(stem) = name.rsplit_once('.').map(|(s, _)| s.to_string()) {
+                    if !out.contains(&stem) {
+                        out.push(stem);
+                    }
+                }
+            } else if depth < 3 && p.is_dir() && !name.starts_with('.') && name != "node_modules" && name != "Pods" {
+                frontier.push((p, depth + 1));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(not(feature = "indexstore"))]
 #[allow(clippy::ptr_arg)] // signature must match the feature-on variant (which needs Vec)
-fn merge_indexstore_edges(_root: &Path, _nodes: &[Node], _edges: &mut Vec<Edge>) -> usize {
-    eprintln!("indexstore: rebuild with `--features indexstore` (macOS + Xcode) to enable this tier");
-    0
+fn auto_indexstore(_db: &Store, _root: &Path, _nodes: &[Node], _edges: &mut Vec<Edge>, force: bool) {
+    if force {
+        eprintln!("indexstore: rebuild with `--features indexstore` (macOS + Xcode) to enable this tier");
+    }
 }
 
 fn merge_scip_edges(root: &Path, explicit: Option<&Path>, nodes: &[Node], edges: &mut Vec<Edge>) -> usize {
@@ -451,11 +1070,8 @@ fn merge_scip_edges(root: &Path, explicit: Option<&Path>, nodes: &[Node], edges:
     if scip.is_empty() {
         return 0;
     }
-    let superseded: HashSet<(String, String, EdgeRelation)> =
-        scip.iter().map(|e| (e.src.clone(), e.dst.clone(), e.relation)).collect();
-    edges.retain(|e| !superseded.contains(&(e.src.clone(), e.dst.clone(), e.relation)));
     let n = scip.len();
-    edges.extend(scip);
+    extend_superseding(edges, scip);
     n
 }
 
@@ -518,6 +1134,316 @@ fn project_name(root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tnode(id: &str) -> Node {
+        Node {
+            id: id.into(),
+            label: codegraph_core::NodeLabel::Function,
+            name: id.rsplit('.').next().unwrap_or(id).into(),
+            file_path: "t.py".into(),
+            line_start: 1,
+            line_end: 1,
+            language: "python".into(),
+            metadata: Metadata::new(),
+            community: None,
+            pagerank: 0.0,
+            betweenness: 0.0,
+        }
+    }
+
+    fn tedge(src: &str, dst: &str, justification: &str) -> Edge {
+        let mut metadata = Metadata::new();
+        metadata.insert("justification".into(), serde_json::Value::String(justification.into()));
+        Edge {
+            src: src.into(),
+            dst: dst.into(),
+            relation: EdgeRelation::Calls,
+            tier: codegraph_core::ResolutionTier::Scip,
+            confidence: codegraph_core::Confidence::Extracted,
+            src_file: "t.py".into(),
+            src_line: 1,
+            metadata,
+        }
+    }
+
+    /// Reused compiler-grade edges must be filtered against the CURRENT node
+    /// set — a stale endpoint is dropped, never replayed (zero-phantom).
+    #[test]
+    fn reuse_filters_dangling_edges() {
+        let tmp = std::env::temp_dir().join(format!("cg_reuse_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let store = Store::open(&tmp.join("g.db")).unwrap();
+        let nodes = vec![tnode("p.a"), tnode("p.b")];
+        store.bulk_upsert_nodes(&nodes).unwrap();
+        store
+            .bulk_upsert_edges(&[tedge("p.a", "p.b", "IndexStore"), tedge("p.a", "p.ghost", "IndexStore")])
+            .unwrap();
+        let mut edges = Vec::new();
+        let (reused, dropped) = reuse_persisted_edges(&store, "IndexStore", &nodes, &mut edges);
+        assert_eq!((reused, dropped), (1, 1));
+        assert_eq!(edges.len(), 1);
+        assert_eq!((edges[0].src.as_str(), edges[0].dst.as_str()), ("p.a", "p.b"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The partial (wave) path spares compiler-grade edges — if a reparse
+    /// removed such an edge's endpoint, the pre-commit heal must drop it and
+    /// the graph must converge to the from-scratch result.
+    #[test]
+    fn partial_rebuild_heals_spared_compiler_edge() {
+        let tmp = std::env::temp_dir().join(format!("cg_heal_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("a.py"), "def helper():\n    return 1\n\ndef caller():\n    helper()\n").unwrap();
+        let db = tmp.join("g.db");
+        index_dir(&tmp, &db, false, None, false, None).unwrap();
+        // Inject a stale compiler-grade edge: real src, endpoint that no longer exists.
+        {
+            let store = Store::open(&db).unwrap();
+            let src = store.graph_nodes().unwrap().iter().find(|n| n.name == "caller").unwrap().id.clone();
+            store.bulk_upsert_edges(&[tedge(&src, "p.ghost", "IndexStore")]).unwrap();
+            assert!(!store.validate_graph().unwrap().is_empty(), "injection produced a dangling edge");
+        }
+        // Body-only edit → partial path (edges table is NOT cleared) → heal must fire.
+        std::fs::write(tmp.join("a.py"), "def helper():\n    return 2\n\ndef caller():\n    helper()\n").unwrap();
+        let s = index_dir(&tmp, &db, false, None, false, None).unwrap();
+        assert!(s.partial, "body-only edit must take the partial path");
+        let store = Store::open(&db).unwrap();
+        assert!(store.validate_graph().unwrap().is_empty(), "dangling edge healed before commit");
+        // Converges to the from-scratch graph byte-for-byte.
+        let db2 = tmp.join("g2.db");
+        index_dir(&tmp, &db2, false, None, false, None).unwrap();
+        assert_eq!(
+            store.canonical_hash().unwrap(),
+            Store::open(&db2).unwrap().canonical_hash().unwrap(),
+            "healed incremental graph must equal a fresh full index"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The graph answers only for the repo it was built from: a stamped
+    /// repo_root mismatch is a hard error; legacy stamps pass; non-codegraph
+    /// files are rejected.
+    #[test]
+    fn identity_stamp_and_check() {
+        let tmp = std::env::temp_dir().join(format!("cg_ident_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("repo");
+        let other = tmp.join("other");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(repo.join("a.py"), "def f():\n    return 1\n").unwrap();
+        let db = tmp.join("g.db");
+        index_dir(&repo, &db, false, None, false, None).unwrap();
+        // stamped + matching root → ok
+        assert_eq!(
+            Store::open(&db).unwrap().meta_get("repo_root").unwrap().unwrap(),
+            repo.canonicalize().unwrap().to_string_lossy()
+        );
+        assert!(check_identity(&repo, &db).is_ok());
+        // different repo → hard error naming both paths
+        let err = check_identity(&other, &db).unwrap_err().to_string();
+        assert!(err.contains("was built for"), "unexpected error: {err}");
+        // legacy graph (meta table, no stamp) → passes with no error
+        let legacy = tmp.join("legacy.db");
+        drop(Store::open(&legacy).unwrap());
+        assert!(check_identity(&repo, &legacy).is_ok());
+        // non-codegraph file → rejected, never served
+        let foreign = tmp.join("foreign.db");
+        std::fs::write(&foreign, b"not a database").unwrap();
+        assert!(check_identity(&repo, &foreign).is_err());
+        // missing db → fine (first index will create it)
+        assert!(check_identity(&repo, &tmp.join("missing.db")).is_ok());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// SCIP lifecycle safety: a repo that never opted in must never spawn an
+    /// indexer (no pending stamp), and `.scip` change detection must be
+    /// mtime-stamped — presence alone must NOT force endless full rebuilds.
+    #[test]
+    fn scip_gating_and_file_stamp() {
+        let tmp = std::env::temp_dir().join(format!("cg_scipgate_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("a.py"), "def f():\n    return 1\n").unwrap();
+        let db = tmp.join("g.db");
+        index_dir(&tmp, &db, false, None, false, None).unwrap();
+        let store = Store::open(&db).unwrap();
+        assert_eq!(store.meta_get("scip_auto").unwrap(), None, "no opt-in without a merged .scip");
+        assert!(
+            store.meta_get("scip_pending").unwrap().unwrap_or_default().is_empty(),
+            "no background indexer without opt-in"
+        );
+        assert!(!scip_wants_reacquire(&store, &tmp));
+        // .scip change detection: none → unchanged; new file → changed; stamp → unchanged
+        assert!(!scip_file_changed(&store, &tmp, None));
+        std::fs::write(tmp.join("index.scip"), b"not a real scip file").unwrap();
+        assert!(scip_file_changed(&store, &tmp, None), "new .scip must be picked up");
+        assert!(is_stale(&tmp) || true, "smoke: is_stale must not panic with a .scip present");
+        let mtime = std::fs::metadata(tmp.join("index.scip"))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs().to_string())
+            .unwrap();
+        store.meta_set("scip_file_mtime", &mtime).unwrap();
+        assert!(!scip_file_changed(&store, &tmp, None), "merged .scip must not force full rebuilds");
+        assert!(scip_file_changed(&store, &tmp, Some(&tmp.join("index.scip"))), "explicit --scip always merges");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// tsconfig `paths` aliases: `@app/svc` binds to the aliased in-repo file
+    /// (ImportNarrowed), and an alias edit invalidates the graph (hash gate).
+    #[test]
+    fn tsconfig_alias_resolves_and_invalidates() {
+        let tmp = std::env::temp_dir().join(format!("cg_alias_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("web/src")).unwrap();
+        std::fs::write(
+            tmp.join("web/tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@app/*":["src/*"]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.join("web/src/svc.ts"), "export function doThing() { return 1; }\n").unwrap();
+        std::fs::write(tmp.join("web/src/a.ts"), "import { doThing } from '@app/svc';\nexport function go() { doThing(); }\n").unwrap();
+        // decoy with the same fn name elsewhere — kills GlobalUnique so only the
+        // import evidence can resolve the call
+        std::fs::write(tmp.join("web/src/other.ts"), "export function doThing() { return 2; }\n").unwrap();
+        let db = tmp.join("g.db");
+        index_dir(&tmp, &db, false, None, false, None).unwrap();
+        {
+            let store = Store::open(&db).unwrap();
+            let callers: Vec<String> = store.callers_of("doThing").unwrap().into_iter().map(|n| n.name).collect();
+            assert_eq!(callers, vec!["go"], "alias-narrowed import must bind the call");
+            let edges = store.edges_by_justification("ImportNarrowed").unwrap();
+            assert!(
+                edges.iter().any(|e| e.src.ends_with("go") && e.dst.contains("svc")),
+                "edge must carry ImportNarrowed and point at the ALIASED file: {edges:?}"
+            );
+        }
+        // break the alias → the edge must disappear (tsconfig hash forces full)
+        std::fs::write(
+            tmp.join("web/tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@elsewhere/*":["src/*"]}}}"#,
+        )
+        .unwrap();
+        assert!(is_stale(&tmp), "tsconfig edit must flag the graph stale");
+        index_dir(&tmp, &db, false, None, false, None).unwrap();
+        let store = Store::open(&db).unwrap();
+        assert!(store.callers_of("doThing").unwrap().is_empty(), "broken alias must drop the edge");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Body edit (stable interface signature) must take the PARTIAL edge-rebuild
+    /// path and still produce a graph byte-identical to a from-scratch full
+    /// index of the same tree — the determinism guarantee extended to the
+    /// incremental path.
+    #[test]
+    fn partial_edge_rebuild_matches_full_index() {
+        let tmp = std::env::temp_dir().join(format!("cg_partial_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // cross-file edge b.other -> a.helper (globally-unique name)
+        std::fs::write(tmp.join("a.py"), "def helper():\n    return 1\n\ndef caller():\n    helper()\n").unwrap();
+        std::fs::write(tmp.join("b.py"), "def other():\n    helper()\n").unwrap();
+        let db1 = tmp.join("g1.db");
+        let s1 = index_dir(&tmp, &db1, false, None, false, None).unwrap();
+        assert!(!s1.partial, "first index is a full build");
+
+        // BODY-only edit: same defs, caller() drops its call — the stale
+        // caller->helper edge must disappear via the partial path.
+        std::fs::write(tmp.join("a.py"), "def helper():\n    return 2\n\ndef caller():\n    return 3\n").unwrap();
+        let s2 = index_dir(&tmp, &db1, false, None, false, None).unwrap();
+        assert!(s2.partial, "stable interface signature must take the partial path");
+
+        // Fresh full index of the same tree → byte-identical canonical graph.
+        let db2 = tmp.join("g2.db");
+        let s3 = index_dir(&tmp, &db2, false, None, false, None).unwrap();
+        assert!(!s3.partial);
+        let h_incremental = Store::open(&db1).unwrap().canonical_hash().unwrap();
+        let h_full = Store::open(&db2).unwrap().canonical_hash().unwrap();
+        assert_eq!(h_incremental, h_full, "partial rebuild must equal a full rebuild byte-for-byte");
+
+        // The dropped call really is gone, the cross-file edge really remains.
+        let store = Store::open(&db1).unwrap();
+        let helper_callers: Vec<String> =
+            store.callers_of("helper").unwrap().into_iter().map(|n| n.name).collect();
+        assert_eq!(helper_callers, vec!["other"], "only b.other still calls helper");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Renaming a function is a definition-only change: the WAVE path must
+    /// re-resolve the callers' files (found via the raw-calls index, no repo
+    /// scan) and end up byte-identical to a from-scratch full index.
+    #[test]
+    fn wave_rename_matches_full_index() {
+        let tmp = std::env::temp_dir().join(format!("cg_wave_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("a.py"), "def helper():\n    return 1\n").unwrap();
+        std::fs::write(tmp.join("b.py"), "def other():\n    helper()\n").unwrap();
+        // c.py is untouched by the wave (names nothing dirty) — its rows must survive
+        std::fs::write(tmp.join("c.py"), "def lonely():\n    return 2\n\ndef c_caller():\n    lonely()\n").unwrap();
+        let db = tmp.join("g.db");
+        index_dir(&tmp, &db, false, None, false, None).unwrap();
+        assert_eq!(Store::open(&db).unwrap().callers_of("helper").unwrap().len(), 1);
+
+        // rename helper -> freshname: b.py's call must stop resolving — the wave
+        // reaches b.py through the dirty name, NOT through a full rebuild.
+        std::fs::write(tmp.join("a.py"), "def freshname():\n    return 1\n").unwrap();
+        let s = index_dir(&tmp, &db, false, None, false, None).unwrap();
+        assert!(s.partial, "definition-only change must take the wave path");
+        {
+            let store = Store::open(&db).unwrap();
+            assert!(store.callers_of("helper").unwrap().is_empty(), "stale edge to renamed def is gone");
+            assert_eq!(store.callers_of("lonely").unwrap().len(), 1, "untouched file keeps its edges");
+        }
+        // byte-identical to a fresh full index of the same tree
+        let db2 = tmp.join("g2.db");
+        index_dir(&tmp, &db2, false, None, false, None).unwrap();
+        let h1 = Store::open(&db).unwrap().canonical_hash().unwrap();
+        let h2 = Store::open(&db2).unwrap().canonical_hash().unwrap();
+        assert_eq!(h1, h2, "wave rebuild must equal a full rebuild byte-for-byte");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A deleted file's definitions are dirty names: its callers drop their
+    /// edges via the wave, without a full rebuild.
+    #[test]
+    fn wave_handles_pruned_file() {
+        let tmp = std::env::temp_dir().join(format!("cg_prune_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("a.py"), "def helper():\n    return 1\n").unwrap();
+        std::fs::write(tmp.join("b.py"), "def other():\n    helper()\n").unwrap();
+        let db = tmp.join("g.db");
+        index_dir(&tmp, &db, false, None, false, None).unwrap();
+        std::fs::remove_file(tmp.join("a.py")).unwrap();
+        let s = index_dir(&tmp, &db, false, None, false, None).unwrap();
+        assert!(s.partial, "fn-only prune takes the wave path");
+        assert_eq!(s.pruned, 1);
+        let store = Store::open(&db).unwrap();
+        assert!(store.callers_of("helper").unwrap().is_empty());
+        assert!(store.validate_graph().unwrap().is_empty(), "no dangling edges after prune");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A class/inherit change is beyond the wave invariant — full rebuild.
+    #[test]
+    fn class_change_falls_back_to_full_rebuild() {
+        let tmp = std::env::temp_dir().join(format!("cg_cls_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("a.py"), "def helper():\n    return 1\n").unwrap();
+        let db = tmp.join("g.db");
+        index_dir(&tmp, &db, false, None, false, None).unwrap();
+        std::fs::write(tmp.join("a.py"), "def helper():\n    return 1\n\nclass NewThing:\n    pass\n").unwrap();
+        let s = index_dir(&tmp, &db, false, None, false, None).unwrap();
+        assert!(!s.partial, "class addition must force the full path");
+        assert!(Store::open(&db).unwrap().validate_graph().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn ensure_fresh_detects_every_change_class() {

@@ -58,6 +58,10 @@ pub fn import_scip(bytes: &[u8], nodes: &[Node]) -> anyhow::Result<Vec<Edge>> {
             if !seen.insert((src.id.as_str(), dst.id.as_str(), relation)) {
                 continue;
             }
+            // justification tags the merge SOURCE (vs "IndexStore") so reuse,
+            // audit, and per-tier reporting can tell the compiler tiers apart.
+            let mut metadata = Metadata::new();
+            metadata.insert("justification".into(), serde_json::Value::String("Scip".into()));
             edges.push(Edge {
                 src: src.id.clone(),
                 dst: dst.id.clone(),
@@ -66,7 +70,7 @@ pub fn import_scip(bytes: &[u8], nodes: &[Node]) -> anyhow::Result<Vec<Edge>> {
                 confidence: Confidence::Extracted,
                 src_file: doc.relative_path.clone(),
                 src_line: line,
-                metadata: Metadata::new(),
+                metadata,
             });
         }
     }

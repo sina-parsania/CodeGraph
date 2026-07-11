@@ -1,5 +1,5 @@
 //! Optional LLM layer: ONE OpenAI-compatible backend, parameterized by a
-//! provider spec. Local-first (LM Studio → mlx → Ollama), cloud opt-in
+//! provider spec. Local-first (MLX → LM Studio → Ollama), cloud opt-in
 //! (OpenAI / Gemini via an env key). Implements the core `LlmClient` trait;
 //! every call degrades to `None` when no server is reachable.
 
@@ -29,9 +29,10 @@ fn candidates() -> Vec<Candidate> {
     if let Some(base) = env("CODEGRAPH_LLM_BASE_URL") {
         return vec![Candidate { id: "custom", base_url: base, api_key_env: None, default_model: "local-model" }];
     }
+    // MLX first on request (best perf/RAM on Apple Silicon when running).
     let local = vec![
-        Candidate { id: "lmstudio", base_url: "http://localhost:1234/v1".into(), api_key_env: None, default_model: "local-model" },
         Candidate { id: "mlx", base_url: "http://localhost:8080/v1".into(), api_key_env: None, default_model: "local-model" },
+        Candidate { id: "lmstudio", base_url: "http://localhost:1234/v1".into(), api_key_env: None, default_model: "local-model" },
         Candidate { id: "ollama", base_url: "http://localhost:11434/v1".into(), api_key_env: None, default_model: "qwen2.5-coder:1.5b" },
     ];
     let cloud = vec![
@@ -39,8 +40,8 @@ fn candidates() -> Vec<Candidate> {
         Candidate { id: "gemini", base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(), api_key_env: Some("GEMINI_API_KEY"), default_model: "gemini-2.0-flash" },
     ];
     match env("CODEGRAPH_LLM_PROVIDER").as_deref() {
-        Some("lmstudio") => local.into_iter().take(1).collect(),
-        Some("mlx") => local.into_iter().skip(1).take(1).collect(),
+        Some("mlx") => local.into_iter().take(1).collect(),
+        Some("lmstudio") => local.into_iter().skip(1).take(1).collect(),
         Some("ollama") => local.into_iter().skip(2).take(1).collect(),
         Some("openai") => cloud.into_iter().take(1).collect(),
         Some("gemini") => cloud.into_iter().skip(1).take(1).collect(),
@@ -101,6 +102,16 @@ impl OpenAiCompatBackend {
     pub fn model(&self) -> &str {
         &self.model
     }
+}
+
+/// `detect()` cached for the process lifetime: probing costs up to 5 HTTP
+/// requests × 800 ms timeout, which a long-lived MCP server must not pay per
+/// query. A server started AFTER this process won't be picked up until restart —
+/// pin one explicitly via CODEGRAPH_LLM_PROVIDER / CODEGRAPH_LLM_BASE_URL.
+fn detected_backend() -> &'static Option<OpenAiCompatBackend> {
+    use std::sync::OnceLock;
+    static BACKEND: OnceLock<Option<OpenAiCompatBackend>> = OnceLock::new();
+    BACKEND.get_or_init(OpenAiCompatBackend::detect)
 }
 
 fn model_ids(resp: reqwest::blocking::Response) -> Vec<String> {
@@ -166,7 +177,7 @@ pub fn embed_texts(texts: &[String]) -> Option<(Vec<Vec<f32>>, String)> {
         let v = v.iter().map(|x| codegraph_core::normalize(x)).collect();
         return Some((v, label));
     }
-    let backend = OpenAiCompatBackend::detect().filter(|b| b.embed_model().is_some())?;
+    let backend = detected_backend().as_ref().filter(|b| b.embed_model().is_some())?;
     let model = backend.embed_model().unwrap_or("?").to_string();
     let mut out = Vec::with_capacity(texts.len());
     for t in texts {
@@ -181,29 +192,123 @@ pub fn embedder_available() -> bool {
     if cfg!(feature = "local-embed") {
         return true;
     }
-    OpenAiCompatBackend::detect().is_some_and(|b| b.embed_model().is_some())
+    detected_backend().as_ref().is_some_and(|b| b.embed_model().is_some())
 }
 
 /// Local model choice: `CODEGRAPH_LOCAL_EMBED=code` selects the code-trained
 /// jina-embeddings-v2-base-code (768-d, better for code semantics); default is
 /// bge-small-en-v1.5 (384-d, fast, matches earlier indexes).
+///
+/// The model is loaded ONCE per process (same pattern as `local_gen::ENGINE`) —
+/// ONNX model load costs hundreds of ms to seconds, and a long-lived MCP server
+/// serves many semantic_search calls. Mutex because `embed` needs exclusive access.
+#[cfg(feature = "local-embed")]
+fn local_embedder() -> &'static Option<(std::sync::Mutex<fastembed::TextEmbedding>, String)> {
+    use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+    use std::sync::{Mutex, OnceLock};
+    static MODEL: OnceLock<Option<(Mutex<TextEmbedding>, String)>> = OnceLock::new();
+    MODEL.get_or_init(|| {
+        let (which, label) = match std::env::var("CODEGRAPH_LOCAL_EMBED").as_deref() {
+            Ok("code") => (EmbeddingModel::JinaEmbeddingsV2BaseCode, "jina-code-v2 (local)"),
+            _ => (EmbeddingModel::BGESmallENV15, "bge-small-en-v1.5 (local)"),
+        };
+        let cache = std::env::var_os("CODEGRAPH_CACHE_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache/codegraph")))
+            .unwrap_or_else(|| std::path::PathBuf::from(".codegraph-cache"))
+            .join("fastembed");
+        let _ = std::fs::create_dir_all(&cache);
+        let opts = InitOptions::new(which).with_cache_dir(cache).with_show_download_progress(true);
+        TextEmbedding::try_new(opts).ok().map(|m| (Mutex::new(m), label.to_string()))
+    })
+}
+
 #[cfg(feature = "local-embed")]
 fn local_embed(texts: &[String]) -> Option<(Vec<Vec<f32>>, String)> {
-    use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-    let (which, label) = match std::env::var("CODEGRAPH_LOCAL_EMBED").as_deref() {
-        Ok("code") => (EmbeddingModel::JinaEmbeddingsV2BaseCode, "jina-code-v2 (local)"),
-        _ => (EmbeddingModel::BGESmallENV15, "bge-small-en-v1.5 (local)"),
-    };
-    let cache = std::env::var_os("CODEGRAPH_CACHE_DIR")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache/codegraph")))
-        .unwrap_or_else(|| std::path::PathBuf::from(".codegraph-cache"))
-        .join("fastembed");
-    let _ = std::fs::create_dir_all(&cache);
-    let opts = InitOptions::new(which).with_cache_dir(cache).with_show_download_progress(true);
-    let model = TextEmbedding::try_new(opts).ok()?;
+    let (model, label) = local_embedder().as_ref()?;
     let docs: Vec<&str> = texts.iter().map(String::as_str).collect();
-    model.embed(docs, None).ok().map(|v| (v, label.to_string()))
+    let out = model.lock().ok()?.embed(docs, None).ok()?;
+    Some((out, label.clone()))
+}
+
+
+/// Generate text: a reachable OpenAI-compat server FIRST (MLX preferred — best
+/// perf/RAM on Apple Silicon when running), else the BUNDLED in-process engine
+/// (mistral.rs, GGUF auto-downloaded once) when built with `--features
+/// local-llm` (CPU) / `local-llm-metal` (GPU), else None. Same layering as
+/// `embed_texts`.
+pub fn generate_text(prompt: &str, max_tokens: usize) -> Option<String> {
+    generate_text_labeled(prompt, max_tokens).map(|(out, _)| out)
+}
+
+/// Like `generate_text`, but also returns a "provider / model" label so
+/// callers can attribute the answer.
+pub fn generate_text_labeled(prompt: &str, max_tokens: usize) -> Option<(String, String)> {
+    if let Some(b) = detected_backend().as_ref() {
+        if let Some(out) = b.generate(prompt, max_tokens) {
+            return Some((out, format!("{} / {}", b.provider(), b.model())));
+        }
+    }
+    #[cfg(feature = "local-llm")]
+    {
+        return local_gen::generate(prompt, max_tokens).map(|out| (out, local_gen::label()));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// True when any generation path exists (server or bundled engine).
+pub fn generator_available() -> bool {
+    cfg!(feature = "local-llm") || detected_backend().is_some()
+}
+
+#[cfg(feature = "local-llm")]
+mod local_gen {
+    /// Bundled engine = mistral.rs (pure Rust, cargo-only, no cmake, no server;
+    /// CPU by default, Metal GPU via `local-llm-metal`). Default model:
+    /// Qwen2.5-Coder 0.5B Q4 GGUF (~400 MB download, ~600 MB RAM) — sized for
+    /// fast rerank/HyDE/ask assists, loaded lazily and only when no server is
+    /// reachable. Override: CODEGRAPH_LOCAL_LLM_REPO / CODEGRAPH_LOCAL_LLM_FILE
+    /// (e.g. the 1.5B for higher answer quality).
+    const REPO: &str = "Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF";
+    const FILE: &str = "qwen2.5-coder-0.5b-instruct-q4_k_m.gguf";
+
+    pub fn label() -> String {
+        let file = std::env::var("CODEGRAPH_LOCAL_LLM_FILE").unwrap_or_else(|_| FILE.into());
+        format!("bundled mistral.rs / {file}")
+    }
+
+    use std::sync::OnceLock;
+
+    // Model load costs seconds; long-lived processes (MCP server) pay it once.
+    static ENGINE: OnceLock<Option<(tokio::runtime::Runtime, mistralrs::Model)>> = OnceLock::new();
+
+    fn engine() -> &'static Option<(tokio::runtime::Runtime, mistralrs::Model)> {
+        ENGINE.get_or_init(|| {
+            use mistralrs::GgufModelBuilder;
+            let repo = std::env::var("CODEGRAPH_LOCAL_LLM_REPO").unwrap_or_else(|_| REPO.into());
+            let file = std::env::var("CODEGRAPH_LOCAL_LLM_FILE").unwrap_or_else(|_| FILE.into());
+            eprintln!("[codegraph] no LLM server detected — loading bundled engine ({repo}); first run downloads the model (one-time, cached in ~/.cache/huggingface)");
+            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().ok()?;
+            let model = rt
+                .block_on(GgufModelBuilder::new(repo, vec![file]).build())
+                .map_err(|e| eprintln!("[codegraph] bundled engine failed to load: {e}"))
+                .ok()?;
+            Some((rt, model))
+        })
+    }
+
+    pub fn generate(prompt: &str, max_tokens: usize) -> Option<String> {
+        use mistralrs::{RequestBuilder, TextMessageRole};
+        let (rt, model) = engine().as_ref()?;
+        rt.block_on(async move {
+            let req = RequestBuilder::new()
+                .add_message(TextMessageRole::User, prompt)
+                .set_sampler_max_len(max_tokens);
+            let resp = model.send_chat_request(req).await.ok()?;
+            resp.choices.first()?.message.content.as_ref().map(|c| c.trim().to_string())
+        })
+    }
 }
 
 #[cfg(test)]
@@ -214,7 +319,8 @@ mod tests {
     fn candidate_order_is_local_first() {
         // No env set in the harness → auto order starts with local providers.
         let c = candidates();
-        assert_eq!(c[0].id, "lmstudio");
+        assert_eq!(c[0].id, "mlx");
+        assert!(c.iter().any(|x| x.id == "lmstudio"));
         assert!(c.iter().any(|x| x.id == "ollama"));
     }
 
