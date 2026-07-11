@@ -245,9 +245,28 @@ impl CodeGraphServer {
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         // variables/properties aren't nodes — surface their declarations too
         let fields = store.field_matches(&args.0.query).unwrap_or_default();
+        // COMPACT rows: full node JSON dragged metadata (incl. a Document's
+        // ENTIRE text) into every answer — measured 23 KB for one query.
+        // get_node(id) is the drill-down; search is the map.
+        let hits: Vec<serde_json::Value> = hits
+            .iter()
+            .map(|n| {
+                let mut row = serde_json::json!({
+                    "name": n.name, "kind": n.label, "file": n.file_path, "line": n.line_start, "id": n.id,
+                });
+                if n.label == codegraph_core::NodeLabel::Document {
+                    // one-line preview instead of the whole chunk
+                    if let Some(t) = n.metadata.get("text").and_then(|v| v.as_str()) {
+                        let preview: String = t.lines().find(|l| !l.trim().is_empty()).unwrap_or("").chars().take(120).collect();
+                        row["preview"] = serde_json::json!(preview);
+                    }
+                }
+                row
+            })
+            .collect();
         let mut out = serde_json::json!({
             "hits": hits,
-            "_hints": ["get_node(id) for full details", "callers(name) to trace usage", "context(query) to assemble task context"],
+            "_hints": ["get_node(id, snippet=true) for source/full text", "callers(name) to trace usage", "context(query) to assemble task context"],
         });
         if !fields.is_empty() {
             let rows: Vec<serde_json::Value> = fields
@@ -315,13 +334,16 @@ impl CodeGraphServer {
         }
         let callers = store.callers_of(&args.0.name).map_err(err)?;
         let coverage = store.coverage_for_callers(&args.0.name).map_err(err)?;
-        // Compact rows (name/file/line/id) — the full Node JSON doubled the
-        // token cost of every answer for fields agents never used.
+        // Compact rows (name/file/line) — the full Node JSON doubled the token
+        // cost of every answer, and the ~80-byte qualified id per resolved row
+        // added 40% more (measured 17 KB for a 62-caller method). Ids remain
+        // where they're actionable: ambiguous CANDIDATES (pinning) and search
+        // hits (get_node drill-down).
         let caller_files: std::collections::HashSet<&str> =
             callers.iter().map(|n| n.file_path.as_str()).collect();
         let rows: Vec<serde_json::Value> = callers
             .iter()
-            .map(|n| serde_json::json!({"name": n.name, "file": n.file_path, "line": n.line_start, "id": n.id}))
+            .map(|n| serde_json::json!({"name": n.name, "file": n.file_path, "line": n.line_start}))
             .collect();
         // TEXTUAL layer: files whose parser-verified CALL SITES name it but did
         // not resolve into an edge — the recall the resolved list can't give,
@@ -472,7 +494,7 @@ impl CodeGraphServer {
                     .callees(&n.id)
                     .iter()
                     .filter_map(|id| g.node_by_id(id))
-                    .map(|c| serde_json::json!({"name": c.name, "file": c.file_path, "line": c.line_start, "id": c.id}))
+                    .map(|c| serde_json::json!({"name": c.name, "file": c.file_path, "line": c.line_start}))
                     .collect();
                 let mut unresolved = store.unresolved_callee_names(&n.id).map_err(err)?;
                 unresolved.truncate(30);

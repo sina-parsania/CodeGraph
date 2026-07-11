@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.33.1 — token diet
+
+Measured on a live monorepo session: `search` returned FULL node JSON — for a
+Document hit that meant its entire text (23.5 KB for one query); resolved
+caller rows each carried an ~80-byte qualified id nobody acts on. Now: search
+returns compact rows (Documents get a one-line preview; `get_node(id,
+snippet=true)` is the drill-down), resolved caller/callee rows drop the id
+(kept where actionable: ambiguous candidates for pinning, search hits).
+search 23.5→3.9 KB (6×), 62-caller answer 17.3→9.1 KB.
+
 ## 1.33.0 — every name answers
 
 Driven by a 63-name grep-vs-graph differential harness on a private polyglot
