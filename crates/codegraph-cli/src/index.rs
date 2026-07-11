@@ -213,6 +213,22 @@ pub fn check_identity(root: &Path, db: &Path) -> Result<()> {
 /// stat-only probe above. This is the guarantee that queries never serve stale
 /// results (no false positives after edits / add / delete / git checkout).
 pub fn ensure_fresh(root: &Path) -> Result<()> {
+    // Long-lived MCP sessions only stamp the registry at startup; a month-long
+    // session would look idle to the TTL sweep of a command run in ANOTHER
+    // repo, which could delete this graph out from under the server. Touching
+    // (throttled) marks the project as live. 15 min ≪ any sane TTL.
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST_TOUCH: AtomicU64 = AtomicU64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if now.saturating_sub(LAST_TOUCH.load(Ordering::Relaxed)) > 900 {
+            LAST_TOUCH.store(now, Ordering::Relaxed);
+            crate::registry::housekeeping(Some((root, &db_path(root), false)));
+        }
+    }
     if is_stale(root) {
         let db = db_path(root);
         index_dir(root, &db, false, None, false, None)?;
@@ -491,12 +507,16 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
         let calls = store.all_calls()?;
         let built = build_with(&nodes, &calls, &inherits, &fields, &locals, &imports, include_ambiguous);
         let mut edges = built.edges;
+        // Capture the artifact's mtime BEFORE reading it: if the background
+        // indexer finishes mid-merge, stamping a post-merge mtime would mark
+        // the final content as examined without ever merging it.
+        let scip_seen = scip_path(root, None).map(|p| mtime_secs(&p)).filter(|m| !m.is_empty());
         let scip_edges = merge_scip_edges(root, scip, &nodes, &mut edges);
         // SCIP tier is STICKY: once merged, full rebuilds reuse the persisted
         // compiler-grade edges (filtered against current nodes), and if the
         // user opted in (ran `codegraph scip` once) a moved HEAD auto-reruns
         // the indexer — same contract as the Xcode IndexStore tier.
-        auto_scip(&store, root, &nodes, &mut edges, scip_edges);
+        auto_scip(&store, root, &nodes, &mut edges, scip_edges, scip_seen);
         // Swift compiler-grade edges are AUTOMATIC when the feature is compiled:
         // fresh Xcode build (store mtime > stamped) -> re-merge; otherwise the
         // previously merged edges are REUSED so auto-heal never drops them.
@@ -569,7 +589,7 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
     }
     store.bump_generation()?;
     txn.commit()?;
-    auto_embed_changed(&store, &changed_nodes);
+    auto_embed_changed(&store, root, &changed_nodes);
 
     Ok(IndexStats { files, changed, pruned, nodes: nodes.len(), edges: edges.len(), scip_edges, partial: partial_ok })
 }
@@ -594,7 +614,7 @@ pub fn embed_text_for(n: &Node) -> String {
 /// model mismatch (two models must never mix in one vector space) or when no
 /// embedder is reachable. Runs OUTSIDE the index transaction: embedding can
 /// take seconds and must not hold the write lock.
-fn auto_embed_changed(store: &Store, changed: &[Node]) {
+fn auto_embed_changed(store: &Store, root: &Path, changed: &[Node]) {
     // ponytail: inline ceiling — bigger batches (fresh index, git checkout)
     // should go through the explicit, progress-reporting `semantic-index`.
     const AUTO_EMBED_MAX: usize = 2000;
@@ -608,6 +628,35 @@ fn auto_embed_changed(store: &Store, changed: &[Node]) {
         return;
     }
     if items.len() > AUTO_EMBED_MAX {
+        // A full reparse (parser upgrade, tsconfig change, --full) deletes and
+        // re-creates EVERY node — their vectors are gone with them. Silently
+        // skipping here would leave semantic_search empty until a manual
+        // semantic-index (an stderr warning the MCP client never sees). Since
+        // the user has opted into semantic (embed_model stamped), self-heal by
+        // running semantic-index in the BACKGROUND — same detached pattern as
+        // auto_scip; the generation stamp prevents respawn loops.
+        let generation = store.meta_get("generation").ok().flatten().unwrap_or_default();
+        let pending = store.meta_get("embed_pending").ok().flatten().unwrap_or_default();
+        if pending != generation {
+            let spawned = std::env::current_exe().ok().and_then(|exe| {
+                std::process::Command::new(exe)
+                    .args(["semantic-index", "--path"])
+                    .arg(root)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .stdin(std::process::Stdio::null())
+                    .spawn()
+                    .ok()
+            });
+            if spawned.is_some() {
+                let _ = store.meta_set("embed_pending", &generation);
+                eprintln!(
+                    "codegraph: {} symbols need re-embedding (> inline ceiling {AUTO_EMBED_MAX}) — semantic-index running in the background",
+                    items.len()
+                );
+                return;
+            }
+        }
         eprintln!(
             "codegraph: {} changed symbols exceed the inline embed ceiling ({AUTO_EMBED_MAX}) — run `codegraph semantic-index` to refresh semantic search",
             items.len()
@@ -840,21 +889,27 @@ fn scip_wants_reacquire(db: &Store, root: &Path) -> bool {
 /// staleness probe picks the fresh `.scip` up when it lands) and meanwhile
 /// replay the persisted Scip-justified edges (endpoint-filtered, zero-phantom)
 /// so full rebuilds never silently lose the compiler tier.
-fn auto_scip(db: &Store, root: &Path, nodes: &[Node], edges: &mut Vec<Edge>, fresh_scip: usize) {
+fn auto_scip(
+    db: &Store,
+    root: &Path,
+    nodes: &[Node],
+    edges: &mut Vec<Edge>,
+    fresh_scip: usize,
+    scip_seen: Option<String>,
+) {
     let head = git_head(root).unwrap_or_default();
+    // Stamp the artifact as EXAMINED (pre-merge mtime) whether or not it
+    // yielded edges — a zero-edge .scip (foreign/empty/still-being-written)
+    // must not pin scip_file_changed→is_stale true and force a full rebuild
+    // on every query forever. A later write moves the mtime → re-examined.
+    if let Some(mtime) = &scip_seen {
+        let _ = db.meta_set("scip_file_mtime", mtime);
+    }
     if fresh_scip > 0 {
         let _ = db.meta_set("scip_auto", "1");
         let _ = db.meta_set("scip_pending", "");
         if !head.is_empty() {
             let _ = db.meta_set("scip_stamp", &head);
-        }
-        // remember WHICH .scip was merged so its mere presence stops forcing
-        // full rebuilds — only a newer file re-triggers the merge
-        if let Some(p) = scip_path(root, None) {
-            let mtime = mtime_secs(&p);
-            if !mtime.is_empty() {
-                let _ = db.meta_set("scip_file_mtime", &mtime);
-            }
         }
         return;
     }

@@ -32,6 +32,9 @@ fn index_fixture(lang: &str) -> (Vec<Node>, Vec<Edge>) {
         .args(["index", "--full"])
         .arg(&src)
         .env("CODEGRAPH_CACHE_DIR", &cache)
+        // isolate the project registry too: 13 parallel tests must not race on
+        // (or pollute) the USER's ~/.config/codegraph/registry.json
+        .env("XDG_CONFIG_HOME", tmp.join("config"))
         .output()
         .expect("failed to run codegraph binary");
     assert!(out.status.success(), "index failed: {}", String::from_utf8_lossy(&out.stderr));

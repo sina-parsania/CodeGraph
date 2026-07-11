@@ -913,6 +913,12 @@ fn main() -> anyhow::Result<()> {
             );
         }
         Command::Import { path, file } => {
+            // `codegraph import .` is a natural spelling: a DIRECTORY as the
+            // positional means "the repo", not the artifact file.
+            let (path, file) = match file {
+                Some(f) if f.is_dir() => (f, None),
+                other => (path, other),
+            };
             let src = file.unwrap_or_else(|| path.join(".codegraph/graph.db.zst"));
             let compressed = std::fs::read(&src)?;
             let bytes = zstd::decode_all(&compressed[..])?;
@@ -1124,6 +1130,10 @@ fn main() -> anyhow::Result<()> {
             #[cfg(feature = "local-llm")]
             println!("local chat engine: ✓ compiled in (--features local-llm, mistral.rs)");
             println!("\nsetup:  codegraph init   |   config: .codegraph.toml (env CODEGRAPH_* overrides)");
+            println!("env knobs:");
+            println!("  CODEGRAPH_CACHE_DIR   central graph cache root (default ~/.cache/codegraph)");
+            println!("  CODEGRAPH_TTL_DAYS    delete graphs of projects idle this long (default 30; 0 = never)");
+            println!("  CODEGRAPH_AUTO_SCIP   =0 disables the background SCIP re-index on HEAD move");
         }
         Command::Ingest { input, path } => {
             let chunks = codegraph_ingest::ingest(&input).map_err(anyhow::Error::msg)?;
