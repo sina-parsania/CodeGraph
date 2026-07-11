@@ -602,7 +602,22 @@ fn main() -> anyhow::Result<()> {
                 println!("{:<24} {:?}  {}:{}", n.name, n.label, n.file_path, n.line_start);
             }
             let coverage = store.coverage_for_callers(&name)?;
-            print_coverage(&coverage);
+            // Types are "called" through injection/annotations, not call sites —
+            // a DI'd service has ZERO call sites naming it. Never let a bare
+            // "no call sites ✓" stand when type-usage evidence exists.
+            let usages = store.type_usages(&name)?;
+            if !usages.is_empty() {
+                println!("type usages ({} file(s)):", usages.len());
+                for (f, ev) in usages.iter().take(25) {
+                    println!("  {f}  [{ev}]");
+                }
+                if usages.len() > 25 {
+                    println!("  … {} more", usages.len() - 25);
+                }
+            }
+            if coverage.total_call_sites > 0 || usages.is_empty() {
+                print_coverage(&coverage);
+            }
             // TEXTUAL layer: files with a CALL SITE naming it that didn't resolve
             // into an edge. Parser-verified call tokens (not comments/strings) —
             // recall without polluting the resolved graph. Explicitly labeled.

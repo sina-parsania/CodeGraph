@@ -826,6 +826,34 @@ impl Store {
         SELECT 1 FROM nodes n WHERE n.name = c.callee_name
         AND n.label IN ('Function','Method','Class'))";
 
+    /// Where a TYPE is USED: DI/typed fields, typed locals, in-repo imports of
+    /// the name, and subtypes. This is how classes/interfaces are "called" —
+    /// a NestJS service injected via `constructor(private s: FooService)` has
+    /// ZERO call sites naming it, and answering "no callers" for it is the
+    /// worst kind of miss (confident absence). Returns (file, evidence) pairs.
+    pub fn type_usages(&self, name: &str) -> Result<Vec<(String, String)>> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut push_all = |sql: &str, evidence: &str, out: &mut Vec<(String, String)>| -> Result<()> {
+            let mut stmt = self.conn.prepare(sql)?;
+            let rows = stmt.query_map([name], |r| r.get::<_, String>(0))?;
+            for r in rows {
+                out.push((r?, evidence.to_string()));
+            }
+            Ok(())
+        };
+        push_all("SELECT DISTINCT file_path FROM fields WHERE type_name = ?1", "field/DI type", &mut out)?;
+        push_all("SELECT DISTINCT file_path FROM locals WHERE type_name = ?1", "typed local", &mut out)?;
+        push_all(
+            "SELECT DISTINCT file_path FROM imports WHERE name = ?1 AND substr(module,1,1) IN ('.','/')",
+            "import",
+            &mut out,
+        )?;
+        push_all("SELECT DISTINCT file_path FROM inherits WHERE super_name = ?1", "subtype", &mut out)?;
+        out.sort();
+        out.dedup_by(|a, b| a.0 == b.0); // one row per file, first evidence wins
+        Ok(out)
+    }
+
     /// The names a function's body CALLS that did not resolve into any edge —
     /// the outbound textual layer behind `callees` (in-repo-resolvable names
     /// only; externally-bound / no-in-repo-def names are excluded as noise).

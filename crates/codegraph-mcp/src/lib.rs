@@ -334,6 +334,20 @@ impl CodeGraphServer {
                 "unresolved_call_site_files = parser-verified call tokens naming it that did NOT resolve to an edge (textual evidence, not resolved callers)"
             );
         }
+        // classes/interfaces are USED via injection/type annotations, not call
+        // sites — surface that evidence so "no callers" never reads as "unused"
+        let usages = store.type_usages(&args.0.name).map_err(err)?;
+        if !usages.is_empty() {
+            let rows: Vec<serde_json::Value> = usages
+                .iter()
+                .take(50)
+                .map(|(f, ev)| serde_json::json!({"file": f, "evidence": ev}))
+                .collect();
+            out["type_usages"] = serde_json::json!(rows);
+            out["_type_note"] = serde_json::json!(
+                "type_usages = files USING this name as a TYPE (DI fields, typed locals, imports, subtypes) — the caller equivalent for classes/interfaces"
+            );
+        }
         if let Some(fb) = fallback_hint(&coverage, &args.0.name) {
             out["_fallback"] = fb;
         }
