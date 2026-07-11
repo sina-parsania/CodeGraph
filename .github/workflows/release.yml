@@ -27,6 +27,16 @@ jobs:
       - name: Rename
         shell: bash
         run: cp target/${{ matrix.target }}/release/codegraph${{ contains(matrix.os, 'windows') && '.exe' || '' }} ${{ matrix.name }}
+      - name: Portable IndexStore rpath (macOS arm64)
+        if: contains(matrix.features, 'indexstore')
+        shell: bash
+        # the CI runner's Xcode lives at /Applications/Xcode_<ver>.app — a binary
+        # carrying only that rpath dies with "Library not loaded: libIndexStore"
+        # on every user machine (bit v1.31.0). Add the standard install path;
+        # re-sign since install_name_tool invalidates the signature.
+        run: |
+          install_name_tool -add_rpath "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib" "${{ matrix.name }}"
+          codesign -f -s - "${{ matrix.name }}"
       - name: Upload to release
         env: { GH_TOKEN: "${{ github.token }}" }
         shell: bash
