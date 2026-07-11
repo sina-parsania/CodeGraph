@@ -10,7 +10,7 @@ use tree_sitter::{Language, Node as TsNode, Parser};
 /// Bump whenever parse OUTPUT changes shape (new node kinds, name filters,
 /// import handling). A stamped-version mismatch forces a full reparse so one
 /// graph never mixes two parser behaviors (incremental == full would break).
-pub const PARSER_VERSION: u32 = 3;
+pub const PARSER_VERSION: u32 = 6;
 
 pub struct ParsedFile {
     pub nodes: Vec<Node>,
@@ -19,6 +19,10 @@ pub struct ParsedFile {
     pub fields: Vec<RawField>,
     pub locals: Vec<RawLocal>,
     pub imports: Vec<RawImport>,
+    /// Distinct TYPE NAMES this file references in type positions (annotations,
+    /// generic args, array/optional elements, return types, extends clauses).
+    /// Pure usage EVIDENCE (feeds `type_usages`) — never resolution input.
+    pub type_refs: Vec<String>,
 }
 
 impl ParsedFile {
@@ -30,6 +34,7 @@ impl ParsedFile {
             fields: Vec::new(),
             locals: Vec::new(),
             imports: Vec::new(),
+            type_refs: Vec::new(),
         }
     }
 }
@@ -340,7 +345,99 @@ fn parse_with(spec: &LangSpec, project: &str, rel_path: &str, source: &str) -> P
     let mut imports = Vec::new();
     let ctx = Ctx { spec, project, segs: &file_segs, rel_path, file_id: &file_id };
     collect(tree.root_node(), bytes, &ctx, None, None, &mut nodes, &mut calls, &mut inherits, &mut fields, &mut locals, &mut imports);
-    ParsedFile { nodes, calls, inherits, fields, locals, imports }
+    let type_refs = collect_type_refs(tree.root_node(), bytes, spec.name);
+    ParsedFile { nodes, calls, inherits, fields, locals, imports, type_refs }
+}
+
+/// Every distinct TYPE NAME the file references in a type position — generic
+/// args (`Response<Foo>`), array/optional elements (`[Foo]`, `Foo?`), return
+/// types, annotations, extends clauses. This is where classes/DTOs are USED
+/// without any call site or captured field; recorded as file-level evidence
+/// for `type_usages`, never fed to resolution (so no precision risk).
+fn collect_type_refs(root: TsNode, src: &[u8], lang: &str) -> Vec<String> {
+    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let keep = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 100
+            && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && s.chars().any(char::is_alphabetic)
+    };
+    let mut out: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        let k = n.kind();
+        match lang {
+            // dedicated type-identifier kind in these grammars
+            "typescript" | "javascript" | "java" | "csharp" | "go" | "rust" | "c" | "cpp" => {
+                if k == "type_identifier" {
+                    if let Some(s) = text(n) {
+                        if keep(&s) {
+                            out.insert(s);
+                        }
+                    }
+                }
+            }
+            // wrapper node whose identifier child is the type name
+            "swift" | "kotlin" => {
+                if k == "user_type" {
+                    if let Some(id) = (0..n.named_child_count() as u32)
+                        .filter_map(|i| n.named_child(i))
+                        .find(|c| c.kind().ends_with("identifier"))
+                        .and_then(text)
+                    {
+                        if keep(&id) {
+                            out.insert(id);
+                        }
+                    }
+                }
+            }
+            // annotations are plain expressions under a `type` node — take the
+            // identifiers inside (Optional[Foo] contributes Optional AND Foo)
+            "python" => {
+                if k == "type" {
+                    let mut inner = vec![n];
+                    while let Some(t) = inner.pop() {
+                        if t.kind() == "identifier" {
+                            if let Some(s) = text(t) {
+                                if keep(&s) {
+                                    out.insert(s);
+                                }
+                            }
+                        }
+                        let mut c = t.walk();
+                        for ch in t.children(&mut c) {
+                            inner.push(ch);
+                        }
+                    }
+                    continue; // children already walked
+                }
+            }
+            _ => {}
+        }
+        // member access on a Capitalized/ALL_CAPS base (`ERROR_CODE.X`,
+        // `ProfileRoutes.PASSWORD`, `Foo.shared`) — the base names a type/
+        // object being USED even though nothing is called. Evidence only.
+        let member_base = match (lang, k) {
+            ("typescript" | "javascript", "member_expression") => n.child_by_field_name("object"),
+            ("swift" | "kotlin", "navigation_expression") => n.named_child(0),
+            ("python", "attribute") => n.child_by_field_name("object"),
+            _ => None,
+        };
+        if let Some(base) = member_base {
+            if base.kind().ends_with("identifier") {
+                if let Some(s) = text(base) {
+                    if keep(&s) && s.chars().next().is_some_and(|c| c.is_uppercase()) {
+                        out.insert(s);
+                    }
+                }
+            }
+        }
+        let mut c = n.walk();
+        for ch in n.children(&mut c) {
+            stack.push(ch);
+        }
+    }
+    out.into_iter().collect()
 }
 
 struct Ctx<'a> {
@@ -420,7 +517,30 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
     // Import bindings (T6 evidence): TS/JS relative imports + Python from-imports.
     match (ctx.spec.name, node.kind()) {
         ("typescript" | "javascript", "import_statement") => ts_extract_import(node, src, ctx.rel_path, imports),
+        // barrel re-exports (`export { X } from './y'`) BIND X in this file —
+        // usage evidence and resolution input exactly like an import
+        ("typescript" | "javascript", "export_statement") if node.child_by_field_name("source").is_some() => {
+            ts_extract_import(node, src, ctx.rel_path, imports)
+        }
         ("python", "import_from_statement") => py_extract_import(node, src, ctx.rel_path, imports),
+        // Kotlin `import a.b.FoodDto` / `import a.b.X as Y` binds the last
+        // segment (or alias) — usage evidence for type_usages.
+        ("kotlin", "import_header") => {
+            let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+            let module = (0..node.named_child_count() as u32)
+                .filter_map(|i| node.named_child(i))
+                .find(|c| c.kind() == "identifier" || c.kind() == "qualified_identifier")
+                .and_then(text);
+            if let Some(module) = module {
+                let alias = named_child_of(node, "import_alias")
+                    .and_then(|a| (0..a.named_child_count() as u32).filter_map(|i| a.named_child(i)).find(|c| c.kind().ends_with("identifier")))
+                    .and_then(text);
+                let bound = alias.or_else(|| module.rsplit('.').next().map(str::to_string));
+                if let Some(name) = bound.filter(|n| !n.is_empty() && *n != "*") {
+                    imports.push(RawImport { file_path: ctx.rel_path.to_string(), name, module });
+                }
+            }
+        }
         _ => {}
     }
 
@@ -1178,8 +1298,9 @@ fn ts_extract_import(node: TsNode, src: &[u8], rel_path: &str, out: &mut Vec<Raw
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
         match n.kind() {
-            "import_specifier" => {
-                // `A as B` binds B locally; plain `A` binds A.
+            "import_specifier" | "export_specifier" => {
+                // `A as B` binds B locally; plain `A` binds A. Export specifiers
+                // only reach here for re-exports (`export {A} from './y'`).
                 let bound = n.child_by_field_name("alias").or_else(|| n.child_by_field_name("name"));
                 if let Some(name) = bound.and_then(text) {
                     push(name);

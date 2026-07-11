@@ -35,9 +35,9 @@
     "repo": "fastapi",
     "name": "File",
     "codegraph": {
-      "precision": 0.96,
+      "precision": 0.8888888888888888,
       "recall": 0.96,
-      "bytes": 1091,
+      "bytes": 1157,
       "answered": true
     },
     "grep": {
@@ -131,9 +131,9 @@
     "repo": "fastapi",
     "name": "alias",
     "codegraph": {
-      "precision": 1.0,
+      "precision": 0.18181818181818182,
       "recall": 0.6666666666666666,
-      "bytes": 47,
+      "bytes": 764,
       "answered": true
     },
     "grep": {
@@ -163,9 +163,9 @@
     "repo": "fastapi",
     "name": "errors",
     "codegraph": {
-      "precision": 0.375,
+      "precision": 0.25,
       "recall": 1.0,
-      "bytes": 390,
+      "bytes": 599,
       "answered": true
     },
     "grep": {
@@ -323,9 +323,9 @@
     "repo": "fastapi",
     "name": "Form",
     "codegraph": {
-      "precision": 1.0,
+      "precision": 0.9565217391304348,
       "recall": 0.9565217391304348,
-      "bytes": 954,
+      "bytes": 985,
       "answered": true
     },
     "grep": {
@@ -467,9 +467,9 @@
     "repo": "fastapi",
     "name": "errors",
     "codegraph": {
-      "precision": 0.375,
+      "precision": 0.25,
       "recall": 1.0,
-      "bytes": 390,
+      "bytes": 599,
       "answered": true
     },
     "grep": {
@@ -755,9 +755,9 @@
     "repo": "zod",
     "name": "includes",
     "codegraph": {
-      "precision": 0.16666666666666666,
+      "precision": 0.14285714285714285,
       "recall": 0.5,
-      "bytes": 194,
+      "bytes": 253,
       "answered": true
     },
     "grep": {
@@ -803,9 +803,9 @@
     "repo": "zod",
     "name": "int",
     "codegraph": {
-      "precision": 0.8,
+      "precision": 0.6666666666666666,
       "recall": 1.0,
-      "bytes": 173,
+      "bytes": 237,
       "answered": true
     },
     "grep": {

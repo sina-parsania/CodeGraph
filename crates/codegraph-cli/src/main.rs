@@ -575,8 +575,22 @@ fn main() -> anyhow::Result<()> {
                 let mut textual = store.unresolved_call_site_files(&name, attribute_to)?;
                 textual.retain(|f| !resolved.contains(f));
                 textual.sort();
-                for f in textual {
+                for f in &textual {
                     println!("~{f}");
+                }
+                // types are used via injection/annotations — the --files answer
+                // must include them or a DI'd service looks unused
+                let mut seen: std::collections::HashSet<String> =
+                    resolved.iter().cloned().chain(textual.iter().cloned()).collect();
+                for (f, ev) in store.type_usages(&name)? {
+                    // --files answers "which files USE it": the definition and
+                    // doc mentions belong to the human view, not the usage set
+                    if ev == "definition" || ev == "doc mention" {
+                        continue;
+                    }
+                    if seen.insert(f.clone()) {
+                        println!("~{f}  [{ev}]");
+                    }
                 }
                 if defs.len() > 1 {
                     println!("#dominant-of-{}-definitions; pin others with --id", defs.len());

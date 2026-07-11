@@ -338,6 +338,7 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
                     fields: Vec::new(),
                     locals: Vec::new(),
                     imports: Vec::new(),
+                    type_refs: Vec::new(),
                 }
             } else {
                 parse_file(&project, rel, source)
@@ -373,6 +374,7 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
         store.save_inherits(&rel, &pf.inherits)?;
         store.save_fields(&rel, &pf.fields)?;
         store.save_locals(&rel, &pf.locals)?;
+        store.save_type_refs(&rel, &pf.type_refs)?;
         // TS/JS non-relative imports: expand tsconfig aliases to root-relative
         // `/dir/file` modules. Whatever doesn't match stays with its package
         // specifier — the resolver ignores it, but coverage uses it as

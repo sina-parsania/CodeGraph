@@ -22,6 +22,10 @@ struct TsConfigScope {
 
 pub struct AliasMap {
     scopes: Vec<TsConfigScope>,
+    /// top-level directories of the repo — gate for baseUrl-style specifiers
+    /// (`src/models/x`): only a spec whose first segment is a REAL directory
+    /// may resolve root-relative, so `lodash`/`react` stay external.
+    top_dirs: std::collections::BTreeSet<String>,
 }
 
 /// (base_url, rules) of one config after resolving its `extends` chain.
@@ -36,8 +40,9 @@ impl AliasMap {
         let scope = self
             .scopes
             .iter()
-            .find(|s| s.dir.is_empty() || importer_rel.starts_with(&format!("{}/", s.dir)))?;
-        for (pattern, targets) in &scope.rules {
+            .find(|s| s.dir.is_empty() || importer_rel.starts_with(&format!("{}/", s.dir)));
+        if let Some(scope) = scope {
+            for (pattern, targets) in &scope.rules {
             let expanded: Vec<String> = match pattern.split_once('*') {
                 Some((pre, suf)) => {
                     if !(spec.starts_with(pre) && spec.ends_with(suf) && spec.len() >= pre.len() + suf.len()) {
@@ -57,9 +62,29 @@ impl AliasMap {
             // exists — the FIRST target is the declared priority. Precision is
             // still double-gated: the resolver only binds when the target file
             // actually defines the callee (a dead first target just drops).
-            let target = expanded.first()?;
-            let joined = join_rel(&scope.base_url, target);
-            return Some(format!("/{joined}"));
+                let target = expanded.first()?;
+                let joined = join_rel(&scope.base_url, target);
+                return Some(format!("/{joined}"));
+            }
+            // baseUrl-style non-relative import (`src/models/x` with baseUrl:'.'):
+            // join onto the scope's baseUrl and accept when the JOINED path
+            // starts inside a real top-level dir (`backend-app/src/...`) — the
+            // resolver still requires the target file to define the callee
+            // (unique-or-drop), so a wrong candidate just drops; `lodash` joins
+            // to `<scope>/lodash` whose first segment gate still passes… so
+            // additionally require a '/' in the spec (bare package names skip).
+            if spec.contains('/') {
+                let joined = join_rel(&scope.base_url, spec);
+                if joined.split('/').next().is_some_and(|first| self.top_dirs.contains(first)) {
+                    return Some(format!("/{joined}"));
+                }
+            }
+        }
+        // no scope: still allow the top-dir gate from the repo root
+        if let Some(first) = spec.split('/').next() {
+            if self.top_dirs.contains(first) && spec.contains('/') {
+                return Some(format!("/{spec}"));
+            }
         }
         None
     }
@@ -211,6 +236,19 @@ pub fn load_alias_maps(root: &Path) -> (AliasMap, String) {
         }
     }
     configs.sort();
+    // real top-level dirs (gate for baseUrl specifiers) — sorted for determinism
+    let mut top_dirs: std::collections::BTreeSet<String> = Default::default();
+    if let Ok(rd) = std::fs::read_dir(root) {
+        for e in rd.flatten() {
+            if e.path().is_dir() {
+                if let Some(n) = e.file_name().to_str() {
+                    if !n.starts_with('.') && n != "node_modules" {
+                        top_dirs.insert(n.to_string());
+                    }
+                }
+            }
+        }
+    }
     let mut h = Sha256::new();
     // Per directory, one config anchors the scope: prefer the plain
     // `tsconfig.json`, else the first variant that actually declares `paths`
@@ -244,7 +282,7 @@ pub fn load_alias_maps(root: &Path) -> (AliasMap, String) {
     }
     // nearest-ancestor wins: longest dir first, tie-break lexicographic
     scopes.sort_by(|a, b| b.dir.len().cmp(&a.dir.len()).then(a.dir.cmp(&b.dir)));
-    (AliasMap { scopes }, format!("{:x}", h.finalize()))
+    (AliasMap { scopes, top_dirs }, format!("{:x}", h.finalize()))
 }
 
 #[cfg(test)]

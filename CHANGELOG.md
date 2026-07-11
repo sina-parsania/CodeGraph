@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.33.0 — every name answers
+
+Driven by a 63-name grep-vs-graph differential harness on a private polyglot
+monorepo: for every REAL usage pattern found only by grep, either the graph
+now answers or the gap is a verified non-usage (string/docstring mentions).
+
+- **type_refs**: every type NAME a file references (generic args, array/
+  optional elements, return types, annotations) and Capitalized member-access
+  bases (`ERROR_CODE.X`, `Foo.shared`) are recorded per file — evidence for
+  `type_usages`, never resolution input.
+- **type_usages** (callers, CLI + MCP): definition · DI/typed field · typed
+  local · import · subtype · type reference · static member access · doc
+  mention — a DI'd NestJS service or a Kotlin object no longer reads as
+  "unused". `--files` keeps the machine contract (usage sites only).
+- **baseUrl-style TS imports** (`from 'src/models/x'`) resolve root-relative,
+  gated on real top-level directories so packages stay external; **barrel
+  re-exports** (`export { X } from './y'`) bind like imports; **Kotlin
+  imports** extracted.
+- Document CONTENT is FTS-indexed (schema v7): localization keys
+  (`.strings`), wiki/docs text — searchable with bm25 column weights.
+- Eval receipts unchanged: P 0.73 / R 0.87 / answer-rate 99% / 247 B.
+
 ## 1.32.0 — every name answers: types, variables, doc keys, files
 
 Driven by a 300-check stress harness over a real polyglot monorepo (functions,

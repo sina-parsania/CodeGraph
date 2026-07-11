@@ -24,7 +24,7 @@ pub enum StoreError {
 
 type Result<T> = std::result::Result<T, StoreError>;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// Register the sqlite-vec extension for EVERY connection this process opens
 /// (auto_extension is process-global). Powers the `vec_nodes` KNN virtual table.
@@ -242,6 +242,10 @@ impl Store {
              CREATE TABLE IF NOT EXISTS locals(
                caller_id TEXT, var_name TEXT, type_name TEXT, file_path TEXT);
              CREATE INDEX IF NOT EXISTS idx_locals_file ON locals(file_path);
+             CREATE TABLE IF NOT EXISTS type_refs(
+               file_path TEXT, type_name TEXT);
+             CREATE INDEX IF NOT EXISTS idx_type_refs_file ON type_refs(file_path);
+             CREATE INDEX IF NOT EXISTS idx_type_refs_name ON type_refs(type_name);
              CREATE TABLE IF NOT EXISTS meta(
                key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS cochanges(
@@ -888,6 +892,12 @@ impl Store {
             }
             Ok(())
         };
+        push_all(
+            "SELECT DISTINCT file_path FROM nodes WHERE name = ?1
+             AND label IN ('Class','Interface','Enum','Type','Function','Method')",
+            "definition",
+            &mut out,
+        )?;
         push_all("SELECT DISTINCT file_path FROM fields WHERE type_name = ?1", "field/DI type", &mut out)?;
         push_all("SELECT DISTINCT file_path FROM locals WHERE type_name = ?1", "typed local", &mut out)?;
         // in-repo imports only — python modules are dotted (not './'-prefixed),
@@ -901,6 +911,31 @@ impl Store {
             &mut out,
         )?;
         push_all("SELECT DISTINCT file_path FROM inherits WHERE super_name = ?1", "subtype", &mut out)?;
+        // singleton/static member access: `Foo.shared.bar()` records receiver
+        // "Foo.shared" on the call site — evidence the type is used there
+        push_all(
+            "SELECT DISTINCT file_path FROM calls
+             WHERE json_extract(receiver,'$.Named') = ?1
+                OR json_extract(receiver,'$.Named') LIKE ?1 || '.%'",
+            "static member access",
+            &mut out,
+        )?;
+        push_all(
+            "SELECT DISTINCT file_path FROM type_refs WHERE type_name = ?1",
+            "type reference",
+            &mut out,
+        )?;
+        // docs/wiki mentioning the name (doc CONTENT is FTS-indexed since v1.32)
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT n.file_path FROM nodes_fts f JOIN nodes n ON n.rowid = f.rowid
+                 WHERE nodes_fts MATCH '\"' || ?1 || '\"' AND n.label = 'Document' LIMIT 20",
+            )?;
+            let rows = stmt.query_map([name], |r| r.get::<_, String>(0))?;
+            for r in rows {
+                out.push((r?, "doc mention".to_string()));
+            }
+        }
         out.sort();
         out.dedup_by(|a, b| a.0 == b.0); // one row per file, first evidence wins
         Ok(out)
@@ -1233,6 +1268,7 @@ impl Store {
         self.conn.execute("DELETE FROM inherits WHERE file_path = ?1", [file_path])?;
         self.conn.execute("DELETE FROM fields WHERE file_path = ?1", [file_path])?;
         self.conn.execute("DELETE FROM locals WHERE file_path = ?1", [file_path])?;
+        self.conn.execute("DELETE FROM type_refs WHERE file_path = ?1", [file_path])?;
         self.conn.execute("DELETE FROM imports WHERE file_path = ?1", [file_path])?;
         Ok(())
     }
@@ -1543,6 +1579,15 @@ impl Store {
             .prepare("INSERT INTO locals(caller_id, var_name, type_name, file_path) VALUES(?1, ?2, ?3, ?4)")?;
         for l in items {
             stmt.execute(params![l.caller_id, l.var_name, l.type_name, file_path])?;
+        }
+        Ok(())
+    }
+
+    pub fn save_type_refs(&self, file_path: &str, names: &[String]) -> Result<()> {
+        self.conn.execute("DELETE FROM type_refs WHERE file_path = ?1", [file_path])?;
+        let mut stmt = self.conn.prepare("INSERT INTO type_refs(file_path, type_name) VALUES(?1, ?2)")?;
+        for n in names {
+            stmt.execute(params![file_path, n])?;
         }
         Ok(())
     }
