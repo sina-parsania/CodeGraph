@@ -655,9 +655,25 @@ impl Store {
         std::fs::write(db_out, bytes)?;
         Store::open(db_out)
     }
+    /// FTS with RANKING (previously rowid-ordered + truncated — the actual
+    /// definition of a searched name could fall out of the limit entirely):
+    /// bm25 relevance + definition-label boost (agents want the def, not the
+    /// twelfth test that mentions it) + exact-name boost + light test-file
+    /// penalty as a tiebreak. Deterministic weights.
     pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<Node>> {
         let mut stmt = self.conn.prepare(
-            "SELECT n.data FROM nodes_fts f JOIN nodes n ON n.rowid = f.rowid WHERE nodes_fts MATCH ?1 LIMIT ?2",
+            "SELECT n.data FROM nodes_fts f JOIN nodes n ON n.rowid = f.rowid
+             WHERE nodes_fts MATCH ?1
+             ORDER BY bm25(nodes_fts)
+               - CASE n.label
+                   WHEN 'Function' THEN 6.0 WHEN 'Method' THEN 6.0
+                   WHEN 'Class' THEN 5.0 WHEN 'Interface' THEN 5.0
+                   WHEN 'Enum' THEN 4.0 WHEN 'Route' THEN 4.0
+                   WHEN 'File' THEN 1.0 ELSE 0.0 END
+               - CASE WHEN lower(n.name) = lower(trim(?1, '\"*')) THEN 8.0 ELSE 0.0 END
+               + CASE WHEN n.file_path LIKE '%test%' OR n.file_path LIKE '%spec%' THEN 1.5 ELSE 0.0 END,
+               n.id
+             LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![query, limit as i64], |r| r.get::<_, String>(0))?;
         let mut out = Vec::new();
