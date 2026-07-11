@@ -1117,18 +1117,36 @@ fn main() -> anyhow::Result<()> {
                 .filter(|n| n.label != codegraph_core::NodeLabel::File)
                 .map(|n| (n, index::embed_text_for(n)))
                 .collect();
-            let texts: Vec<String> = items.iter().map(|(_, t)| t.clone()).collect();
-            match codegraph_llm::embed_texts(&texts) {
-                Some((vecs, model)) if !vecs.is_empty() => {
-                    let rows: Vec<(String, Vec<f32>)> =
-                        items.iter().zip(vecs).map(|((node, _), v)| (node.id.clone(), v)).collect();
-                    store.upsert_vectors(&rows)?;
-                    store.meta_set("embed_model", &model)?;
-                    println!("embedded {} symbols using {}", rows.len(), model);
+            // CHUNKED: embedding a 50k-symbol repo in one call held every text
+            // and every vector in RAM (>12 GB observed) with zero progress and
+            // an all-or-nothing DB write. Stream in chunks instead — memory
+            // stays flat, progress is visible, and an interrupt keeps
+            // everything embedded so far.
+            const CHUNK: usize = 1024;
+            let mut done = 0usize;
+            let mut model_used = String::new();
+            for chunk in items.chunks(CHUNK) {
+                let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
+                match codegraph_llm::embed_texts(&texts) {
+                    Some((vecs, model)) if !vecs.is_empty() => {
+                        let rows: Vec<(String, Vec<f32>)> =
+                            chunk.iter().zip(vecs).map(|((node, _), v)| (node.id.clone(), v)).collect();
+                        store.upsert_vectors(&rows)?;
+                        done += rows.len();
+                        model_used = model;
+                        eprintln!("embedded {done}/{} …", items.len());
+                    }
+                    _ => {
+                        println!(
+                            "no embedder available — rebuild with `--features local-embed` for a bundled model (bge-small, no server), or load one in LM Studio / Ollama"
+                        );
+                        break;
+                    }
                 }
-                _ => println!(
-                    "no embedder available — rebuild with `--features local-embed` for a bundled model (bge-small, no server), or load one in LM Studio / Ollama"
-                ),
+            }
+            if done > 0 {
+                store.meta_set("embed_model", &model_used)?;
+                println!("embedded {done} symbols using {model_used}");
             }
         }
         Command::Semantic { query: q, path, limit, hyde } => {
