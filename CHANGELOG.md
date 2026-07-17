@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.34.0 — zero-false-negative enumeration + ops hardening
+
+Enumeration moved from directory-walking to `git ls-files` (tracked +
+untracked-unignored), with the walker as fallback. This is not just faster —
+it is MORE COMPLETE: git knows which files are tracked, and tracked beats
+gitignore. Measured on a live monorepo: 26 real docs (SRS, bug
+investigations) lived under a `docs/*` ignore pattern but were committed
+anyway — the walker dropped them forever, the git tier indexes them.
+Staleness probe on a 3.6k-file repo: no-op index 0.19s.
+
+- **Nested plain repos** (monorepo of independent .git checkouts, no
+  .gitmodules): ls-files silently skips their subtrees — untracked dirs
+  carrying a `.git` are enumerated recursively; any level that can't take
+  the git path falls the whole enumeration back to the walker.
+- **`.codegraphignore` applied on the git listing** (root-level, cascades
+  into nested repos) — no more walker fallback just because the file exists.
+  Submodules (`.gitmodules`) still force the walker: dropping submodule
+  symbols would be a false negative.
+- **Walker parity**: `hidden(false)` — dot-dirs carry real content
+  (`.claude/` agent docs, `.github/`), and git enumerates them; junk
+  dot-dirs stay excluded via EXCLUDE_DIRS.
+- **Engine-version gate**: the rebuild stamp now includes the release
+  version alongside PARSER_VERSION — every upgraded binary rebuilds
+  automatically; a resolver change nobody remembered to stamp can no longer
+  serve a stale-engine graph.
+- **Cross-process index lock**: MCP server, its watcher thread, and parallel
+  CLI runs serialize on a PID-stamped lock file; dead owners are stolen
+  instantly (`kill -0` liveness + stale-age window), so a `kill -9` mid-index
+  never bricks the next query — verified live: the orphaned lock was stolen
+  by the very next search, which self-healed and answered.
+- **Binary sniff**: a NUL byte in the first 8KB (generated blobs with code
+  extensions — valid UTF-8) keeps the file manifested but contributes zero
+  symbols.
+- **Ambiguous-candidate ranking** (MCP callers): strongest resolved evidence
+  first, cross-language ties broken toward the language family the textual
+  evidence lives in. Ranking only — never changes which edges exist.
+- **`CODEGRAPH_MCP_CONCISE=1`**: drops per-response coaching fields
+  (`_hints`, explainer notes); coverage/`_fallback`/truncation notes always
+  stay. Measured 265→166 B on a callers answer.
+
+Receipts: branch-switch storm (150 files) heals partially in 0.12s with
+exactly reversible node counts; git-vs-walker parity proven on an identical
+tree (1200 == 1200 nodes); `verify-determinism` byte-identical on a 3.6k-file
+repo; zero phantom edges on 71k- and 25k-edge live graphs.
+
 ## 1.33.1 — token diet
 
 Measured on a live monorepo session: `search` returned FULL node JSON — for a

@@ -81,12 +81,93 @@ pub fn db_path(root: &Path) -> PathBuf {
     cache_root().join(&id[..16]).join("graph.db")
 }
 
+/// Full rebuild key: PARSER_VERSION catches deliberate parse-behavior bumps
+/// during development; the release version catches everything a human forgot
+/// to bump (resolver changes, new tiers) — every upgraded binary rebuilds
+/// automatically, so a stale-engine graph can never survive an upgrade.
+fn engine_version() -> String {
+    format!("{}+{}", codegraph_parse::PARSER_VERSION, env!("CARGO_PKG_VERSION"))
+}
+
+/// Cross-process index lock: the MCP server, its watcher thread, and parallel
+/// CLI runs can all decide to rebuild the same graph at once — serialize them
+/// so the work happens once (the loser re-checks and finds nothing changed).
+/// PID-stamped lock file; a dead owner (or one older than LOCK_STALE_SECS) is
+/// stolen, so a crashed indexer can never brick future runs.
+struct IndexLock {
+    path: PathBuf,
+}
+
+impl IndexLock {
+    fn acquire(db: &Path) -> Option<IndexLock> {
+        const LOCK_STALE_SECS: u64 = 600;
+        let path = db.with_extension("lock");
+        std::fs::create_dir_all(path.parent()?).ok()?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(LOCK_STALE_SECS);
+        loop {
+            if let Ok(mut f) =
+                std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
+            {
+                use std::io::Write;
+                let _ = write!(f, "{}", std::process::id());
+                return Some(IndexLock { path });
+            }
+            // Taken. Steal only from the dead: unreadable/unparseable stamp,
+            // dead PID, or a stamp older than the stale window. Same-process
+            // threads (watcher vs query) land in the wait branch like anyone
+            // else — their pid is alive.
+            let owner_dead = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .map(|pid| pid != std::process::id() && !pid_alive(pid))
+                .unwrap_or(true);
+            let age = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if owner_dead || age > LOCK_STALE_SECS || std::time::Instant::now() >= deadline {
+                // ponytail: stealing at deadline can double-index alongside a
+                // live-but-slow owner — SQLite serializes the writes, so the
+                // cost is wasted work, never a wrong graph.
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+}
+
+impl Drop for IndexLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Is a process alive? `kill -0` (no signal delivered). Unknowable (no `kill`
+/// binary) reads as alive — the age gate above still unblocks eventually.
+fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(true)
+}
+
 /// The ignore-aware walker shared by the indexer AND the staleness probe — they
 /// MUST use the same file set or they disagree and reintroduce false positives.
 pub(crate) fn build_walker(root: &Path) -> ignore::Walk {
     WalkBuilder::new(root)
         .git_ignore(true)
         .git_global(true)
+        // dot-dirs carry real content (.claude/ agent docs, .github/ configs)
+        // and git enumerates them — hiding them here would make the two
+        // enumeration paths disagree AND drop real symbols. Junk dot-dirs
+        // (.git, .venv, .idea, …) are excluded by EXCLUDE_DIRS below.
+        .hidden(false)
         .add_custom_ignore_filename(".codegraphignore")
         .filter_entry(|e| {
             !e.file_type().map(|t| t.is_dir()).unwrap_or(false)
@@ -95,12 +176,104 @@ pub(crate) fn build_walker(root: &Path) -> ignore::Walk {
         .build()
 }
 
-/// Some(is_doc) if a walked entry is indexable, None to skip. Shared predicate.
-fn classify(entry: &ignore::DirEntry) -> Option<bool> {
-    if entry.file_type().map(|t| t.is_dir()).unwrap_or(true) {
+/// ONE file-enumeration source shared by the indexer AND the staleness probe —
+/// they MUST use the same file set or they disagree and reintroduce false
+/// positives. Fast path: `git ls-files` (tracked + untracked-unignored, nested
+/// .gitignore handled by git itself — no directory traversal, big win on large
+/// repos since the probe runs before every query). Walker fallback for non-git
+/// trees and for repos whose semantics ls-files can't reproduce.
+pub(crate) fn list_files(root: &Path) -> Vec<PathBuf> {
+    if let Some(v) = git_ls_files(root) {
+        return v;
+    }
+    build_walker(root)
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| !t.is_dir()).unwrap_or(false))
+        .map(|e| e.into_path())
+        .collect()
+}
+
+/// `git ls-files` enumeration, or None when the walker must be used instead
+/// (not a git repo, or submodules exist — ls-files shows one gitlink entry
+/// where the walker descends, and dropping submodule symbols would be a false
+/// negative).
+///
+/// STRICTLY BETTER than the walker where it applies: git knows which files are
+/// TRACKED, and tracked beats gitignore — a `docs/*`-ignored dir whose files
+/// were committed anyway is part of the repo; the walker can only see the
+/// ignore pattern and silently drops them (measured: 26 real docs on a live
+/// monorepo). `.codegraphignore` is applied by us on the git listing
+/// (root-level file; a NESTED .codegraphignore is walker-only).
+///
+/// NESTED PLAIN REPOS (monorepo of independent .git checkouts, no .gitmodules —
+/// e.g. a parent repo with backend/, web/, ios/ each their own repo): ls-files
+/// silently skips their entire subtree, which the walker would index. Untracked
+/// directories carrying a `.git` are therefore enumerated RECURSIVELY; if any
+/// level can't take the git path, the whole enumeration falls back to the
+/// walker — losing a subproject's symbols is exactly the false negative this
+/// tool promises never to produce.
+fn git_ls_files(root: &Path) -> Option<Vec<PathBuf>> {
+    if root.join(".gitmodules").exists() {
         return None;
     }
-    let path = entry.path();
+    let cgi = {
+        let f = root.join(".codegraphignore");
+        if f.exists() {
+            let mut b = ignore::gitignore::GitignoreBuilder::new(root);
+            if b.add(&f).is_some() {
+                return None; // unparseable custom ignore -> walker decides
+            }
+            Some(b.build().ok()?)
+        } else {
+            None
+        }
+    };
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .ok()?;
+        out.status.success().then_some(out.stdout)
+    };
+    let listed = git(&["ls-files", "-z", "--cached", "--others", "--exclude-standard"])?;
+    let mut files: Vec<PathBuf> = listed
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| std::str::from_utf8(s).ok())
+        // tracked files under excluded dirs (vendored deps, build output)
+        // are skipped by the walker's filter — mirror it exactly
+        .filter(|rel| !rel.split('/').any(|c| EXCLUDE_DIRS.contains(&c)))
+        .map(|rel| root.join(rel))
+        .collect();
+    // second listing, dirs collapsed: the ONLY place nested repos are visible
+    let dirs = git(&["ls-files", "-z", "--others", "--exclude-standard", "--directory", "--no-empty-directory"])?;
+    for rel in dirs
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| std::str::from_utf8(s).ok())
+        .filter(|rel| rel.ends_with('/'))
+        .filter(|rel| !rel.split('/').any(|c| EXCLUDE_DIRS.contains(&c)))
+    {
+        let sub = root.join(rel.trim_end_matches('/'));
+        if sub.join(".git").exists() {
+            files.extend(git_ls_files(&sub)?); // None anywhere => walker everywhere
+        }
+    }
+    // apply THIS level's .codegraphignore over everything below it (own files +
+    // nested-repo files) — same cascade the walker's custom-ignore gives
+    if let Some(g) = cgi {
+        files.retain(|p| !g.matched_path_or_any_parents(p, false).is_ignore());
+    }
+    Some(files)
+}
+
+/// Some(is_doc) if a file is indexable, None to skip. Shared predicate.
+fn classify(path: &Path, meta: &std::fs::Metadata) -> Option<bool> {
+    if !meta.is_file() {
+        return None;
+    }
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
     let is_code = EXTS.contains(&ext);
     let is_doc = DOC_EXTS.contains(&ext);
@@ -111,18 +284,15 @@ fn classify(entry: &ignore::DirEntry) -> Option<bool> {
     if SKIP_NAMES.iter().any(|s| s.eq_ignore_ascii_case(name)) {
         return None;
     }
-    if entry.metadata().map(|m| m.len() > MAX_FILE_BYTES).unwrap_or(false) {
+    if meta.len() > MAX_FILE_BYTES {
         return None;
     }
     Some(is_doc)
 }
 
 /// tsconfig*.json — tracked for staleness (alias-map input), never parsed.
-fn is_tsconfig(entry: &ignore::DirEntry) -> bool {
-    if entry.file_type().map(|t| t.is_dir()).unwrap_or(true) {
-        return false;
-    }
-    let name = entry.file_name().to_string_lossy();
+fn is_tsconfig(path: &Path) -> bool {
+    let name = path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default();
     name.starts_with("tsconfig") && name.ends_with(".json")
 }
 
@@ -131,11 +301,9 @@ fn rel_path(root: &Path, path: &Path) -> String {
 }
 
 /// File mtime as nanoseconds since epoch (0 if unavailable). The cheap staleness signal.
-fn file_mtime(entry: &ignore::DirEntry) -> i64 {
-    entry
-        .metadata()
+fn file_mtime(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
         .ok()
-        .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_nanos() as i64)
         .unwrap_or(0)
@@ -151,11 +319,11 @@ pub fn is_stale(root: &Path) -> bool {
         return true;
     }
     let Ok(store) = Store::open(&db) else { return true };
-    // a binary with different parse behavior means EVERY file is effectively
-    // stale — without this, ensure_fresh/MCP would serve an old-parser graph
-    // forever after an upgrade (index_dir's gate only helps if a reindex runs)
-    if store.meta_get("parser_version").ok().flatten().as_deref()
-        != Some(codegraph_parse::PARSER_VERSION.to_string().as_str())
+    // a binary with different parse/resolve behavior means EVERY file is
+    // effectively stale — without this, ensure_fresh/MCP would serve an
+    // old-engine graph forever after an upgrade (index_dir's gate only helps
+    // if a reindex runs)
+    if store.meta_get("parser_version").ok().flatten().as_deref() != Some(engine_version().as_str())
     {
         return true;
     }
@@ -167,14 +335,17 @@ pub fn is_stale(root: &Path) -> bool {
     let Ok(rows) = store.manifest_map() else { return true };
     let mut prev: std::collections::HashMap<String, i64> =
         rows.into_iter().map(|m| (m.file_path, m.mtime)).collect();
-    for entry in build_walker(root).filter_map(|e| e.ok()) {
-        if classify(&entry).is_none() && !is_tsconfig(&entry) {
+    for path in list_files(root) {
+        // stat failure = listed-but-gone (git still tracks a deleted file) —
+        // not part of the working tree, so not part of the comparison set
+        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        if classify(&path, &meta).is_none() && !is_tsconfig(&path) {
             continue;
         }
-        let rel = rel_path(root, entry.path());
+        let rel = rel_path(root, &path);
         match prev.remove(&rel) {
             None => return true,                                   // added file
-            Some(prev_mtime) if prev_mtime != file_mtime(&entry) => return true, // changed/touched
+            Some(prev_mtime) if prev_mtime != file_mtime(&meta) => return true, // changed/touched
             Some(_) => {}
         }
     }
@@ -250,6 +421,10 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
     if legacy.join("graph.db").exists() {
         let _ = std::fs::remove_dir_all(&legacy);
     }
+    // Serialize concurrent indexers (MCP server / watcher / CLI). Whoever
+    // waited here re-diffs against the manifest below and finds the work
+    // already done — one rebuild, not N.
+    let _lock = IndexLock::acquire(db);
     let store = Store::open(db)?;
     // RAII: rolls back on early error/panic; committed explicitly below.
     let txn = store.txn()?;
@@ -257,10 +432,10 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
     // excluded from canonical_hash, so this can't break determinism.
     let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     store.meta_set("repo_root", &canon.to_string_lossy())?;
-    // Parser-version gate: a binary with different parse behavior must rebuild
-    // from scratch — mixing old-parse and new-parse files in one graph breaks
-    // the incremental==full invariant.
-    let parser_v = codegraph_parse::PARSER_VERSION.to_string();
+    // Engine-version gate: a binary with different parse OR resolve behavior
+    // must rebuild from scratch — mixing old and new interpretations in one
+    // graph breaks the incremental==full invariant.
+    let parser_v = engine_version();
     let mut full = full || store.meta_get("parser_version").ok().flatten().as_deref() != Some(parser_v.as_str());
     store.meta_set("parser_version", &parser_v)?;
     // tsconfig `paths` aliases: rewritten imports of UNCHANGED files depend on
@@ -287,24 +462,24 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
         store.manifest_map()?.into_iter().map(|m| (m.file_path.clone(), m)).collect()
     };
     let mut to_parse: Vec<(String, String, String, i64, bool)> = Vec::new();
-    for entry in build_walker(root).filter_map(|e| e.ok()) {
+    for path in list_files(root) {
+        let Ok(meta) = std::fs::metadata(&path) else { continue };
         // tsconfig files are tracked in the manifest (so is_stale sees their
         // edits) but never parsed — their CONTENT is consumed by `aliases`.
-        if is_tsconfig(&entry) {
-            let rel = rel_path(root, entry.path());
+        if is_tsconfig(&path) {
+            let rel = rel_path(root, &path);
             seen.insert(rel.clone());
-            let mtime = file_mtime(&entry);
+            let mtime = file_mtime(&meta);
             if manifest_map.get(&rel).map(|m| m.mtime) != Some(mtime) {
-                if let Ok(source) = std::fs::read_to_string(entry.path()) {
+                if let Ok(source) = std::fs::read_to_string(&path) {
                     store.save_manifest(&rel, &sha256(&source), mtime)?;
                 }
             }
             continue;
         }
-        let Some(is_doc) = classify(&entry) else { continue };
-        let path = entry.path();
-        let rel = rel_path(root, path);
-        let mtime = file_mtime(&entry);
+        let Some(is_doc) = classify(&path, &meta) else { continue };
+        let rel = rel_path(root, &path);
+        let mtime = file_mtime(&meta);
         files += 1;
         seen.insert(rel.clone());
         let manifest = manifest_map.get(&rel);
@@ -313,7 +488,7 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
                 continue; // unchanged — stat fast-path, no read
             }
         }
-        let Ok(source) = std::fs::read_to_string(path) else { continue };
+        let Ok(source) = std::fs::read_to_string(&path) else { continue };
         let sha = sha256(&source);
         if let Some(m) = manifest {
             if m.sha256 == sha {
@@ -329,7 +504,22 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
     let parsed: Vec<(String, String, i64, ParsedFile)> = to_parse
         .par_iter()
         .map(|(rel, source, sha, mtime, is_doc)| {
-            let pf = if *is_doc {
+            // Binary sniff: NUL in the first 8KB = generated/minified binary
+            // masquerading as text (NUL is valid UTF-8, so read_to_string
+            // passes it). Keep it MANIFESTED (the staleness probe stays
+            // stat-only and never re-flags it) but contribute nothing.
+            let binary = source.as_bytes().iter().take(8192).any(|&b| b == 0);
+            let pf = if binary {
+                ParsedFile {
+                    nodes: Vec::new(),
+                    calls: Vec::new(),
+                    inherits: Vec::new(),
+                    fields: Vec::new(),
+                    locals: Vec::new(),
+                    imports: Vec::new(),
+                    type_refs: Vec::new(),
+                }
+            } else if *is_doc {
                 let ctype = rel.rsplit('.').next().unwrap_or("text");
                 ParsedFile {
                     nodes: document_nodes(rel, ctype, source),
@@ -1472,6 +1662,120 @@ mod tests {
         std::fs::remove_file(tmp.join("b.py")).unwrap();
         assert!(is_stale(&tmp), "deleted file detected");
 
+        std::env::remove_var("CODEGRAPH_CACHE_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// git-ls-files enumeration must agree with the walker's semantics:
+    /// tracked + untracked-unignored in, gitignored + EXCLUDE_DIRS out.
+    #[test]
+    fn git_enumeration_matches_walker_semantics() {
+        let tmp = std::env::temp_dir().join(format!("cg_git_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("node_modules")).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&tmp)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init", "-q"]) {
+            return; // no git on this machine — the walker fallback is already covered
+        }
+        std::fs::write(tmp.join("tracked.py"), "def a():\n    pass\n").unwrap();
+        std::fs::write(tmp.join("untracked.py"), "def b():\n    pass\n").unwrap();
+        std::fs::write(tmp.join("ignored.py"), "def c():\n    pass\n").unwrap();
+        std::fs::write(tmp.join(".gitignore"), "ignored.py\n").unwrap();
+        std::fs::write(tmp.join("node_modules/dep.py"), "def d():\n    pass\n").unwrap();
+        assert!(git(&["add", "tracked.py"]));
+        let names: Vec<String> = git_ls_files(&tmp)
+            .expect("fresh git repo must take the git path")
+            .iter()
+            .map(|p| rel_path(&tmp, p))
+            .collect();
+        assert!(names.contains(&"tracked.py".into()), "{names:?}");
+        assert!(names.contains(&"untracked.py".into()), "untracked-unignored must be listed: {names:?}");
+        assert!(!names.contains(&"ignored.py".into()), "gitignored must be skipped: {names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("node_modules/")), "EXCLUDE_DIRS must apply: {names:?}");
+        // nested plain repo (monorepo-of-repos, no .gitmodules): ls-files skips
+        // its subtree — enumeration must recurse into it, not lose it
+        std::fs::create_dir_all(tmp.join("sub")).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["-C", &tmp.join("sub").to_string_lossy(), "init", "-q"])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(tmp.join("sub/inner.py"), "def nested():\n    pass\n").unwrap();
+        let names: Vec<String> =
+            git_ls_files(&tmp).unwrap().iter().map(|p| rel_path(&tmp, p)).collect();
+        assert!(names.contains(&"sub/inner.py".into()), "nested repo files must be enumerated: {names:?}");
+        // .codegraphignore is applied by US on the git listing (root cascade
+        // covers nested-repo paths too) — no walker fallback needed
+        std::fs::write(tmp.join(".codegraphignore"), "untracked.py\nsub/\n").unwrap();
+        let names: Vec<String> =
+            git_ls_files(&tmp).unwrap().iter().map(|p| rel_path(&tmp, p)).collect();
+        assert!(!names.contains(&"untracked.py".into()), ".codegraphignore must filter the git listing: {names:?}");
+        assert!(!names.contains(&"sub/inner.py".into()), "root .codegraphignore must cascade into nested repos: {names:?}");
+        assert!(names.contains(&"tracked.py".into()), "{names:?}");
+        std::fs::remove_file(tmp.join(".codegraphignore")).unwrap();
+        // walker-only features force the fallback
+        std::fs::write(tmp.join(".gitmodules"), "").unwrap();
+        assert!(git_ls_files(&tmp).is_none(), "submodules must fall back to the walker");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The lock must serialize two acquirers and steal from a dead owner.
+    #[test]
+    fn index_lock_steals_from_dead_owner_only() {
+        let tmp = std::env::temp_dir().join(format!("cg_lock_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db = tmp.join("graph.db");
+        // dead-owner lock (pid 1 is init/launchd — alive but not ours; use an
+        // impossible pid instead)
+        std::fs::write(db.with_extension("lock"), "999999999").unwrap();
+        let l = IndexLock::acquire(&db).expect("dead owner must be stolen");
+        drop(l);
+        assert!(!db.with_extension("lock").exists(), "drop must release the lock");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A NUL-carrying file must be manifested (stat-only staleness stays quiet)
+    /// but contribute zero symbols.
+    #[test]
+    fn binary_sniff_skips_nul_files() {
+        let tmp = std::env::temp_dir().join(format!("cg_nul_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("bin.js"), "function evil() {}\n\0\0generated blob").unwrap();
+        std::fs::write(tmp.join("ok.py"), "def fine():\n    pass\n").unwrap();
+        let db = tmp.join("g.db");
+        index_dir(&tmp, &db, false, None, false, None).unwrap();
+        let store = Store::open(&db).unwrap();
+        let hits = store.search_smart("evil", 10).unwrap();
+        assert!(hits.is_empty(), "NUL file must contribute no symbols: {hits:?}");
+        assert!(!store.search_smart("fine", 10).unwrap().is_empty());
+        assert!(store.manifest_map().unwrap().iter().any(|m| m.file_path == "bin.js"), "must stay manifested");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A different engine version (parse OR release) must flag every graph stale.
+    #[test]
+    fn engine_version_change_forces_rebuild() {
+        let tmp = std::env::temp_dir().join(format!("cg_engv_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("CODEGRAPH_CACHE_DIR", tmp.join("cache"));
+        std::fs::write(tmp.join("a.py"), "def foo():\n    return 1\n").unwrap();
+        ensure_fresh(&tmp).unwrap();
+        assert!(!is_stale(&tmp));
+        let store = Store::open(&db_path(&tmp)).unwrap();
+        store.meta_set("parser_version", "0+0.0.0").unwrap(); // simulate an old binary's stamp
+        drop(store);
+        assert!(is_stale(&tmp), "an old engine stamp must read as stale");
         std::env::remove_var("CODEGRAPH_CACHE_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }

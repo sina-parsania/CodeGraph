@@ -264,10 +264,10 @@ impl CodeGraphServer {
                 row
             })
             .collect();
-        let mut out = serde_json::json!({
-            "hits": hits,
-            "_hints": ["get_node(id, snippet=true) for source/full text", "callers(name) to trace usage", "context(query) to assemble task context"],
-        });
+        let mut out = serde_json::json!({ "hits": hits });
+        if !concise() {
+            out["_hints"] = serde_json::json!(["get_node(id, snippet=true) for source/full text", "callers(name) to trace usage", "context(query) to assemble task context"]);
+        }
         if !fields.is_empty() {
             let rows: Vec<serde_json::Value> = fields
                 .iter()
@@ -314,10 +314,22 @@ impl CodeGraphServer {
                 serde_json::json!({"pinned": pin, "callers": callers}),
             )?]));
         }
-        let defs = store.definitions_of(&args.0.name).map_err(err)?;
+        let mut defs = store.definitions_of(&args.0.name).map_err(err)?;
         if defs.len() > 1 {
             // Ambiguous: return pinnable candidates instead of silently merging
             // callers of different same-name definitions (what rivals do).
+            // Rank: strongest resolved evidence first; cross-language ties
+            // broken toward the language family the textual call-site evidence
+            // lives in (ranking only — never changes which edges exist).
+            let ev_files = store.unresolved_call_site_files(&args.0.name, None).unwrap_or_default();
+            let fam_votes = |file: &str| {
+                ev_files.iter().filter(|f| lang_family(f) == lang_family(file)).count()
+            };
+            defs.sort_by(|(a, na), (b, nb)| {
+                nb.cmp(na)
+                    .then_with(|| fam_votes(&b.file_path).cmp(&fam_votes(&a.file_path)))
+                    .then_with(|| a.file_path.cmp(&b.file_path))
+            });
             let candidates: Vec<serde_json::Value> = defs
                 .iter()
                 .map(|(d, nc)| serde_json::json!({
@@ -358,13 +370,17 @@ impl CodeGraphServer {
         let mut out = serde_json::json!({
             "callers": rows,
             "coverage": coverage,
-            "_hints": ["blast_radius(name) before changing it", "co_changes(file) for what usually changes too"],
         });
+        if !concise() {
+            out["_hints"] = serde_json::json!(["blast_radius(name) before changing it", "co_changes(file) for what usually changes too"]);
+        }
         if !referencing_files.is_empty() {
             out["unresolved_call_site_files"] = serde_json::json!(referencing_files);
-            out["_note"] = serde_json::json!(
-                "unresolved_call_site_files = parser-verified call tokens naming it that did NOT resolve to an edge (textual evidence, not resolved callers)"
-            );
+            if !concise() {
+                out["_note"] = serde_json::json!(
+                    "unresolved_call_site_files = parser-verified call tokens naming it that did NOT resolve to an edge (textual evidence, not resolved callers)"
+                );
+            }
         }
         // classes/interfaces are USED via injection/type annotations, not call
         // sites — surface that evidence so "no callers" never reads as "unused"
@@ -376,9 +392,11 @@ impl CodeGraphServer {
                 .map(|(f, ev)| serde_json::json!({"file": f, "evidence": ev}))
                 .collect();
             out["type_usages"] = serde_json::json!(rows);
-            out["_type_note"] = serde_json::json!(
-                "type_usages = files USING this name as a TYPE (DI fields, typed locals, imports, subtypes) — the caller equivalent for classes/interfaces"
-            );
+            if !concise() {
+                out["_type_note"] = serde_json::json!(
+                    "type_usages = files USING this name as a TYPE (DI fields, typed locals, imports, subtypes) — the caller equivalent for classes/interfaces"
+                );
+            }
         }
         if let Some(fb) = fallback_hint(&coverage, &args.0.name) {
             out["_fallback"] = fb;
@@ -838,6 +856,31 @@ fn semantic_blocking(
             })
         })
         .collect()
+}
+
+/// Coarse language family from a path's extension — a ranking tie-breaker for
+/// cross-language name collisions (never affects which edges exist).
+fn lang_family(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("") {
+        "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" => "js",
+        "py" | "pyi" => "py",
+        "rs" => "rs",
+        "go" => "go",
+        "swift" => "swift",
+        "kt" | "kts" | "java" => "jvm",
+        "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => "c",
+        "rb" => "rb",
+        "cs" => "cs",
+        _ => "other",
+    }
+}
+
+/// Token-diet dialect (CODEGRAPH_MCP_CONCISE=1): drop the per-response coaching
+/// fields (_hints, explainer _notes) for agents that already know the tools.
+/// Data and safety fields (coverage, _fallback, truncation notes) always stay.
+fn concise() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("CODEGRAPH_MCP_CONCISE").as_deref() == Ok("1"))
 }
 
 /// Actionable "known unknowns" hint: when a precise answer may be incomplete,
