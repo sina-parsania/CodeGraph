@@ -63,6 +63,8 @@ enum Command {
         action: Option<ConfigAction>,
     },
     /// Print version, config defaults, and a readiness check.
+    /// (`stats` alias: the MCP tool is named stats — agents guess it for the CLI too.)
+    #[command(visible_alias = "stats")]
     Status,
     /// Index a repository into a local graph (.codegraph/graph.db).
     Index {

@@ -10,7 +10,7 @@ use tree_sitter::{Language, Node as TsNode, Parser};
 /// Bump whenever parse OUTPUT changes shape (new node kinds, name filters,
 /// import handling). A stamped-version mismatch forces a full reparse so one
 /// graph never mixes two parser behaviors (incremental == full would break).
-pub const PARSER_VERSION: u32 = 8;
+pub const PARSER_VERSION: u32 = 9;
 
 pub struct ParsedFile {
     pub nodes: Vec<Node>,
@@ -571,13 +571,25 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
                 // Test/spec files are excluded above: `request(app).get('/…')`
                 // in an e2e spec is test traffic, not API surface.
                 let in_decorator = node.parent().is_some_and(|p| p.kind() == "decorator");
+                let mut symbolic = false;
                 let route_path = if in_decorator {
                     // `@Delete(SOME_CONST)` — args present but no string
-                    // literal: the path is statically unknowable; a made-up
-                    // "/" would be a wrong answer, not a route. Bare `@Get()`
-                    // (no args) genuinely IS the controller root — keep it.
+                    // literal: the path is statically unknowable, but the
+                    // ENDPOINT is real (66 of them on a live NestJS backend).
+                    // A made-up "/" would be a wrong answer; dropping them is
+                    // a false negative. Emit the constant EXPRESSION as a
+                    // «symbolic» segment + `path_unresolved` so the agent can
+                    // chase the constant. Bare `@Get()` (no args) genuinely
+                    // IS the controller root — literal.
                     let sub = first_string_arg(node, src);
-                    if sub.is_none() && has_args(node) {
+                    let sub = match sub {
+                        None if has_args(node) => {
+                            symbolic = true;
+                            first_arg_text(node, src).map(|t| format!("«{t}»"))
+                        }
+                        other => other,
+                    };
+                    if symbolic && sub.is_none() {
                         None
                     } else {
                         Some(join_route(
@@ -597,6 +609,11 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
                         md.insert("method".to_string(), serde_json::Value::String(method.clone()));
                         if let Some(h) = current_fn {
                             md.insert("handler".to_string(), serde_json::Value::String(h.to_string()));
+                        }
+                        if symbolic {
+                            // path contains a «CONSTANT» — real endpoint, path
+                            // needs the constant's value to be literal
+                            md.insert("path_unresolved".to_string(), serde_json::Value::Bool(true));
                         }
                         nodes.push(Node {
                             id: format!("route.{}.{}", normalize_path(&path), method),
@@ -1335,6 +1352,15 @@ fn has_args(call: TsNode) -> bool {
     call.child_by_field_name("arguments").map(|a| a.named_child_count() > 0).unwrap_or(false)
 }
 
+/// Source text of the first argument (identifier / member expression), capped —
+/// the symbolic segment for constant route paths.
+fn first_arg_text(call: TsNode, src: &[u8]) -> Option<String> {
+    let args = call.child_by_field_name("arguments")?;
+    let a = args.named_child(0)?;
+    let t = std::str::from_utf8(&src[a.byte_range()]).ok()?.trim().to_string();
+    (!t.is_empty() && t.len() <= 60 && !t.contains('\n')).then_some(t)
+}
+
 fn first_string_arg(call: TsNode, src: &[u8]) -> Option<String> {
     let args = call.child_by_field_name("arguments")?;
     let mut c = args.walk();
@@ -1691,12 +1717,13 @@ mod tests {
             "object-form @Controller path must join: {:?}",
             obj.nodes.iter().filter(|n| n.label == NodeLabel::Route).map(|n| &n.name).collect::<Vec<_>>()
         );
-        // constant path = statically unknowable — no fabricated "/" route
+        // constant path → SYMBOLIC route: the endpoint is real, the path needs
+        // the constant — never a fabricated "/", never silently dropped
         let cst = parse_ts("p", "c.controller.ts", "@Controller('x')\nclass C {\n  @Delete(API_PATHS.BY_ID)\n  del() {}\n}\n");
-        assert!(
-            !cst.nodes.iter().any(|n| n.label == NodeLabel::Route),
-            "constant-arg decorator must not fabricate a path"
-        );
+        let sym: Vec<_> = cst.nodes.iter().filter(|n| n.label == NodeLabel::Route).collect();
+        assert_eq!(sym.len(), 1, "constant-arg decorator is a real endpoint");
+        assert_eq!(sym[0].name, "DELETE /x/«API_PATHS.BY_ID»", "{:?}", sym[0].name);
+        assert_eq!(sym[0].metadata.get("path_unresolved"), Some(&serde_json::Value::Bool(true)));
         // route-noise negatives: names that merely CONTAIN test-ish substrings
         for f in ["src/latest.ts", "src/phase2export.ts", "src/contest/router.ts"] {
             let ts = parse_ts("p", f, "app.get('/users', h);\n");

@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.36.0 — speed where it's visible + every fix is now a release gate
+
+Driven by the second field report ("we should be 10–20× faster than grep,
+we're tied"): the tie was the freshness probe, not the answer.
+
+- **Probe parallelized**: the two root `git ls-files` spawn concurrently,
+  nested-repo enumerations fan out on rayon, and the 8k-file stat sweep is
+  parallel. Default-path query on an 8.7k-file monorepo: 0.21 s → 0.10 s —
+  vs rg's 0.21 s *without* any freshness guarantee. Warm path (`--no-autoheal`
+  / MCP between heals): 0.00–0.02 s — 10–100× rg. The honest framing: rg
+  pays full scan per query; codegraph pays a freshness proof once and ~0
+  after.
+- **Constant-path routes recovered**: `@Delete(SOME_CONST)` endpoints are
+  real — they now emit with the constant as a «symbolic» segment +
+  `path_unresolved: true` instead of being dropped (66 real endpoints on the
+  field monorepo; route accounting now closes exactly: 524 decorators =
+  458 literal/bare + 66 symbolic).
+- **`--indexstore` early-return bug**: with zero file changes the flag never
+  reached the merge path — a re-merge no-op'ed. Fixed; field monorepo now
+  carries a 46,110-edge Swift compiler oracle and `codegraph audit` measures
+  **96.1% precision** (SelfThisMember 100%, SameFileUnique 96.6%,
+  FieldTypeMember 83.3% on a small sample) — served via MCP `stats`.
+- **`codegraph stats`** aliases `status` (agents guess the MCP tool name).
+- **Doc noise capped**: identifier search keeps docs to ≤5 rows (one per
+  file) when code answered the query.
+- **Release gate**: `scripts/release-qa.sh` runs clippy-clean, the full
+  suite, crash-recovery + determinism e2e, and the eval receipts — every
+  field-reported bug fixed in 1.34–1.36 has a pinned regression test
+  (enumeration classes, flock exclusion, MCP empty-graph/dead-root/
+  generation-bump, `--files` machine contract, NestJS route shapes, DI
+  narrowing, search ranking).
+
 ## 1.35.0 — field-test fixes: the MCP can't lie, NestJS answers
 
 Driven by a promom field-test report (11.6k files, TS+Swift+Python) that

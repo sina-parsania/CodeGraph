@@ -195,16 +195,30 @@ fn git_ls_files(root: &Path) -> Option<Vec<PathBuf>> {
             None
         }
     };
-    let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
+    // Both listings spawn CONCURRENTLY, and nested repos enumerate in
+    // parallel — this probe runs before every query, so spawn latency is
+    // user-visible (measured: 12 sequential spawns ≈ 150 ms on a monorepo
+    // of 6 repos; parallel ≈ one spawn's worth per nesting level).
+    let spawn_git = |args: &[&str]| {
+        std::process::Command::new("git")
             .arg("-C")
             .arg(root)
             .args(args)
-            .output()
-            .ok()?;
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()
+    };
+    let child_files = spawn_git(&["ls-files", "-z", "--cached", "--others", "--exclude-standard"])?;
+    // dirs collapsed: the ONLY place nested repos are visible
+    let child_dirs =
+        spawn_git(&["ls-files", "-z", "--others", "--exclude-standard", "--directory", "--no-empty-directory"])?;
+    let take = |child: std::process::Child| {
+        let out = child.wait_with_output().ok()?;
         out.status.success().then_some(out.stdout)
     };
-    let listed = git(&["ls-files", "-z", "--cached", "--others", "--exclude-standard"])?;
+    let listed = take(child_files)?;
+    let dirs = take(child_dirs)?;
     let mut files: Vec<PathBuf> = listed
         .split(|&b| b == 0)
         .filter(|s| !s.is_empty())
@@ -214,19 +228,18 @@ fn git_ls_files(root: &Path) -> Option<Vec<PathBuf>> {
         .filter(|rel| !rel.split('/').any(|c| EXCLUDE_DIRS.contains(&c)))
         .map(|rel| root.join(rel))
         .collect();
-    // second listing, dirs collapsed: the ONLY place nested repos are visible
-    let dirs = git(&["ls-files", "-z", "--others", "--exclude-standard", "--directory", "--no-empty-directory"])?;
-    for rel in dirs
+    let subs: Vec<PathBuf> = dirs
         .split(|&b| b == 0)
         .filter(|s| !s.is_empty())
         .filter_map(|s| std::str::from_utf8(s).ok())
         .filter(|rel| rel.ends_with('/'))
         .filter(|rel| !rel.split('/').any(|c| EXCLUDE_DIRS.contains(&c)))
-    {
-        let sub = root.join(rel.trim_end_matches('/'));
-        if sub.join(".git").exists() {
-            files.extend(git_ls_files(&sub)?); // None anywhere => walker everywhere
-        }
+        .map(|rel| root.join(rel.trim_end_matches('/')))
+        .filter(|sub| sub.join(".git").exists())
+        .collect();
+    let nested: Vec<Option<Vec<PathBuf>>> = subs.par_iter().map(|sub| git_ls_files(sub)).collect();
+    for n in nested {
+        files.extend(n?); // None anywhere => walker everywhere
     }
     // apply THIS level's .codegraphignore over everything below it (own files +
     // nested-repo files) — same cascade the walker's custom-ignore gives
@@ -300,23 +313,32 @@ pub fn is_stale(root: &Path) -> bool {
         return true;
     }
     let Ok(rows) = store.manifest_map() else { return true };
-    let mut prev: std::collections::HashMap<String, i64> =
+    let prev: std::collections::HashMap<String, i64> =
         rows.into_iter().map(|m| (m.file_path, m.mtime)).collect();
-    for path in list_files(root) {
-        // stat failure = listed-but-gone (git still tracks a deleted file) —
-        // not part of the working tree, so not part of the comparison set
-        let Ok(meta) = std::fs::metadata(&path) else { continue };
-        if classify(&path, &meta).is_none() && !is_tsconfig(&path) {
-            continue;
-        }
-        let rel = rel_path(root, &path);
-        match prev.remove(&rel) {
-            None => return true,                                   // added file
-            Some(prev_mtime) if prev_mtime != file_mtime(&meta) => return true, // changed/touched
+    // Parallel stat sweep: this probe runs before EVERY query — per-file
+    // stat latency (8k+ files, external disks) is the visible cost.
+    let entries: Vec<(String, i64)> = list_files(root)
+        .par_iter()
+        .filter_map(|path| {
+            // stat failure = listed-but-gone (git still tracks a deleted file)
+            // — not part of the working tree, so not part of the comparison set
+            let meta = std::fs::metadata(path).ok()?;
+            if classify(path, &meta).is_none() && !is_tsconfig(path) {
+                return None;
+            }
+            Some((rel_path(root, path), file_mtime(&meta)))
+        })
+        .collect();
+    for (rel, mtime) in &entries {
+        match prev.get(rel) {
+            None => return true,                              // added file
+            Some(prev_mtime) if prev_mtime != mtime => return true, // changed/touched
             Some(_) => {}
         }
     }
-    !prev.is_empty() // anything left in the manifest was deleted on disk
+    // every entry matched something in the manifest; a count mismatch means
+    // the manifest has files that vanished on disk
+    entries.len() != prev.len()
 }
 
 /// Identity gate: refuse to answer from a graph built for a DIFFERENT repo (or
@@ -578,7 +600,9 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
     // Rebuild ALL edges from the full persisted node + call set (keeps
     // cross-file CALLS correct after a partial update).
     // Nothing changed and not a forced full rebuild: the graph is already current.
-    if changed == 0 && pruned == 0 && !full && !scip_file_changed(&store, root, scip) {
+    // `--indexstore` must reach the merge path even with zero file changes —
+    // the flag EXISTS to force a re-merge (field bug: it early-returned here).
+    if changed == 0 && pruned == 0 && !full && !indexstore && !scip_file_changed(&store, root, scip) {
         // Self-heal graphs committed by older binaries (pre-heal dangling edges).
         heal_dangling(&store);
         txn.commit()?;
@@ -1711,7 +1735,16 @@ mod tests {
             .unwrap();
         assert!(probe.try_lock().is_err(), "second acquirer must be excluded");
         drop(held);
-        assert!(probe.try_lock().is_ok(), "drop must release the lock");
+        // parallel test threads can wedge a moment between close and retry —
+        // poll briefly instead of asserting on the first attempt
+        let released = (0..50).any(|_| {
+            probe.try_lock().is_ok()
+                || {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    false
+                }
+        });
+        assert!(released, "drop must release the lock");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

@@ -750,13 +750,19 @@ impl Store {
         let mut ranked: Vec<(i32, usize, Node)> =
             hits.into_iter().enumerate().map(|(i, n)| (bonus(&n), i, n)).collect();
         ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        // One row per DOCUMENT FILE: three chunks of the same .md drowning the
-        // list is noise — the best-ranked chunk represents the file.
+        // One row per DOCUMENT FILE (chunks of the same .md collapse), and when
+        // CODE answered the query, docs are capped to a footnote — a doc-heavy
+        // repo (.claude/ rules, wikis) otherwise floods ranks 2..N with
+        // mentions of the identifier (field-measured noise).
+        const MAX_DOCS_WITH_CODE_HITS: usize = 5;
+        let has_code = ranked.iter().any(|(_, _, n)| n.label != NodeLabel::Document);
         let mut doc_files = std::collections::HashSet::new();
         Ok(ranked
             .into_iter()
             .filter(|(_, _, n)| {
-                n.label != NodeLabel::Document || doc_files.insert(n.file_path.clone())
+                n.label != NodeLabel::Document
+                    || (doc_files.insert(n.file_path.clone())
+                        && (!has_code || doc_files.len() <= MAX_DOCS_WITH_CODE_HITS))
             })
             .take(limit)
             .map(|(_, _, n)| n)
@@ -1793,6 +1799,42 @@ mod tests {
     fn schema_migrates_and_versions() {
         let s = Store::open_in_memory().unwrap();
         assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+    }
+
+    /// Field-measured search noise stays fixed: identifier search puts CODE
+    /// above Document fragments, collapses doc chunks to one row per file,
+    /// and caps docs to a footnote when code answered.
+    #[test]
+    fn search_ranks_code_first_dedups_and_caps_docs() {
+        let s = Store::open_in_memory().unwrap();
+        let mut nodes = vec![Node { name: "getProfile".into(), ..node("m.getprofile") }];
+        for i in 0..8 {
+            // two chunks in file 0 (must collapse), one chunk in files 1..8
+            for c in 0..if i == 0 { 2 } else { 1 } {
+                let mut md = Metadata::new();
+                md.insert(
+                    "text".to_string(),
+                    serde_json::Value::String(format!("rule {i}.{c}: never call getProfile here")),
+                );
+                nodes.push(Node {
+                    label: NodeLabel::Document,
+                    name: format!("doc {i}.{c} getProfile mention"),
+                    file_path: format!("docs/rule{i}.md"),
+                    metadata: md,
+                    ..node(&format!("doc.{i}.{c}"))
+                });
+            }
+        }
+        s.bulk_upsert_nodes(&nodes).unwrap();
+        let hits = s.search_smart("getProfile", 20).unwrap();
+        assert_eq!(hits[0].name, "getProfile", "code symbol must outrank doc fragments");
+        assert_eq!(hits[0].label, NodeLabel::Function);
+        let docs: Vec<&Node> = hits.iter().filter(|n| n.label == NodeLabel::Document).collect();
+        assert!(docs.len() <= 5, "docs must be capped to a footnote when code answered: {}", docs.len());
+        let mut files: Vec<&str> = docs.iter().map(|n| n.file_path.as_str()).collect();
+        files.sort_unstable();
+        files.dedup();
+        assert_eq!(files.len(), docs.len(), "one row per document file");
     }
 
     #[test]
