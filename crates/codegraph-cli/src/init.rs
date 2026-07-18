@@ -59,6 +59,89 @@ cat <<'JSON'
 JSON
 "#;
 
+/// JSON type name for error messages.
+fn json_type(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
+/// Parse a user config file that MUST be a JSON object. Invalid JSON or a
+/// non-object root is the USER'S data in an unexpected state — return a
+/// contextual error naming the file instead of silently replacing it with `{}`
+/// (which would destroy every other setting in it). A missing file is fine:
+/// start from an empty object.
+fn load_json_object(path: &Path) -> Result<serde_json::Value> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(serde_json::json!({}));
+    };
+    let root: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        anyhow::anyhow!(
+            "{}: invalid JSON ({e}) — fix or remove the file and re-run; refusing to overwrite it",
+            path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        root.is_object(),
+        "{}: top-level JSON is {} (expected an object) — fix the file and re-run; refusing to overwrite it",
+        path.display(),
+        json_type(&root)
+    );
+    Ok(root)
+}
+
+/// Return `root[key]` as a mutable object, creating `{}` when absent. When the
+/// field EXISTS with a non-object type, error with file + field + found type —
+/// never clobber, never report false success.
+fn ensure_object_field<'a>(
+    root: &'a mut serde_json::Value,
+    key: &str,
+    path: &Path,
+) -> Result<&'a mut serde_json::Map<String, serde_json::Value>> {
+    let obj = root
+        .as_object_mut()
+        .expect("load_json_object guarantees an object root");
+    let slot = obj
+        .entry(key.to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !slot.is_object() {
+        anyhow::bail!(
+            "{}: `{key}` is {} (expected an object) — fix the file and re-run; refusing to overwrite it",
+            path.display(),
+            json_type(slot)
+        );
+    }
+    Ok(slot.as_object_mut().expect("checked above"))
+}
+
+/// Merge the codegraph MCP entry into the JSON config at `path`, preserving
+/// everything else in the file. Verifies the POSTCONDITION by re-reading what
+/// was written — success is only reported for a config that actually carries
+/// the entry.
+fn merge_mcp_entry(path: &Path) -> Result<()> {
+    let entry = serde_json::json!({"command": "codegraph", "args": ["mcp"]});
+    let mut root = load_json_object(path)?;
+    let servers = ensure_object_field(&mut root, "mcpServers", path)?;
+    servers.insert("codegraph".to_string(), entry.clone());
+    if path.exists() {
+        let _ = std::fs::copy(path, path.with_extension("json.bak"));
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&root)?)?;
+    // postcondition: the file on disk parses and carries the entry
+    let check: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    anyhow::ensure!(
+        check.get("mcpServers").and_then(|s| s.get("codegraph")) == Some(&entry),
+        "{}: postcondition failed — written config does not carry the codegraph entry",
+        path.display()
+    );
+    Ok(())
+}
+
 /// Merge the MCP server entry into `~/.claude.json` (idempotent), or print the
 /// snippet when `print_only` (no `~/.claude.json`, or `--print`). Shared by
 /// `init` and the back-compat `install` command.
@@ -68,30 +151,16 @@ pub fn wire_mcp(_repo: &Path, print_only: bool) -> Result<()> {
     // path here made the LAST-initialized repo win globally — and when that
     // repo moved, EVERY project got a confidently-empty graph (measured in the
     // field). cwd-following serves each project its own graph.
-    let entry = serde_json::json!({"command": "codegraph", "args": ["mcp"]});
-    let snippet = serde_json::to_string_pretty(
-        &serde_json::json!({"mcpServers": {"codegraph": entry.clone()}}),
-    )?;
+    let snippet = serde_json::to_string_pretty(&serde_json::json!({
+        "mcpServers": {"codegraph": {"command": "codegraph", "args": ["mcp"]}}
+    }))?;
     let home = std::env::var("HOME").unwrap_or_default();
     let path = Path::new(&home).join(".claude.json");
     if print_only || !path.exists() {
         println!("Add this to your agent's MCP config:\n{snippet}");
         return Ok(());
     }
-    let mut root: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)
-        .unwrap_or_else(|_| serde_json::json!({}));
-    if !root.is_object() {
-        root = serde_json::json!({});
-    }
-    let obj = root.as_object_mut().unwrap();
-    let servers = obj
-        .entry("mcpServers")
-        .or_insert_with(|| serde_json::json!({}));
-    if let Some(sm) = servers.as_object_mut() {
-        sm.insert("codegraph".to_string(), entry);
-    }
-    let _ = std::fs::copy(&path, path.with_extension("json.bak"));
-    std::fs::write(&path, serde_json::to_string_pretty(&root)?)?;
+    merge_mcp_entry(&path)?;
     println!(
         "  → wired MCP into {} (backup .bak written)",
         path.display()
@@ -144,27 +213,30 @@ fn agent_nudge(repo: &Path, remove: bool) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755));
     }
-    let mut v: serde_json::Value = std::fs::read_to_string(&settings)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    if !v.is_object() {
-        v = serde_json::json!({});
-    }
-    let hooks = v
-        .as_object_mut()
-        .unwrap()
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}));
-    if let Some(h) = hooks.as_object_mut() {
-        h.insert(
-            "SessionStart".to_string(),
-            serde_json::json!([{"hooks": [{"type": "command", "command": "bash .claude/hooks/codegraph-nudge.sh"}]}]),
-        );
-    }
-    std::fs::create_dir_all(repo.join(".claude"))?;
-    std::fs::write(&settings, serde_json::to_string_pretty(&v)?)?;
+    merge_hook_settings(&settings)?;
     println!("  → agent nudge written (CLAUDE.md block + .claude SessionStart hook)");
+    Ok(())
+}
+
+/// Merge the SessionStart nudge hook into `settings`, preserving everything
+/// else. Same contract as `merge_mcp_entry`: invalid JSON or a non-object
+/// `hooks` field errors with context instead of being clobbered; success is
+/// postcondition-checked.
+fn merge_hook_settings(settings: &Path) -> Result<()> {
+    let hook = serde_json::json!([{"hooks": [{"type": "command", "command": "bash .claude/hooks/codegraph-nudge.sh"}]}]);
+    let mut v = load_json_object(settings)?;
+    let hooks = ensure_object_field(&mut v, "hooks", settings)?;
+    hooks.insert("SessionStart".to_string(), hook.clone());
+    if let Some(dir) = settings.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(settings, serde_json::to_string_pretty(&v)?)?;
+    let check: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(settings)?)?;
+    anyhow::ensure!(
+        check.get("hooks").and_then(|h| h.get("SessionStart")) == Some(&hook),
+        "{}: postcondition failed — written settings do not carry the SessionStart hook",
+        settings.display()
+    );
     Ok(())
 }
 
@@ -309,5 +381,108 @@ mod tests {
         let cfg: toml::Value = toml::from_str(CONFIG_TEMPLATE).expect("template parses");
         assert_eq!(cfg["llm"]["provider"].as_str(), Some("auto"));
         assert_eq!(cfg["ingest"]["prompted"].as_bool(), Some(true));
+    }
+
+    fn tmp_file(name: &str, content: Option<&str>) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cg_init_{}_{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.json");
+        if let Some(c) = content {
+            std::fs::write(&p, c).unwrap();
+        }
+        p
+    }
+
+    /// Invalid JSON must produce a contextual error naming the file — never a
+    /// silent `{}` overwrite that destroys the user's config.
+    #[test]
+    fn invalid_json_errors_and_preserves_file() {
+        let p = tmp_file("invalid", Some("{not json"));
+        let err = merge_mcp_entry(&p).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid JSON") && err.contains("config.json"),
+            "{err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "{not json",
+            "file must be untouched"
+        );
+    }
+
+    #[test]
+    fn null_root_errors() {
+        let p = tmp_file("null", Some("null"));
+        let err = merge_mcp_entry(&p).unwrap_err().to_string();
+        assert!(
+            err.contains("null") && err.contains("expected an object"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "null");
+    }
+
+    #[test]
+    fn array_root_errors() {
+        let p = tmp_file("arr", Some("[1,2]"));
+        let err = merge_mcp_entry(&p).unwrap_err().to_string();
+        assert!(
+            err.contains("an array") && err.contains("expected an object"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn non_object_mcp_servers_errors() {
+        let p = tmp_file("badservers", Some(r#"{"mcpServers":[]}"#));
+        let err = merge_mcp_entry(&p).unwrap_err().to_string();
+        assert!(
+            err.contains("`mcpServers`") && err.contains("an array"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), r#"{"mcpServers":[]}"#);
+    }
+
+    #[test]
+    fn non_object_hooks_errors() {
+        let p = tmp_file("badhooks", Some(r#"{"hooks":[]}"#));
+        let err = merge_hook_settings(&p).unwrap_err().to_string();
+        assert!(err.contains("`hooks`") && err.contains("an array"), "{err}");
+    }
+
+    /// A valid config keeps every unrelated field the user had.
+    #[test]
+    fn valid_config_preserves_unrelated_fields() {
+        let p = tmp_file(
+            "valid",
+            Some(r#"{"theme":"dark","mcpServers":{"other":{"command":"x"}},"numStartups":7}"#),
+        );
+        merge_mcp_entry(&p).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["numStartups"], 7);
+        assert_eq!(v["mcpServers"]["other"]["command"], "x");
+        assert_eq!(v["mcpServers"]["codegraph"]["args"][0], "mcp");
+    }
+
+    /// Running twice is byte-identical (idempotent), and a missing file starts
+    /// from `{}`.
+    #[test]
+    fn merge_is_idempotent_and_creates_missing() {
+        let p = tmp_file("idem", None);
+        merge_mcp_entry(&p).unwrap();
+        let first = std::fs::read_to_string(&p).unwrap();
+        merge_mcp_entry(&p).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            first,
+            "second run must be a no-op"
+        );
+        let ph = tmp_file("idem_hooks", None);
+        merge_hook_settings(&ph).unwrap();
+        let h1 = std::fs::read_to_string(&ph).unwrap();
+        merge_hook_settings(&ph).unwrap();
+        assert_eq!(std::fs::read_to_string(&ph).unwrap(), h1);
     }
 }
