@@ -92,69 +92,36 @@ fn engine_version() -> String {
 /// Cross-process index lock: the MCP server, its watcher thread, and parallel
 /// CLI runs can all decide to rebuild the same graph at once — serialize them
 /// so the work happens once (the loser re-checks and finds nothing changed).
-/// PID-stamped lock file; a dead owner (or one older than LOCK_STALE_SECS) is
-/// stolen, so a crashed indexer can never brick future runs.
+/// OS advisory flock on a persistent `.lock` file (std `File::try_lock`,
+/// stable since 1.89 — no dependency): the KERNEL releases it the instant the
+/// owner dies (kill -9 included) — no PID stamps, no staleness windows, no
+/// steal logic. The file is never deleted (deleting a flocked path
+/// reintroduces the very races flock removes).
 struct IndexLock {
-    path: PathBuf,
+    _file: std::fs::File, // closing the fd releases the lock
 }
 
 impl IndexLock {
     fn acquire(db: &Path) -> Option<IndexLock> {
-        const LOCK_STALE_SECS: u64 = 600;
+        const MAX_WAIT_SECS: u64 = 600;
         let path = db.with_extension("lock");
         std::fs::create_dir_all(path.parent()?).ok()?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(LOCK_STALE_SECS);
+        let file =
+            std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).ok()?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(MAX_WAIT_SECS);
         loop {
-            if let Ok(mut f) =
-                std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
-            {
-                use std::io::Write;
-                let _ = write!(f, "{}", std::process::id());
-                return Some(IndexLock { path });
+            if file.try_lock().is_ok() {
+                return Some(IndexLock { _file: file });
             }
-            // Taken. Steal only from the dead: unreadable/unparseable stamp,
-            // dead PID, or a stamp older than the stale window. Same-process
-            // threads (watcher vs query) land in the wait branch like anyone
-            // else — their pid is alive.
-            let owner_dead = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| s.trim().parse::<u32>().ok())
-                .map(|pid| pid != std::process::id() && !pid_alive(pid))
-                .unwrap_or(true);
-            let age = std::fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            if owner_dead || age > LOCK_STALE_SECS || std::time::Instant::now() >= deadline {
-                // ponytail: stealing at deadline can double-index alongside a
-                // live-but-slow owner — SQLite serializes the writes, so the
-                // cost is wasted work, never a wrong graph.
-                let _ = std::fs::remove_file(&path);
-                continue;
+            if std::time::Instant::now() >= deadline {
+                // ponytail: a >10-min holder is hung — proceed UNLOCKED rather
+                // than brick; SQLite still serializes the writes, so the cost
+                // is duplicated work, never a wrong graph.
+                return None;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
     }
-}
-
-impl Drop for IndexLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-/// Is a process alive? `kill -0` (no signal delivered). Unknowable (no `kill`
-/// binary) reads as alive — the age gate above still unblocks eventually.
-fn pid_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(true)
 }
 
 /// The ignore-aware walker shared by the indexer AND the staleness probe — they
@@ -1727,19 +1694,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// The lock must serialize two acquirers and steal from a dead owner.
+    /// The flock must exclude a second acquirer while held and release on drop
+    /// (kernel-released — a dead owner can never leave a stale lock).
     #[test]
-    fn index_lock_steals_from_dead_owner_only() {
+    fn index_lock_excludes_while_held_releases_on_drop() {
         let tmp = std::env::temp_dir().join(format!("cg_lock_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let db = tmp.join("graph.db");
-        // dead-owner lock (pid 1 is init/launchd — alive but not ours; use an
-        // impossible pid instead)
-        std::fs::write(db.with_extension("lock"), "999999999").unwrap();
-        let l = IndexLock::acquire(&db).expect("dead owner must be stolen");
-        drop(l);
-        assert!(!db.with_extension("lock").exists(), "drop must release the lock");
+        let held = IndexLock::acquire(&db).expect("free lock must acquire");
+        // an independent open-file-description must NOT get the lock while held
+        let probe = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(db.with_extension("lock"))
+            .unwrap();
+        assert!(probe.try_lock().is_err(), "second acquirer must be excluded");
+        drop(held);
+        assert!(probe.try_lock().is_ok(), "drop must release the lock");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

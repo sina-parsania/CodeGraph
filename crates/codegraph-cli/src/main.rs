@@ -555,24 +555,22 @@ fn main() -> anyhow::Result<()> {
             if files {
                 // like-for-like with file-level tools: resolved caller files
                 // first, then `~` textual (parser-verified, unresolved) files.
-                // Multiple same-name defs: answer for the DOMINANT definition
-                // (most resolved callers — what an agent pins), attributing
-                // textual sites to their NEAREST definition; a vendored
-                // mirror's tests attach to the mirror, not the primary.
+                // UNPINNED name-level question ⇒ name-level answer: the UNION
+                // of caller files across ALL same-name definitions. Narrowing
+                // to one definition without being asked drops real usage files
+                // (zero-false-negative contract); per-definition precision is
+                // what --id pinning is for. Machine contract: stdout is ONLY
+                // path lines (optionally `~`-prefixed / evidence-tagged) —
+                // human notes go to stderr.
                 let defs = store.definitions_of(&name)?;
-                let dominant = defs.iter().max_by_key(|(_, nc)| *nc).map(|(d, _)| d.clone());
-                let callers = match (&dominant, defs.len()) {
-                    (Some(d), n) if n > 1 => store.callers_of_id(&d.id)?,
-                    _ => store.callers_of(&name)?,
-                };
-                let mut resolved: Vec<String> = callers.into_iter().map(|n| n.file_path).collect();
+                let mut resolved: Vec<String> =
+                    store.callers_of(&name)?.into_iter().map(|n| n.file_path).collect();
                 resolved.sort();
                 resolved.dedup();
                 for f in &resolved {
                     println!("{f}");
                 }
-                let attribute_to = if defs.len() > 1 { dominant.as_ref().map(|d| d.file_path.as_str()) } else { None };
-                let mut textual = store.unresolved_call_site_files(&name, attribute_to)?;
+                let mut textual = store.unresolved_call_site_files(&name, None)?;
                 textual.retain(|f| !resolved.contains(f));
                 textual.sort();
                 for f in &textual {
@@ -583,9 +581,12 @@ fn main() -> anyhow::Result<()> {
                 let mut seen: std::collections::HashSet<String> =
                     resolved.iter().cloned().chain(textual.iter().cloned()).collect();
                 for (f, ev) in store.type_usages(&name)? {
-                    // --files answers "which files USE it": the definition and
-                    // doc mentions belong to the human view, not the usage set
-                    if ev == "definition" || ev == "doc mention" {
+                    // doc mentions belong to the human view, not the usage set.
+                    // Definition files STAY (labeled): a def file often also
+                    // references the name in ways we don't extract (assignment,
+                    // passed-as-value) — dropping it is a measured recall loss
+                    // vs the SCIP oracle, and the tag keeps it honest.
+                    if ev == "doc mention" {
                         continue;
                     }
                     if seen.insert(f.clone()) {
@@ -593,7 +594,7 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 if defs.len() > 1 {
-                    println!("#dominant-of-{}-definitions; pin others with --id", defs.len());
+                    eprintln!("note: {} definitions of '{name}' — union across all; pin one with --id", defs.len());
                 }
                 return Ok(());
             }
@@ -1275,6 +1276,14 @@ fn main() -> anyhow::Result<()> {
             println!("(tip: `codegraph init` also indexes + adds an agent nudge.)");
         }
         Command::Mcp { path } => {
+            // A server pointed at a dead path would index NOTHING and answer
+            // every query with confident emptiness — refuse loudly instead.
+            anyhow::ensure!(
+                path.is_dir(),
+                "codegraph mcp: root {} does not exist (moved repo? stale --path in the MCP registration?) — \
+                 re-register without --path so the server follows the agent's project directory",
+                path.display()
+            );
             let db = index::db_path(&path);
             let refresh = if cli.no_autoheal { None } else { Some(index::ensure_fresh as fn(&std::path::Path) -> anyhow::Result<()>) };
             let rt = tokio::runtime::Runtime::new()?;

@@ -10,7 +10,7 @@ use tree_sitter::{Language, Node as TsNode, Parser};
 /// Bump whenever parse OUTPUT changes shape (new node kinds, name filters,
 /// import handling). A stamped-version mismatch forces a full reparse so one
 /// graph never mixes two parser behaviors (incremental == full would break).
-pub const PARSER_VERSION: u32 = 6;
+pub const PARSER_VERSION: u32 = 8;
 
 pub struct ParsedFile {
     pub nodes: Vec<Node>,
@@ -559,9 +559,37 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
 
     if ctx.spec.call_kinds.contains(&node.kind()) && !is_subscript(node, src) {
         if let Some(callee) = callee_name(node, src, ctx.spec.callee_fields) {
-            if is_http_method(&callee) {
-                if let Some(path) = first_string_arg(node, src) {
-                    if path.starts_with('/') && path.len() <= 200 {
+            if is_http_method(&callee) && !is_test_file(ctx.rel_path) {
+                // Two route shapes:
+                // - DECORATOR (`@Get(':id')` on a NestJS/Spring handler): the
+                //   path is RELATIVE (often absent entirely) and joins the
+                //   class's `@Controller('prefix')` — requiring a leading '/'
+                //   here silently dropped ~4/5 of a real NestJS API surface.
+                // - CALL (`router.get('/x', …)`, client `api.get('/x')`): the
+                //   leading-'/' requirement stays — it is what separates real
+                //   registrations from arbitrary `.get(key)` lookups.
+                // Test/spec files are excluded above: `request(app).get('/…')`
+                // in an e2e spec is test traffic, not API surface.
+                let in_decorator = node.parent().is_some_and(|p| p.kind() == "decorator");
+                let route_path = if in_decorator {
+                    // `@Delete(SOME_CONST)` — args present but no string
+                    // literal: the path is statically unknowable; a made-up
+                    // "/" would be a wrong answer, not a route. Bare `@Get()`
+                    // (no args) genuinely IS the controller root — keep it.
+                    let sub = first_string_arg(node, src);
+                    if sub.is_none() && has_args(node) {
+                        None
+                    } else {
+                        Some(join_route(
+                            controller_prefix(node, src).as_deref().unwrap_or(""),
+                            sub.as_deref().unwrap_or(""),
+                        ))
+                    }
+                } else {
+                    first_string_arg(node, src).filter(|p| p.starts_with('/'))
+                };
+                if let Some(path) = route_path {
+                    if path.len() <= 200 {
                         let method = callee.to_ascii_uppercase();
                         let line = node.start_position().row as u32 + 1;
                         let mut md = Metadata::new();
@@ -1205,6 +1233,108 @@ fn normalize_path(p: &str) -> String {
     p.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
 }
 
+/// Test/spec files register no API surface: `request(app).get('/x')` in an
+/// e2e spec is test traffic, and it polluted the routes answer in the field.
+fn is_test_file(rel: &str) -> bool {
+    let lower = rel.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    name.contains(".spec.")
+        || name.contains("-spec.")
+        || name.contains(".test.")
+        || name.contains("-test.")
+        || name.contains(".e2e")
+        || name.contains("-e2e")
+        || name.starts_with("e2e")
+        || name.starts_with("test_")
+        || lower.split('/').any(|seg| matches!(seg, "test" | "tests" | "__tests__" | "e2e" | "spec"))
+}
+
+/// The class-level route prefix for a decorator route: walk to the enclosing
+/// class and read its `@Controller('prefix')` (NestJS) / `@RequestMapping`
+/// (Spring) first string argument.
+fn controller_prefix(node: TsNode, src: &[u8]) -> Option<String> {
+    let mut cur = node.parent()?;
+    // class_body is not the decorator host — decorators hang off the declaration
+    while !cur.kind().contains("class") || cur.kind() == "class_body" {
+        cur = cur.parent()?;
+    }
+    let scan = |host: TsNode| -> Option<String> {
+        let mut walk = host.walk();
+        for child in host.children(&mut walk) {
+            if child.kind() != "decorator" {
+                continue;
+            }
+            let mut w2 = child.walk();
+            for call in child.children(&mut w2) {
+                if call.kind() != "call_expression" {
+                    continue;
+                }
+                let callee = callee_name(call, src, &["function"]);
+                if matches!(callee.as_deref(), Some("Controller") | Some("RequestMapping")) {
+                    // `@Controller('x')` or the object form `@Controller({ path: 'x', … })`
+                    return first_string_arg(call, src).or_else(|| object_path_prop(call, src));
+                }
+            }
+        }
+        None
+    };
+    // `@Controller('x')\nexport class C {}` hangs the decorator off the
+    // export_statement, not the class_declaration — check both hosts.
+    scan(cur).or_else(|| cur.parent().filter(|p| p.kind() == "export_statement").and_then(scan))
+}
+
+/// `("baby-tracker/children", ":id")` → `/baby-tracker/children/:id` —
+/// slash-normalized join of controller prefix + method sub-path.
+fn join_route(prefix: &str, sub: &str) -> String {
+    let mut out = String::from("/");
+    for part in prefix.split('/').chain(sub.split('/')).filter(|s| !s.is_empty()) {
+        if !out.ends_with('/') {
+            out.push('/');
+        }
+        out.push_str(part);
+    }
+    out
+}
+
+/// The string `path` property of an OBJECT argument — NestJS versioned
+/// controllers use `@Controller({ path: 'x', version: … })`.
+fn object_path_prop(call: TsNode, src: &[u8]) -> Option<String> {
+    let args = call.child_by_field_name("arguments")?;
+    let mut c = args.walk();
+    for a in args.named_children(&mut c) {
+        if a.kind() != "object" {
+            continue;
+        }
+        let mut w = a.walk();
+        for pair in a.named_children(&mut w) {
+            if pair.kind() != "pair" {
+                continue;
+            }
+            let Some(key) = pair
+                .child_by_field_name("key")
+                .and_then(|k| std::str::from_utf8(&src[k.byte_range()]).ok())
+            else {
+                continue;
+            };
+            if key.trim_matches(|ch| ch == '"' || ch == '\'') != "path" {
+                continue;
+            }
+            let v = pair.child_by_field_name("value")?;
+            if v.kind().contains("string") {
+                let t = std::str::from_utf8(&src[v.byte_range()]).ok()?;
+                return Some(t.trim_matches(|ch| ch == '"' || ch == '\'' || ch == '`').to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Does a call carry any argument at all? (Distinguishes `@Get()` — a real
+/// controller-root route — from `@Get(SOME_CONST)` — a statically unknowable path.)
+fn has_args(call: TsNode) -> bool {
+    call.child_by_field_name("arguments").map(|a| a.named_child_count() > 0).unwrap_or(false)
+}
+
 fn first_string_arg(call: TsNode, src: &[u8]) -> Option<String> {
     let args = call.child_by_field_name("arguments")?;
     let mut c = args.walk();
@@ -1537,6 +1667,56 @@ mod tests {
         assert!(ts.nodes.iter().any(|n| n.label == NodeLabel::Route && n.name == "POST /login"));
         let py = parse_python("p", "r.py", "@app.route('/health')\ndef health():\n    pass\n");
         assert!(py.nodes.iter().any(|n| n.label == NodeLabel::Route && n.name.contains("/health")));
+    }
+
+    /// NestJS shape: relative decorator paths (or none at all) joined with the
+    /// class's @Controller prefix — the field-measured 4/5 recall gap.
+    #[test]
+    fn nestjs_decorator_routes_join_controller_prefix() {
+        let src = "@Controller('baby-tracker/children')\nclass ChildrenController {\n  @Get(':id')\n  findOne() {}\n  @Post()\n  create() {}\n  @Get('summary/all')\n  summary() {}\n}\n";
+        let ts = parse_ts("p", "children.controller.ts", src);
+        let routes: Vec<&str> = ts
+            .nodes
+            .iter()
+            .filter(|n| n.label == NodeLabel::Route)
+            .map(|n| n.name.as_str())
+            .collect();
+        assert!(routes.contains(&"GET /baby-tracker/children/:id"), "{routes:?}");
+        assert!(routes.contains(&"POST /baby-tracker/children"), "empty @Post() must inherit the prefix: {routes:?}");
+        assert!(routes.contains(&"GET /baby-tracker/children/summary/all"), "{routes:?}");
+        // object-form controller: `@Controller({ path: 'x', version: … })`
+        let obj = parse_ts("p", "w.controller.ts", "@Controller({ path: 'adapty-webhook', version: VERSION_NEUTRAL })\nexport class W {\n  @Post()\n  handle() {}\n}\n");
+        assert!(
+            obj.nodes.iter().any(|n| n.label == NodeLabel::Route && n.name == "POST /adapty-webhook"),
+            "object-form @Controller path must join: {:?}",
+            obj.nodes.iter().filter(|n| n.label == NodeLabel::Route).map(|n| &n.name).collect::<Vec<_>>()
+        );
+        // constant path = statically unknowable — no fabricated "/" route
+        let cst = parse_ts("p", "c.controller.ts", "@Controller('x')\nclass C {\n  @Delete(API_PATHS.BY_ID)\n  del() {}\n}\n");
+        assert!(
+            !cst.nodes.iter().any(|n| n.label == NodeLabel::Route),
+            "constant-arg decorator must not fabricate a path"
+        );
+        // route-noise negatives: names that merely CONTAIN test-ish substrings
+        for f in ["src/latest.ts", "src/phase2export.ts", "src/contest/router.ts"] {
+            let ts = parse_ts("p", f, "app.get('/users', h);\n");
+            assert!(ts.nodes.iter().any(|n| n.label == NodeLabel::Route), "{f} is NOT a test file");
+        }
+    }
+
+    /// e2e/spec traffic is not API surface — measured noise in the field.
+    #[test]
+    fn test_files_register_no_routes() {
+        for f in ["app.e2e-spec.ts", "test/nursing.e2e-spec.ts", "a.test.ts", "__tests__/b.ts"] {
+            let ts = parse_ts("p", f, "app.get('/users', h);\nrequest(app).get('/x');\n");
+            assert!(
+                !ts.nodes.iter().any(|n| n.label == NodeLabel::Route),
+                "{f} must contribute no routes"
+            );
+        }
+        // …but a plain source file with the same code still does
+        let ts = parse_ts("p", "src/router.ts", "app.get('/users', h);\n");
+        assert!(ts.nodes.iter().any(|n| n.label == NodeLabel::Route));
     }
 
 

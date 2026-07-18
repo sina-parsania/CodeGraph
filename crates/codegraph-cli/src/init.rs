@@ -62,9 +62,13 @@ JSON
 /// Merge the MCP server entry into `~/.claude.json` (idempotent), or print the
 /// snippet when `print_only` (no `~/.claude.json`, or `--print`). Shared by
 /// `init` and the back-compat `install` command.
-pub fn wire_mcp(repo: &Path, print_only: bool) -> Result<()> {
-    let repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
-    let entry = serde_json::json!({"command": "codegraph", "args": ["mcp", "--path", repo.to_string_lossy()]});
+pub fn wire_mcp(_repo: &Path, print_only: bool) -> Result<()> {
+    // NO --path: `~/.claude.json` mcpServers is USER-GLOBAL, and agents launch
+    // MCP servers with cwd = the active project. Pinning one repo's absolute
+    // path here made the LAST-initialized repo win globally — and when that
+    // repo moved, EVERY project got a confidently-empty graph (measured in the
+    // field). cwd-following serves each project its own graph.
+    let entry = serde_json::json!({"command": "codegraph", "args": ["mcp"]});
     let snippet =
         serde_json::to_string_pretty(&serde_json::json!({"mcpServers": {"codegraph": entry.clone()}}))?;
     let home = std::env::var("HOME").unwrap_or_default();

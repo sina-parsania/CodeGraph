@@ -30,7 +30,15 @@ def codegraph_files(repo_dir: pathlib.Path, name: str):
         ["codegraph", "callers", name, "--path", str(repo_dir), "--files"],
         capture_output=True, text=True,
     ).stdout
-    files = {line.strip().lstrip("~") for line in out.splitlines() if line.strip()}
+    # machine contract: path lines, optionally `~`-prefixed (textual evidence)
+    # and evidence-tagged (`path  [import]`). Comments/# lines don't occur on
+    # stdout anymore, but skip defensively.
+    files = set()
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        files.add(line.lstrip("~").split("  [", 1)[0].strip())
     return files, len(out.encode())
 
 
@@ -52,7 +60,7 @@ def main():
             print(f"skip {repo['name']}: run gen_ground_truth.py first")
             continue
         repo_dir = WORK / repo["name"]
-        subprocess.run(["codegraph", "index", "--path", str(repo_dir)], capture_output=True)
+        subprocess.run(["codegraph", "index", str(repo_dir)], capture_output=True)
         for line in qfile.read_text().splitlines():
             q = json.loads(line)
             truth = set(q["files"])

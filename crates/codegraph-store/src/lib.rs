@@ -731,14 +731,18 @@ impl Store {
             let file_name = n.file_path.rsplit('/').next().unwrap_or("").to_lowercase();
             let stem = file_name.rsplit_once('.').map(|(s, _)| s).unwrap_or(&file_name);
             if name == q {
-                return 3;
+                return 4;
             }
             if stem == q || file_name == q {
+                return 3;
+            }
+            // `search` is the IDENTIFIER tool (conceptual queries route to
+            // semantic_search): any code symbol outranks a Document fragment —
+            // doc-text mentions filling ranks 2..20 was field-measured noise.
+            if !matches!(n.label, NodeLabel::Document) {
                 return 2;
             }
-            if matches!(n.label, NodeLabel::Document)
-                && n.metadata.get("text").and_then(|v| v.as_str()).is_some_and(|t| t.to_lowercase().contains(&q))
-            {
+            if n.metadata.get("text").and_then(|v| v.as_str()).is_some_and(|t| t.to_lowercase().contains(&q)) {
                 return 1;
             }
             0
@@ -746,7 +750,17 @@ impl Store {
         let mut ranked: Vec<(i32, usize, Node)> =
             hits.into_iter().enumerate().map(|(i, n)| (bonus(&n), i, n)).collect();
         ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        Ok(ranked.into_iter().take(limit).map(|(_, _, n)| n).collect())
+        // One row per DOCUMENT FILE: three chunks of the same .md drowning the
+        // list is noise — the best-ranked chunk represents the file.
+        let mut doc_files = std::collections::HashSet::new();
+        Ok(ranked
+            .into_iter()
+            .filter(|(_, _, n)| {
+                n.label != NodeLabel::Document || doc_files.insert(n.file_path.clone())
+            })
+            .take(limit)
+            .map(|(_, _, n)| n)
+            .collect())
     }
 
     /// Field/property declarations matching a name — variables aren't graph

@@ -1,5 +1,51 @@
 # Changelog
 
+## 1.35.0 — field-test fixes: the MCP can't lie, NestJS answers
+
+Driven by a promom field-test report (11.6k files, TS+Swift+Python) that
+found two red bugs and three weaknesses. All fixed, all regression-tested.
+
+- **MCP empty-graph bug (red)**: `codegraph init` wired the USER-GLOBAL MCP
+  registration with one repo's absolute `--path` — the last-initialized repo
+  won globally, and when that repo moved every project got a confidently
+  empty graph ("no callers", nodes: 0) while the CLI was healthy. Fixed
+  three-deep: registration is now cwd-following (no `--path`); a dead root
+  refuses to serve at startup; and an EMPTY graph refuses to answer at all —
+  every tool returns a diagnosis instead of clean emptiness (`stats` stays
+  reachable and reports `EMPTY_GRAPH`). Regression suite proves a generation
+  bump under a running server is served fresh on the next call.
+- **NestJS routes (red)**: decorator routes (`@Get(':id')`, bare `@Get()`)
+  never matched the leading-`/` requirement, and `@Controller('prefix')` was
+  never joined (including the `@Controller(…)\nexport class` shape where the
+  decorator hangs off the export_statement). e2e/spec files polluted the
+  answer with test traffic. Object-form `@Controller({ path: 'x', … })` is
+  read too, and a constant path (`@Delete(SOME_CONST)`) is skipped instead of
+  fabricating "/" — a made-up path is a wrong answer, not a route. promom:
+  120 noisy routes → 494 fully-prefixed real ones, zero spec noise, zero
+  fabricated paths.
+- **TS DI caller resolution (was ~0%)**: `this.profileService.getUserProfile()`
+  with `constructor(private readonly profileService: ProfileService)` never
+  resolved when the class NAME exists in two apps of a monorepo (global
+  unique-or-drop). The caller file's import now disambiguates the type —
+  same evidence class as ImportNarrowed, unique-or-drop preserved. promom:
+  0/23 → fully resolved caller list (+465 edges). Swift resolution untouched
+  (its tests pin the behavior).
+- **search noise**: identifier search ranks ANY code symbol above Document
+  fragments, and collapses doc hits to one row per file.
+- **stale audit**: `stats` no longer serves an outdated audit under
+  `measured_precision` — stale numbers move to `stale_audit_not_current`.
+- **index lock → OS flock** (std `File::try_lock`, Rust 1.89 — zero deps):
+  the kernel releases the lock the instant the owner dies, so the PID-stamp /
+  dead-owner-steal machinery from 1.34 is deleted outright. Measured: kill -9
+  mid-index → next query self-heals and answers in 69 ms.
+- **callers --files**: unpinned name-level questions return the UNION across
+  same-name definitions again (dominant-definition narrowing was a measured
+  recall loss), definition files stay as labeled evidence, human notes moved
+  to stderr. Eval receipts (SCIP ground truth, 68 questions): **P 0.66 /
+  R 0.98 / answer-rate 100% / 319 B** vs grep 0.63 / 0.94 / 100% / 2,701 B —
+  ahead of grep on every measured dimension. (The 1.33 "R 0.87" receipt was
+  stale: the harness predated the v1.33 `--files` format.)
+
 ## 1.34.0 — zero-false-negative enumeration + ops hardening
 
 Enumeration moved from directory-walking to `git ls-files` (tracked +

@@ -219,6 +219,26 @@ impl CodeGraphServer {
     }
 
     fn open(&self) -> Result<PooledStore, McpError> {
+        let store = self.open_any()?;
+        // ZERO-FALSE-NEGATIVE GUARD: an empty graph must never produce clean
+        // empty answers ("no callers" from 0 nodes is a confident lie). The
+        // classic cause is a server pointed at a moved repo / stale --path.
+        // `stats` uses open_any() so the emptiness itself stays diagnosable.
+        if store.node_count().unwrap_or(0) == 0 {
+            return Err(McpError::internal_error(
+                format!(
+                    "graph is EMPTY for root {} — likely a stale/wrong server root (moved repo? stale --path in the MCP registration?). \
+                     Fix the registration (register `codegraph mcp` WITHOUT --path so it follows the project directory) or run `codegraph index` in the intended repo. \
+                     Do NOT conclude anything about the code from this answer.",
+                    self.root.display()
+                ),
+                None,
+            ));
+        }
+        Ok(store)
+    }
+
+    fn open_any(&self) -> Result<PooledStore, McpError> {
         self.maybe_refresh();
         let id = db_file_id(&self.db_path);
         if let Ok(mut slot) = self.store_slot.lock() {
@@ -685,18 +705,31 @@ impl CodeGraphServer {
 
     #[tool(description = "Graph size + trust card: node count and, when `codegraph audit` has run, the MEASURED per-tier precision of this repo's resolved edges vs a compiler oracle.")]
     async fn stats(&self) -> Result<CallToolResult, McpError> {
-        let store = self.open()?;
+        // open_any: stats is the DIAGNOSTIC tool — it must stay reachable on an
+        // empty graph precisely so the emptiness itself can be reported loudly.
+        let store = self.open_any()?;
         let err = |e: codegraph_store::StoreError| McpError::internal_error(e.to_string(), None);
         let n = store.node_count().map_err(err)?;
         let mut out = serde_json::json!({ "nodes": n });
+        if n == 0 {
+            out["EMPTY_GRAPH"] = serde_json::json!(format!(
+                "0 nodes for root {} — likely a stale/wrong server root (moved repo? stale --path?). All other tools will refuse to answer until this is fixed.",
+                self.root.display()
+            ));
+        }
         if let Ok(Some(raw)) = store.meta_get("audit_result") {
             if let Ok(audit) = serde_json::from_str::<serde_json::Value>(&raw) {
                 let current = codegraph_store::generation(&self.db_path);
                 let audited = audit.get("generation").and_then(|g| g.as_u64()).unwrap_or(0);
-                out["measured_precision"] = audit;
                 if audited < current {
-                    out["measured_precision_note"] =
-                        serde_json::json!("audit predates the current index generation — re-run `codegraph audit` to refresh");
+                    // STALE audit: never serve old precision numbers as if
+                    // current — the stale payload moves under an explicit key.
+                    out["stale_audit_not_current"] = audit;
+                    out["measured_precision_note"] = serde_json::json!(
+                        "audit predates the current index generation — numbers are for an OLDER graph; re-run `codegraph audit` to refresh"
+                    );
+                } else {
+                    out["measured_precision"] = audit;
                 }
             }
         }

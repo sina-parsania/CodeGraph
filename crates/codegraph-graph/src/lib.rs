@@ -56,6 +56,58 @@ fn top_segment(path: &str) -> &str {
     }
 }
 
+/// Disambiguate a TYPE NAME with multiple same-name classes via the caller
+/// file's imports: `import { ProfileService } from './profile.service'` names
+/// exactly WHICH ProfileService this file means. Monorepos duplicate service
+/// names across apps as a matter of course (backend-app + web-app both have a
+/// ProfileService) — global unique-or-drop killed the receiver tiers exactly
+/// where they matter most (field-measured: 0/23 NestJS DI call sites).
+/// Same evidence class as ImportNarrowed; unique-or-drop preserved.
+fn narrow_class_by_import<'a>(
+    caller: &Node,
+    ty: &str,
+    import_map: &HashMap<(&str, &str), Vec<&'a str>>,
+    candidates: &[&'a str],
+    by_id: &HashMap<&str, &'a Node>,
+) -> Option<&'a str> {
+    let modules = import_map.get(&(caller.file_path.as_str(), ty))?;
+    if modules.len() != 1 {
+        return None; // conflicting imports of the same name → drop
+    }
+    let module = modules[0];
+    let dir = caller.file_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let mut hits: Vec<&'a str> = Vec::new();
+    for &id in candidates {
+        let Some(n) = by_id.get(id) else { continue };
+        let file = n.file_path.as_str();
+        let matched = if module.starts_with('.') || module.starts_with('/') {
+            let base = if let Some(root_rel) = module.strip_prefix('/') {
+                join_normalize("", root_rel)
+            } else {
+                join_normalize(dir, module)
+            };
+            // exact extension set (same as resolve_via_import) — a bare
+            // `starts_with('.')` would also match `profile.service.helpers.ts`
+            file.strip_prefix(base.as_str()).is_some_and(|rest| {
+                matches!(rest, ".ts" | ".tsx" | ".js" | ".jsx" | ".mjs") || rest.starts_with("/index.")
+            })
+        } else if caller.language == "python" {
+            let root = module.replace('.', "/");
+            file.ends_with(&format!("{root}.py")) || file.ends_with(&format!("{root}/__init__.py"))
+        } else {
+            false
+        };
+        if matched && !hits.contains(&id) {
+            hits.push(id);
+        }
+    }
+    if hits.len() == 1 {
+        Some(hits[0])
+    } else {
+        None
+    }
+}
+
 /// T6: bind a bare call to the ONE file its import points at. The import is the
 /// evidence; still unique-or-drop (no def in the resolved file → None, never guess).
 /// TS/JS: relative module → sibling file with known extensions (or /index.*).
@@ -378,6 +430,9 @@ pub fn build_with(
                 .and_then(|cls| field_types.get(cls).and_then(|m| m.get(field.as_str())).copied())
                 .and_then(|ty| match class_by_name.get(ty) {
                     Some(ids) if ids.len() == 1 => Some(ids[0]),
+                    // same-name classes across apps: the caller file's import
+                    // of the TYPE is the disambiguator (monorepo DI pattern)
+                    Some(ids) => narrow_class_by_import(caller, ty, &import_map, ids, &by_id),
                     _ => None,
                 })
                 .and_then(|type_cls| resolve_member(type_cls, &c.callee_name, &class_members, &class_parents))
@@ -404,6 +459,9 @@ pub fn build_with(
                     .or(via_field)
                     .and_then(|(ty, tag)| match class_by_name.get(ty) {
                         Some(ids) if ids.len() == 1 => Some((ids[0], tag)),
+                        Some(ids) => {
+                            narrow_class_by_import(caller, ty, &import_map, ids, &by_id).map(|id| (id, tag))
+                        }
                         _ => None,
                     })
                     .and_then(|(type_cls, tag)| {
@@ -691,6 +749,47 @@ mod tests {
         assert_eq!(fetch.len(), 1, "self.vm.fetch() resolves to exactly one method");
         assert!(fetch[0].dst.contains("home_vm"), "resolved to HomeVM.fetch, not OtherVM");
         assert_eq!(fetch[0].metadata.get("justification").and_then(|v| v.as_str()), Some("FieldTypeMember"));
+    }
+
+    /// The promom field-test shape: NestJS constructor-injected service whose
+    /// CLASS NAME exists in two apps of the monorepo. Global uniqueness fails;
+    /// the caller file's import must disambiguate (measured 0/23 before).
+    #[test]
+    fn nestjs_di_call_resolves_across_duplicate_class_names() {
+        let files = [
+            (
+                "backend-app/src/profile/profile.service.ts",
+                "export class ProfileService {\n  getUserProfile(id: string) {}\n}\n",
+            ),
+            (
+                "web-app/app/profile/profile.service.ts",
+                "export class ProfileService {\n  getUserProfile(id: string) {}\n}\n",
+            ),
+            (
+                "backend-app/src/banner/banner.service.ts",
+                "import { ProfileService } from '../profile/profile.service';\nexport class BannerService {\n  constructor(private readonly profileService: ProfileService) {}\n  go() { this.profileService.getUserProfile('x'); }\n}\n",
+            ),
+        ];
+        let (mut nodes, mut calls, mut inherits, mut fields, mut locals, mut imports) =
+            (vec![], vec![], vec![], vec![], vec![], vec![]);
+        for (f, src) in files {
+            let pf = codegraph_parse::parse_file("p", f, src);
+            nodes.extend(pf.nodes);
+            calls.extend(pf.calls);
+            inherits.extend(pf.inherits);
+            fields.extend(pf.fields);
+            locals.extend(pf.locals);
+            imports.extend(pf.imports);
+        }
+        let built = build(&nodes, &calls, &inherits, &fields, &locals, &imports);
+        let hits: Vec<_> = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".getuserprofile"))
+            .collect();
+        assert_eq!(hits.len(), 1, "DI call must resolve despite the duplicate class name: {hits:?}");
+        assert!(hits[0].dst.contains("backend_app"), "import narrows to backend-app's ProfileService: {}", hits[0].dst);
+        assert_eq!(hits[0].metadata.get("justification").and_then(|v| v.as_str()), Some("FieldTypeMember"));
     }
 
     #[test]

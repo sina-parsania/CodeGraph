@@ -3,9 +3,9 @@
     "repo": "fastapi",
     "name": "Default",
     "codegraph": {
-      "precision": 1.0,
+      "precision": 0.75,
       "recall": 1.0,
-      "bytes": 72,
+      "bytes": 113,
       "answered": true
     },
     "grep": {
@@ -19,9 +19,9 @@
     "repo": "fastapi",
     "name": "get_compat_model_name_map",
     "codegraph": {
-      "precision": 0.25,
-      "recall": 0.5,
-      "bytes": 90,
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 59,
       "answered": true
     },
     "grep": {
@@ -35,9 +35,9 @@
     "repo": "fastapi",
     "name": "File",
     "codegraph": {
-      "precision": 0.8888888888888888,
-      "recall": 0.96,
-      "bytes": 1157,
+      "precision": 0.8620689655172413,
+      "recall": 1.0,
+      "bytes": 1256,
       "answered": true
     },
     "grep": {
@@ -52,8 +52,8 @@
     "name": "create_cloned_field",
     "codegraph": {
       "precision": 1.0,
-      "recall": 0.5,
-      "bytes": 19,
+      "recall": 1.0,
+      "bytes": 51,
       "answered": true
     },
     "grep": {
@@ -67,9 +67,9 @@
     "repo": "fastapi",
     "name": "solve_dependencies",
     "codegraph": {
-      "precision": 0.3333333333333333,
-      "recall": 0.5,
-      "bytes": 63,
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 64,
       "answered": true
     },
     "grep": {
@@ -83,9 +83,9 @@
     "repo": "fastapi",
     "name": "_regenerate_error_with_loc",
     "codegraph": {
-      "precision": 0.5,
+      "precision": 1.0,
       "recall": 1.0,
-      "bytes": 93,
+      "bytes": 49,
       "answered": true
     },
     "grep": {
@@ -100,8 +100,8 @@
     "name": "_model_rebuild",
     "codegraph": {
       "precision": 1.0,
-      "recall": 0.5,
-      "bytes": 26,
+      "recall": 1.0,
+      "bytes": 60,
       "answered": true
     },
     "grep": {
@@ -115,9 +115,9 @@
     "repo": "fastapi",
     "name": "get_swagger_ui_oauth2_redirect_html",
     "codegraph": {
-      "precision": 1.0,
+      "precision": 0.75,
       "recall": 1.0,
-      "bytes": 102,
+      "bytes": 141,
       "answered": true
     },
     "grep": {
@@ -131,9 +131,9 @@
     "repo": "fastapi",
     "name": "alias",
     "codegraph": {
-      "precision": 0.18181818181818182,
-      "recall": 0.6666666666666666,
-      "bytes": 764,
+      "precision": 0.1,
+      "recall": 0.3333333333333333,
+      "bytes": 751,
       "answered": true
     },
     "grep": {
@@ -149,8 +149,8 @@
     "codegraph": {
       "precision": 0.0,
       "recall": 0.0,
-      "bytes": 0,
-      "answered": false
+      "bytes": 52,
+      "answered": true
     },
     "grep": {
       "precision": 0.0,
@@ -163,9 +163,9 @@
     "repo": "fastapi",
     "name": "errors",
     "codegraph": {
-      "precision": 0.25,
+      "precision": 0.23076923076923078,
       "recall": 1.0,
-      "bytes": 599,
+      "bytes": 639,
       "answered": true
     },
     "grep": {
@@ -181,7 +181,7 @@
     "codegraph": {
       "precision": 1.0,
       "recall": 1.0,
-      "bytes": 83,
+      "bytes": 109,
       "answered": true
     },
     "grep": {
@@ -196,8 +196,8 @@
     "name": "_model_dump",
     "codegraph": {
       "precision": 1.0,
-      "recall": 0.6666666666666666,
-      "bytes": 39,
+      "recall": 1.0,
+      "bytes": 73,
       "answered": true
     },
     "grep": {
@@ -211,9 +211,9 @@
     "repo": "fastapi",
     "name": "get_authorization_scheme_param",
     "codegraph": {
-      "precision": 1.0,
+      "precision": 0.6666666666666666,
       "recall": 1.0,
-      "bytes": 52,
+      "bytes": 93,
       "answered": true
     },
     "grep": {
@@ -227,9 +227,9 @@
     "repo": "fastapi",
     "name": "is_pv1_scalar_field",
     "codegraph": {
-      "precision": 0.2857142857142857,
+      "precision": 1.0,
       "recall": 1.0,
-      "bytes": 149,
+      "bytes": 40,
       "answered": true
     },
     "grep": {
@@ -243,9 +243,9 @@
     "repo": "fastapi",
     "name": "get_missing_field_error",
     "codegraph": {
-      "precision": 0.3333333333333333,
-      "recall": 0.5,
-      "bytes": 74,
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 64,
       "answered": true
     },
     "grep": {
@@ -259,9 +259,9 @@
     "repo": "fastapi",
     "name": "read",
     "codegraph": {
-      "precision": 0.7777777777777778,
+      "precision": 0.7,
       "recall": 1.0,
-      "bytes": 517,
+      "bytes": 559,
       "answered": true
     },
     "grep": {
@@ -291,9 +291,9 @@
     "repo": "fastapi",
     "name": "is_body_allowed_for_status_code",
     "codegraph": {
-      "precision": 1.0,
+      "precision": 0.75,
       "recall": 1.0,
-      "bytes": 74,
+      "bytes": 106,
       "answered": true
     },
     "grep": {
@@ -307,9 +307,9 @@
     "repo": "fastapi",
     "name": "generate_unique_id",
     "codegraph": {
-      "precision": 1.0,
+      "precision": 0.6666666666666666,
       "recall": 1.0,
-      "bytes": 43,
+      "bytes": 97,
       "answered": true
     },
     "grep": {
@@ -323,9 +323,9 @@
     "repo": "fastapi",
     "name": "Form",
     "codegraph": {
-      "precision": 0.9565217391304348,
-      "recall": 0.9565217391304348,
-      "bytes": 985,
+      "precision": 0.92,
+      "recall": 1.0,
+      "bytes": 1081,
       "answered": true
     },
     "grep": {
@@ -339,9 +339,9 @@
     "repo": "fastapi",
     "name": "get_cached_model_fields",
     "codegraph": {
-      "precision": 1.0,
+      "precision": 0.6666666666666666,
       "recall": 1.0,
-      "bytes": 51,
+      "bytes": 85,
       "answered": true
     },
     "grep": {
@@ -356,8 +356,8 @@
     "name": "_get_model_config",
     "codegraph": {
       "precision": 1.0,
-      "recall": 0.6666666666666666,
-      "bytes": 40,
+      "recall": 1.0,
+      "bytes": 74,
       "answered": true
     },
     "grep": {
@@ -372,8 +372,8 @@
     "name": "is_bytes_field",
     "codegraph": {
       "precision": 1.0,
-      "recall": 0.5,
-      "bytes": 30,
+      "recall": 1.0,
+      "bytes": 64,
       "answered": true
     },
     "grep": {
@@ -420,8 +420,8 @@
     "name": "is_scalar_field",
     "codegraph": {
       "precision": 1.0,
-      "recall": 0.6666666666666666,
-      "bytes": 51,
+      "recall": 1.0,
+      "bytes": 85,
       "answered": true
     },
     "grep": {
@@ -437,7 +437,7 @@
     "codegraph": {
       "precision": 0.8,
       "recall": 1.0,
-      "bytes": 188,
+      "bytes": 203,
       "answered": true
     },
     "grep": {
@@ -451,9 +451,9 @@
     "repo": "fastapi",
     "name": "add_task",
     "codegraph": {
-      "precision": 1.0,
+      "precision": 0.875,
       "recall": 1.0,
-      "bytes": 312,
+      "bytes": 356,
       "answered": true
     },
     "grep": {
@@ -467,9 +467,9 @@
     "repo": "fastapi",
     "name": "errors",
     "codegraph": {
-      "precision": 0.25,
+      "precision": 0.23076923076923078,
       "recall": 1.0,
-      "bytes": 599,
+      "bytes": 639,
       "answered": true
     },
     "grep": {
@@ -484,8 +484,8 @@
     "name": "is_sequence_field",
     "codegraph": {
       "precision": 1.0,
-      "recall": 0.5,
-      "bytes": 30,
+      "recall": 1.0,
+      "bytes": 64,
       "answered": true
     },
     "grep": {
@@ -499,9 +499,9 @@
     "repo": "fastapi",
     "name": "get_redoc_html",
     "codegraph": {
-      "precision": 1.0,
+      "precision": 0.8,
       "recall": 1.0,
-      "bytes": 127,
+      "bytes": 166,
       "answered": true
     },
     "grep": {
@@ -516,8 +516,8 @@
     "name": "deep_dict_update",
     "codegraph": {
       "precision": 1.0,
-      "recall": 0.5,
-      "bytes": 25,
+      "recall": 1.0,
+      "bytes": 57,
       "answered": true
     },
     "grep": {
@@ -531,9 +531,9 @@
     "repo": "fastapi",
     "name": "create_body_model",
     "codegraph": {
-      "precision": 0.3333333333333333,
-      "recall": 0.5,
-      "bytes": 74,
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 64,
       "answered": true
     },
     "grep": {
@@ -547,9 +547,9 @@
     "repo": "fastapi",
     "name": "jsonable_encoder",
     "codegraph": {
-      "precision": 0.3488372093023256,
-      "recall": 0.9375,
-      "bytes": 1735,
+      "precision": 1.0,
+      "recall": 1.0,
+      "bytes": 560,
       "answered": true
     },
     "grep": {
@@ -563,9 +563,9 @@
     "repo": "fastapi",
     "name": "close",
     "codegraph": {
-      "precision": 0.2727272727272727,
+      "precision": 0.2647058823529412,
       "recall": 1.0,
-      "bytes": 1529,
+      "bytes": 1571,
       "answered": true
     },
     "grep": {
@@ -579,9 +579,9 @@
     "repo": "fastapi",
     "name": "_normalize_errors",
     "codegraph": {
-      "precision": 0.3333333333333333,
+      "precision": 1.0,
       "recall": 1.0,
-      "bytes": 128,
+      "bytes": 38,
       "answered": true
     },
     "grep": {
@@ -595,9 +595,9 @@
     "repo": "fastapi",
     "name": "get_openapi",
     "codegraph": {
-      "precision": 1.0,
+      "precision": 0.6666666666666666,
       "recall": 1.0,
-      "bytes": 66,
+      "bytes": 106,
       "answered": true
     },
     "grep": {
@@ -611,9 +611,9 @@
     "repo": "fastapi",
     "name": "is_bytes_sequence_annotation",
     "codegraph": {
-      "precision": 0.4,
+      "precision": 1.0,
       "recall": 1.0,
-      "bytes": 114,
+      "bytes": 40,
       "answered": true
     },
     "grep": {
@@ -628,8 +628,8 @@
     "name": "copy_field_info",
     "codegraph": {
       "precision": 1.0,
-      "recall": 0.5,
-      "bytes": 30,
+      "recall": 1.0,
+      "bytes": 64,
       "answered": true
     },
     "grep": {
@@ -643,9 +643,9 @@
     "repo": "zod",
     "name": "email",
     "codegraph": {
-      "precision": 0.8333333333333334,
+      "precision": 0.4166666666666667,
       "recall": 1.0,
-      "bytes": 203,
+      "bytes": 394,
       "answered": true
     },
     "grep": {
@@ -659,9 +659,9 @@
     "repo": "zod",
     "name": "nullish",
     "codegraph": {
-      "precision": 0.6666666666666666,
+      "precision": 0.5,
       "recall": 1.0,
-      "bytes": 94,
+      "bytes": 115,
       "answered": true
     },
     "grep": {
@@ -675,9 +675,9 @@
     "repo": "zod",
     "name": "parseAsync",
     "codegraph": {
-      "precision": 0.9473684210526315,
+      "precision": 0.5,
       "recall": 1.0,
-      "bytes": 625,
+      "bytes": 1257,
       "answered": true
     },
     "grep": {
@@ -691,9 +691,9 @@
     "repo": "zod",
     "name": "or",
     "codegraph": {
-      "precision": 0.6666666666666666,
+      "precision": 0.5,
       "recall": 1.0,
-      "bytes": 94,
+      "bytes": 115,
       "answered": true
     },
     "grep": {
@@ -707,9 +707,9 @@
     "repo": "zod",
     "name": "toString",
     "codegraph": {
-      "precision": 0.2857142857142857,
+      "precision": 0.125,
       "recall": 1.0,
-      "bytes": 201,
+      "bytes": 487,
       "answered": true
     },
     "grep": {
@@ -723,9 +723,9 @@
     "repo": "zod",
     "name": "mergeObjectSync",
     "codegraph": {
-      "precision": 0.6666666666666666,
+      "precision": 0.5,
       "recall": 1.0,
-      "bytes": 87,
+      "bytes": 102,
       "answered": true
     },
     "grep": {
@@ -739,9 +739,9 @@
     "repo": "zod",
     "name": "rest",
     "codegraph": {
-      "precision": 0.6666666666666666,
+      "precision": 0.5,
       "recall": 1.0,
-      "bytes": 91,
+      "bytes": 109,
       "answered": true
     },
     "grep": {
@@ -755,9 +755,9 @@
     "repo": "zod",
     "name": "includes",
     "codegraph": {
-      "precision": 0.14285714285714285,
-      "recall": 0.5,
-      "bytes": 253,
+      "precision": 0.18181818181818182,
+      "recall": 1.0,
+      "bytes": 355,
       "answered": true
     },
     "grep": {
@@ -771,9 +771,9 @@
     "repo": "zod",
     "name": "toUpperCase",
     "codegraph": {
-      "precision": 0.75,
+      "precision": 0.375,
       "recall": 1.0,
-      "bytes": 264,
+      "bytes": 526,
       "answered": true
     },
     "grep": {
@@ -787,9 +787,9 @@
     "repo": "zod",
     "name": "and",
     "codegraph": {
-      "precision": 0.75,
+      "precision": 0.5,
       "recall": 1.0,
-      "bytes": 128,
+      "bytes": 188,
       "answered": true
     },
     "grep": {
@@ -803,9 +803,9 @@
     "repo": "zod",
     "name": "int",
     "codegraph": {
-      "precision": 0.6666666666666666,
+      "precision": 0.4,
       "recall": 1.0,
-      "bytes": 237,
+      "bytes": 329,
       "answered": true
     },
     "grep": {
@@ -819,9 +819,9 @@
     "repo": "zod",
     "name": "innerType",
     "codegraph": {
-      "precision": 0.6666666666666666,
+      "precision": 0.5,
       "recall": 1.0,
-      "bytes": 92,
+      "bytes": 111,
       "answered": true
     },
     "grep": {
@@ -835,9 +835,9 @@
     "repo": "zod",
     "name": "joinValues",
     "codegraph": {
-      "precision": 0.6666666666666666,
+      "precision": 0.3333333333333333,
       "recall": 1.0,
-      "bytes": 80,
+      "bytes": 149,
       "answered": true
     },
     "grep": {
@@ -851,9 +851,9 @@
     "repo": "zod",
     "name": "pipe",
     "codegraph": {
-      "precision": 0.6666666666666666,
+      "precision": 0.5,
       "recall": 1.0,
-      "bytes": 94,
+      "bytes": 115,
       "answered": true
     },
     "grep": {
@@ -867,9 +867,9 @@
     "repo": "zod",
     "name": "safeParseAsync",
     "codegraph": {
-      "precision": 0.8571428571428571,
+      "precision": 0.5,
       "recall": 1.0,
-      "bytes": 228,
+      "bytes": 388,
       "answered": true
     },
     "grep": {
@@ -883,9 +883,9 @@
     "repo": "zod",
     "name": "safeParse",
     "codegraph": {
-      "precision": 0.9642857142857143,
+      "precision": 0.5094339622641509,
       "recall": 1.0,
-      "bytes": 879,
+      "bytes": 1749,
       "answered": true
     },
     "grep": {
@@ -899,9 +899,9 @@
     "repo": "zod",
     "name": "optional",
     "codegraph": {
-      "precision": 0.95,
+      "precision": 0.5135135135135135,
       "recall": 1.0,
-      "bytes": 649,
+      "bytes": 1265,
       "answered": true
     },
     "grep": {
@@ -915,9 +915,9 @@
     "repo": "zod",
     "name": "toString",
     "codegraph": {
-      "precision": 0.42857142857142855,
+      "precision": 0.1875,
       "recall": 1.0,
-      "bytes": 201,
+      "bytes": 487,
       "answered": true
     },
     "grep": {
@@ -931,9 +931,9 @@
     "repo": "zod",
     "name": "implement",
     "codegraph": {
-      "precision": 0.6666666666666666,
-      "recall": 0.6666666666666666,
-      "bytes": 112,
+      "precision": 0.5,
+      "recall": 1.0,
+      "bytes": 197,
       "answered": true
     },
     "grep": {
@@ -947,9 +947,9 @@
     "repo": "zod",
     "name": "pick",
     "codegraph": {
-      "precision": 0.6,
+      "precision": 0.3333333333333333,
       "recall": 1.0,
-      "bytes": 177,
+      "bytes": 291,
       "answered": true
     },
     "grep": {
@@ -963,9 +963,9 @@
     "repo": "zod",
     "name": "strict",
     "codegraph": {
-      "precision": 0.875,
+      "precision": 0.4375,
       "recall": 1.0,
-      "bytes": 268,
+      "bytes": 534,
       "answered": true
     },
     "grep": {
@@ -979,9 +979,9 @@
     "repo": "zod",
     "name": "dirty",
     "codegraph": {
-      "precision": 0.6666666666666666,
+      "precision": 0.5,
       "recall": 1.0,
-      "bytes": 87,
+      "bytes": 102,
       "answered": true
     },
     "grep": {
@@ -995,9 +995,9 @@
     "repo": "zod",
     "name": "extend",
     "codegraph": {
-      "precision": 0.6666666666666666,
-      "recall": 0.6666666666666666,
-      "bytes": 109,
+      "precision": 0.5,
+      "recall": 1.0,
+      "bytes": 191,
       "answered": true
     },
     "grep": {
@@ -1011,9 +1011,9 @@
     "repo": "zod",
     "name": "_refinement",
     "codegraph": {
-      "precision": 0.6666666666666666,
+      "precision": 0.5,
       "recall": 1.0,
-      "bytes": 92,
+      "bytes": 96,
       "answered": true
     },
     "grep": {
@@ -1027,9 +1027,9 @@
     "repo": "zod",
     "name": "readonly",
     "codegraph": {
-      "precision": 0.6666666666666666,
+      "precision": 0.5,
       "recall": 1.0,
-      "bytes": 94,
+      "bytes": 115,
       "answered": true
     },
     "grep": {
@@ -1043,9 +1043,9 @@
     "repo": "zod",
     "name": "assertNever",
     "codegraph": {
-      "precision": 0.75,
+      "precision": 0.375,
       "recall": 1.0,
-      "bytes": 114,
+      "bytes": 222,
       "answered": true
     },
     "grep": {
@@ -1059,9 +1059,9 @@
     "repo": "zod",
     "name": "nullable",
     "codegraph": {
-      "precision": 0.9411764705882353,
+      "precision": 0.5,
       "recall": 1.0,
-      "bytes": 547,
+      "bytes": 1077,
       "answered": true
     },
     "grep": {
@@ -1075,9 +1075,9 @@
     "repo": "zod",
     "name": "transform",
     "codegraph": {
-      "precision": 0.9166666666666666,
+      "precision": 0.5,
       "recall": 1.0,
-      "bytes": 389,
+      "bytes": 751,
       "answered": true
     },
     "grep": {
