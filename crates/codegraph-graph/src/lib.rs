@@ -320,146 +320,411 @@ pub fn resolve_files(
 /// `include_ambiguous`: ALSO emit edges for unresolved calls with 2–5 same-name
 /// candidates, tagged `Confidence::Ambiguous` + justification "Ambiguous" — an
 /// honest opt-in recall tier (coverage/queries can filter them; never silent).
-pub fn build_with(
-    nodes: &[Node],
-    calls: &[RawCall],
-    inherits: &[RawInherit],
-    fields: &[RawField],
-    locals: &[RawLocal],
-    imports: &[RawImport],
-    include_ambiguous: bool,
-) -> Built {
-    let by_id: HashMap<&str, &Node> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-    let file_by_path: HashMap<&str, &str> = nodes
-        .iter()
-        .filter(|n| n.label == NodeLabel::File)
-        .map(|n| (n.file_path.as_str(), n.id.as_str()))
-        .collect();
-    let mut fn_by_file_name: HashMap<(&str, &str), &str> = HashMap::new();
-    let mut fn_by_name: HashMap<&str, Vec<&str>> = HashMap::new();
-    for n in nodes
-        .iter()
-        .filter(|n| matches!(n.label, NodeLabel::Function | NodeLabel::Method))
-    {
-        fn_by_file_name.insert((n.file_path.as_str(), n.name.as_str()), n.id.as_str());
-        fn_by_name
-            .entry(n.name.as_str())
-            .or_default()
-            .push(n.id.as_str());
+/// Every lookup table call resolution needs, borrowed from the raw inputs.
+/// Built once per `build_with` — the tables are the "resolution indexes"
+/// phase; each tier reads them, none mutates them.
+struct ResolutionIndexes<'a> {
+    by_id: HashMap<&'a str, &'a Node>,
+    file_by_path: HashMap<&'a str, &'a str>,
+    fn_by_file_name: HashMap<(&'a str, &'a str), &'a str>,
+    fn_by_name: HashMap<&'a str, Vec<&'a str>>,
+    class_by_name: HashMap<&'a str, Vec<&'a str>>,
+    class_members: HashMap<&'a str, HashMap<&'a str, Vec<&'a str>>>,
+    class_parents: HashMap<&'a str, Vec<&'a str>>,
+    field_types: HashMap<&'a str, HashMap<&'a str, &'a str>>,
+    import_map: HashMap<(&'a str, &'a str), Vec<&'a str>>,
+    fn_by_dir_name: HashMap<(&'a str, &'a str), Vec<&'a str>>,
+    local_types: HashMap<&'a str, HashMap<&'a str, &'a str>>,
+    route_ids: HashSet<&'a str>,
+}
+
+impl<'a> ResolutionIndexes<'a> {
+    fn build(
+        nodes: &'a [Node],
+        inherits: &'a [RawInherit],
+        fields: &'a [RawField],
+        locals: &'a [RawLocal],
+        imports: &'a [RawImport],
+    ) -> Self {
+        let by_id: HashMap<&str, &Node> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+        let file_by_path: HashMap<&str, &str> = nodes
+            .iter()
+            .filter(|n| n.label == NodeLabel::File)
+            .map(|n| (n.file_path.as_str(), n.id.as_str()))
+            .collect();
+        let mut fn_by_file_name: HashMap<(&str, &str), &str> = HashMap::new();
+        let mut fn_by_name: HashMap<&str, Vec<&str>> = HashMap::new();
+        for n in nodes
+            .iter()
+            .filter(|n| matches!(n.label, NodeLabel::Function | NodeLabel::Method))
+        {
+            fn_by_file_name.insert((n.file_path.as_str(), n.name.as_str()), n.id.as_str());
+            fn_by_name
+                .entry(n.name.as_str())
+                .or_default()
+                .push(n.id.as_str());
+        }
+
+        // Class-Hierarchy-Analysis tables for receiver-aware (self/this) resolution.
+        let class_nodes: Vec<&Node> = nodes
+            .iter()
+            .filter(|n| {
+                matches!(
+                    n.label,
+                    NodeLabel::Class | NodeLabel::Interface | NodeLabel::Enum
+                )
+            })
+            .collect();
+        let mut class_by_name: HashMap<&str, Vec<&str>> = HashMap::new();
+        for c in &class_nodes {
+            class_by_name
+                .entry(c.name.as_str())
+                .or_default()
+                .push(c.id.as_str());
+        }
+        // class_members: class id -> method name -> method ids, by innermost containment.
+        // Includes Function nodes too (Swift/Python/Rust/Kotlin label methods Function).
+        // Classes are pre-grouped by file so each method only scans its own file's
+        // classes — the all-classes scan was O(methods × classes) repo-wide.
+        let mut classes_by_file: HashMap<&str, Vec<&Node>> = HashMap::new();
+        for c in &class_nodes {
+            classes_by_file
+                .entry(c.file_path.as_str())
+                .or_default()
+                .push(c);
+        }
+        let mut class_members: HashMap<&str, HashMap<&str, Vec<&str>>> = HashMap::new();
+        for m in nodes
+            .iter()
+            .filter(|n| matches!(n.label, NodeLabel::Method | NodeLabel::Function))
+        {
+            let owner = classes_by_file
+                .get(m.file_path.as_str())
+                .into_iter()
+                .flatten()
+                .filter(|c| {
+                    c.line_start <= m.line_start && m.line_end <= c.line_end && c.id != m.id
+                })
+                .min_by_key(|c| c.line_end - c.line_start);
+            if let Some(c) = owner {
+                class_members
+                    .entry(c.id.as_str())
+                    .or_default()
+                    .entry(m.name.as_str())
+                    .or_default()
+                    .push(m.id.as_str());
+            }
+        }
+        // class_parents: child class id -> parent class ids (resolved by unique name).
+        let mut class_parents: HashMap<&str, Vec<&str>> = HashMap::new();
+        for inh in inherits {
+            if let (Some(ch), Some(pa)) = (
+                class_by_name.get(inh.impl_name.as_str()),
+                class_by_name.get(inh.super_name.as_str()),
+            ) {
+                if ch.len() == 1 && pa.len() == 1 {
+                    class_parents.entry(ch[0]).or_default().push(pa[0]);
+                }
+            }
+        }
+        // field_types: class id -> field name -> declared type name (for T3 / DI).
+        let mut field_types: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
+        for f in fields {
+            field_types
+                .entry(f.class_id.as_str())
+                .or_default()
+                .insert(f.field_name.as_str(), f.type_name.as_str());
+        }
+        // import_map: (file, bound name) -> imported-from modules (T6 evidence).
+        let mut import_map: HashMap<(&str, &str), Vec<&str>> = HashMap::new();
+        for im in imports {
+            import_map
+                .entry((im.file_path.as_str(), im.name.as_str()))
+                .or_default()
+                .push(im.module.as_str());
+        }
+        // fn_by_dir_name: (dir, name) -> fn ids (Go package scope: dir == package).
+        let mut fn_by_dir_name: HashMap<(&str, &str), Vec<&str>> = HashMap::new();
+        for n in nodes
+            .iter()
+            .filter(|n| matches!(n.label, NodeLabel::Function | NodeLabel::Method))
+        {
+            let dir = n.file_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+            fn_by_dir_name
+                .entry((dir, n.name.as_str()))
+                .or_default()
+                .push(n.id.as_str());
+        }
+
+        // local_types: caller fn id -> local var name -> inferred type name (T5).
+        // An EMPTY type is a SHADOW marker (an untyped parameter/local binding):
+        // it can't type a member call, but it proves the name is locally bound —
+        // a typed entry for the same name always outranks it.
+        let mut local_types: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
+        for l in locals {
+            let m = local_types.entry(l.caller_id.as_str()).or_default();
+            match m.get(l.var_name.as_str()) {
+                Some(t) if !t.is_empty() => {}
+                _ => {
+                    m.insert(l.var_name.as_str(), l.type_name.as_str());
+                }
+            }
+        }
+
+        // Route-hub ids present in this graph (for exact-id HTTP linking).
+        let route_ids: HashSet<&str> = nodes
+            .iter()
+            .filter(|n| n.label == NodeLabel::Route)
+            .map(|n| n.id.as_str())
+            .collect();
+
+        ResolutionIndexes {
+            by_id,
+            file_by_path,
+            fn_by_file_name,
+            fn_by_name,
+            class_by_name,
+            class_members,
+            class_parents,
+            field_types,
+            import_map,
+            fn_by_dir_name,
+            local_types,
+            route_ids,
+        }
     }
 
-    // Class-Hierarchy-Analysis tables for receiver-aware (self/this) resolution.
-    let class_nodes: Vec<&Node> = nodes
-        .iter()
-        .filter(|n| {
-            matches!(
-                n.label,
-                NodeLabel::Class | NodeLabel::Interface | NodeLabel::Enum
+    /// Unique-or-drop class lookup for a TYPE NAME, with the caller file's
+    /// import as the monorepo disambiguator.
+    fn class_for_type(&self, caller: &Node, ty: &'a str) -> Option<&'a str> {
+        match self.class_by_name.get(ty) {
+            Some(ids) if ids.len() == 1 => Some(ids[0]),
+            // same-name classes across apps: the caller file's import of the
+            // TYPE is the disambiguator (monorepo DI pattern)
+            Some(ids) => narrow_class_by_import(caller, ty, &self.import_map, ids, &self.by_id),
+            _ => None,
+        }
+    }
+}
+
+/// Typed outcome of resolving ONE call site. Unique-or-drop is structural:
+/// `Resolved` always carries exactly one provable target + the evidence tier
+/// that proved it; anything unprovable is `Ambiguous` (opt-in candidate set)
+/// or `Dropped` — never a guess.
+enum Resolution<'a> {
+    Resolved {
+        callee: &'a str,
+        justification: &'static str,
+    },
+    Ambiguous {
+        candidates: &'a [&'a str],
+    },
+    Dropped,
+}
+
+/// Receiver-aware tiers (provably correct, unique-or-drop, never a guess):
+/// T1 self/this -> enclosing class; T3 this.field.method() -> the field's
+/// declared type's class; T5 name.method() via the local's/field's type.
+/// Each resolution carries a `justification` tag = the tier that resolved it
+/// (the precision proof obligation + per-tier measurement surface).
+fn resolve_receiver<'a>(
+    c: &'a RawCall,
+    caller: &Node,
+    ix: &ResolutionIndexes<'a>,
+) -> Option<(&'a str, &'static str)> {
+    match &c.receiver {
+        Receiver::SelfThis => c
+            .enclosing_class
+            .as_deref()
+            .and_then(|cls| {
+                resolve_member(cls, &c.callee_name, &ix.class_members, &ix.class_parents)
+            })
+            .map(|id| (id, "SelfThisMember")),
+        Receiver::Field(field) => c
+            .enclosing_class
+            .as_deref()
+            .and_then(|cls| {
+                ix.field_types
+                    .get(cls)
+                    .and_then(|m| m.get(field.as_str()))
+                    .copied()
+            })
+            .and_then(|ty| ix.class_for_type(caller, ty))
+            .and_then(|type_cls| {
+                resolve_member(
+                    type_cls,
+                    &c.callee_name,
+                    &ix.class_members,
+                    &ix.class_parents,
+                )
+            })
+            .map(|id| (id, "FieldTypeMember")),
+        // `name.method()`: resolve `name`'s static type, then that type's method.
+        // A local/param SHADOWS a field (correct lexical scoping); failing that,
+        // an implicit-`this` field of the enclosing class (Kotlin/Swift/Java write
+        // `field.method()` without `this.`). Unique-or-drop throughout.
+        Receiver::Named(var) => {
+            let via_local = ix
+                .local_types
+                .get(c.caller_id.as_str())
+                .and_then(|m| m.get(var.as_str()))
+                .copied()
+                // a shadow marker (untyped param/local) is a binding without a
+                // type: it must BLOCK the field fallback (lexical scoping) yet
+                // resolve nothing — hence kept as Some with an empty type
+                .map(|ty| (ty, "LocalVarType"));
+            let via_field = c
+                .enclosing_class
+                .as_deref()
+                .and_then(|cls| {
+                    ix.field_types
+                        .get(cls)
+                        .and_then(|m| m.get(var.as_str()))
+                        .copied()
+                })
+                .map(|ty| (ty, "FieldTypeMember"));
+            via_local
+                .or(via_field)
+                .and_then(|(ty, tag)| ix.class_for_type(caller, ty).map(|id| (id, tag)))
+                .and_then(|(type_cls, tag)| {
+                    resolve_member(
+                        type_cls,
+                        &c.callee_name,
+                        &ix.class_members,
+                        &ix.class_parents,
+                    )
+                    .map(|id| (id, tag))
+                })
+        }
+        _ => None,
+    }
+}
+
+/// Unqualified `foo()`: a LOCAL BINDING (param/var named foo) shadows
+/// everything — calling through it must never bind a free function
+/// (audit-caught: a `call_next` param bound to another file's def).
+/// Otherwise: same-file first, then the file's imports (T6 — the import IS
+/// the evidence), then Go package scope, then global-unique.
+fn resolve_bare<'a>(
+    c: &'a RawCall,
+    caller: &Node,
+    ix: &ResolutionIndexes<'a>,
+) -> Option<(&'a str, &'static str)> {
+    if ix
+        .local_types
+        .get(c.caller_id.as_str())
+        .and_then(|m| m.get(c.callee_name.as_str()))
+        .is_some()
+    {
+        return None;
+    }
+    ix.fn_by_file_name
+        .get(&(caller.file_path.as_str(), c.callee_name.as_str()))
+        .copied()
+        .map(|id| (id, "SameFileUnique"))
+        .or_else(|| {
+            resolve_via_import(
+                caller,
+                &c.callee_name,
+                &ix.import_map,
+                &ix.fn_by_file_name,
+                &ix.fn_by_name,
+                &ix.by_id,
             )
+            .map(|id| (id, "ImportNarrowed"))
         })
-        .collect();
-    let mut class_by_name: HashMap<&str, Vec<&str>> = HashMap::new();
-    for c in &class_nodes {
-        class_by_name
-            .entry(c.name.as_str())
-            .or_default()
-            .push(c.id.as_str());
-    }
-    // class_members: class id -> method name -> method ids, by innermost containment.
-    // Includes Function nodes too (Swift/Python/Rust/Kotlin label methods Function).
-    // Classes are pre-grouped by file so each method only scans its own file's
-    // classes — the all-classes scan was O(methods × classes) repo-wide.
-    let mut classes_by_file: HashMap<&str, Vec<&Node>> = HashMap::new();
-    for c in &class_nodes {
-        classes_by_file
-            .entry(c.file_path.as_str())
-            .or_default()
-            .push(c);
-    }
-    let mut class_members: HashMap<&str, HashMap<&str, Vec<&str>>> = HashMap::new();
-    for m in nodes
-        .iter()
-        .filter(|n| matches!(n.label, NodeLabel::Method | NodeLabel::Function))
-    {
-        let owner = classes_by_file
-            .get(m.file_path.as_str())
-            .into_iter()
-            .flatten()
-            .filter(|c| c.line_start <= m.line_start && m.line_end <= c.line_end && c.id != m.id)
-            .min_by_key(|c| c.line_end - c.line_start);
-        if let Some(c) = owner {
-            class_members
-                .entry(c.id.as_str())
-                .or_default()
-                .entry(m.name.as_str())
-                .or_default()
-                .push(m.id.as_str());
-        }
-    }
-    // class_parents: child class id -> parent class ids (resolved by unique name).
-    let mut class_parents: HashMap<&str, Vec<&str>> = HashMap::new();
-    for inh in inherits {
-        if let (Some(ch), Some(pa)) = (
-            class_by_name.get(inh.impl_name.as_str()),
-            class_by_name.get(inh.super_name.as_str()),
-        ) {
-            if ch.len() == 1 && pa.len() == 1 {
-                class_parents.entry(ch[0]).or_default().push(pa[0]);
+        .or_else(|| {
+            (caller.language == "go")
+                .then(|| {
+                    let dir = caller
+                        .file_path
+                        .rsplit_once('/')
+                        .map(|(d, _)| d)
+                        .unwrap_or("");
+                    match ix.fn_by_dir_name.get(&(dir, c.callee_name.as_str())) {
+                        Some(ids) if ids.len() == 1 => Some(ids[0]),
+                        _ => None,
+                    }
+                })
+                .flatten()
+                .map(|id| (id, "PackageScope"))
+        })
+        .or_else(|| match ix.fn_by_name.get(c.callee_name.as_str()) {
+            Some(cands) if cands.len() == 1 => Some((cands[0], "GlobalUnique")),
+            _ => None,
+        })
+}
+
+/// Resolve one call site to a typed `Resolution`. The cross-boundary gate and
+/// the self-call gate turn a provable target into `Dropped` — a gated
+/// resolution must NOT fall back to the ambiguous tier (it had one provable
+/// target; the gate rejected the EDGE, not the resolution).
+fn resolve_call<'a>(
+    c: &'a RawCall,
+    caller: &Node,
+    ix: &'a ResolutionIndexes<'a>,
+    include_ambiguous: bool,
+) -> Resolution<'a> {
+    let resolved = resolve_receiver(c, caller, ix).or_else(|| match &c.receiver {
+        Receiver::Bare => resolve_bare(c, caller, ix),
+        // Qualified call we couldn't type (named var / super / dropped self or
+        // field): the receiver's EXISTENCE is evidence the callee is a member
+        // of some (unknown) type — binding it to a repo-unique free function
+        // ignores that evidence. Audit measured this guess at 27% precision
+        // on a real Python repo (was tagged GlobalUnique). Drop, never guess.
+        _ => None,
+    });
+    match resolved {
+        Some((callee, justification)) => {
+            if callee == c.caller_id {
+                return Resolution::Dropped;
+            }
+            // Name/type-inferred resolution is only evidence WITHIN one language and
+            // one top-level project segment — a merged monorepo otherwise binds
+            // phantom cross-service / cross-language edges via same-name or
+            // same-type-name collisions. `ImportNarrowed` is exempt: the explicit
+            // import IS the cross-boundary evidence (shared-package monorepos).
+            if justification != "ImportNarrowed" {
+                if let Some(cand) = ix.by_id.get(callee) {
+                    if cand.language != caller.language
+                        || top_segment(&cand.file_path) != top_segment(&caller.file_path)
+                    {
+                        return Resolution::Dropped;
+                    }
+                }
+            }
+            Resolution::Resolved {
+                callee,
+                justification,
             }
         }
-    }
-    // field_types: class id -> field name -> declared type name (for T3 / DI).
-    let mut field_types: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
-    for f in fields {
-        field_types
-            .entry(f.class_id.as_str())
-            .or_default()
-            .insert(f.field_name.as_str(), f.type_name.as_str());
-    }
-    // import_map: (file, bound name) -> imported-from modules (T6 evidence).
-    let mut import_map: HashMap<(&str, &str), Vec<&str>> = HashMap::new();
-    for im in imports {
-        import_map
-            .entry((im.file_path.as_str(), im.name.as_str()))
-            .or_default()
-            .push(im.module.as_str());
-    }
-    // fn_by_dir_name: (dir, name) -> fn ids (Go package scope: dir == package).
-    let mut fn_by_dir_name: HashMap<(&str, &str), Vec<&str>> = HashMap::new();
-    for n in nodes
-        .iter()
-        .filter(|n| matches!(n.label, NodeLabel::Function | NodeLabel::Method))
-    {
-        let dir = n.file_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-        fn_by_dir_name
-            .entry((dir, n.name.as_str()))
-            .or_default()
-            .push(n.id.as_str());
-    }
-
-    // local_types: caller fn id -> local var name -> inferred type name (T5).
-    // An EMPTY type is a SHADOW marker (an untyped parameter/local binding):
-    // it can't type a member call, but it proves the name is locally bound —
-    // a typed entry for the same name always outranks it.
-    let mut local_types: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
-    for l in locals {
-        let m = local_types.entry(l.caller_id.as_str()).or_default();
-        match m.get(l.var_name.as_str()) {
-            Some(t) if !t.is_empty() => {}
-            _ => {
-                m.insert(l.var_name.as_str(), l.type_name.as_str());
+        None if include_ambiguous => {
+            // Opt-in honest-recall tier: an unresolved call with a SMALL candidate
+            // set (2–5 same-name defs) emits an edge to EACH, clearly tagged
+            // Ambiguous — never mixed into the precise default graph.
+            match ix.fn_by_name.get(c.callee_name.as_str()) {
+                Some(cands) if (2..=5).contains(&cands.len()) => Resolution::Ambiguous {
+                    candidates: cands.as_slice(),
+                },
+                _ => Resolution::Dropped,
             }
         }
+        None => Resolution::Dropped,
     }
+}
 
-    let mut edges: Vec<Edge> = Vec::new();
-    let mut seen: HashSet<(String, String, EdgeRelation)> = HashSet::new();
-
+/// File -> symbol DEFINES edges.
+fn emit_defines_edges(
+    nodes: &[Node],
+    ix: &ResolutionIndexes<'_>,
+    edges: &mut Vec<Edge>,
+    seen: &mut HashSet<(String, String, EdgeRelation)>,
+) {
     for n in nodes.iter().filter(|n| n.label != NodeLabel::File) {
-        if let Some(&file_id) = file_by_path.get(n.file_path.as_str()) {
+        if let Some(&file_id) = ix.file_by_path.get(n.file_path.as_str()) {
             push_edge(
-                &mut edges,
-                &mut seen,
+                edges,
+                seen,
                 Edge {
                     src: file_id.to_string(),
                     dst: n.id.clone(),
@@ -473,28 +738,31 @@ pub fn build_with(
             );
         }
     }
+}
 
-    // Route-hub ids present in this graph (for exact-id HTTP linking).
-    let route_ids: HashSet<&str> = nodes
-        .iter()
-        .filter(|n| n.label == NodeLabel::Route)
-        .map(|n| n.id.as_str())
-        .collect();
-
+/// Resolve every call site and emit its edges: HTTP hub links, resolved CALLS
+/// (+ the TESTS projection for test files), and the opt-in Ambiguous tier.
+fn emit_call_edges(
+    calls: &[RawCall],
+    ix: &ResolutionIndexes<'_>,
+    include_ambiguous: bool,
+    edges: &mut Vec<Edge>,
+    seen: &mut HashSet<(String, String, EdgeRelation)>,
+) {
     for c in calls {
-        let Some(caller) = by_id.get(c.caller_id.as_str()) else {
+        let Some(caller) = ix.by_id.get(c.caller_id.as_str()) else {
             continue;
         };
         // HTTP hub link: callee is a route id (exact path+method key) -> direct edge.
-        if c.callee_name.starts_with("route.") && route_ids.contains(c.callee_name.as_str()) {
+        if c.callee_name.starts_with("route.") && ix.route_ids.contains(c.callee_name.as_str()) {
             let mut metadata = Metadata::new();
             metadata.insert(
                 "justification".to_string(),
                 serde_json::Value::String("HttpPath".to_string()),
             );
             push_edge(
-                &mut edges,
-                &mut seen,
+                edges,
+                seen,
                 Edge {
                     src: c.caller_id.clone(),
                     dst: c.callee_name.clone(),
@@ -508,226 +776,88 @@ pub fn build_with(
             );
             continue;
         }
-        // Receiver-aware tiers (provably correct, unique-or-drop, never a guess):
-        // T1 self/this -> enclosing class; T3 this.field.method() -> the field's
-        // declared type's class. Everything else falls back to the existing
-        // same-file / project-wide-unique path (no regression).
-        // Each resolution carries a `justification` tag = the tier that resolved
-        // it (the precision proof obligation + per-tier measurement surface).
-        let receiver_resolved: Option<(&str, &'static str)> = match &c.receiver {
-            Receiver::SelfThis => c
-                .enclosing_class
-                .as_deref()
-                .and_then(|cls| resolve_member(cls, &c.callee_name, &class_members, &class_parents))
-                .map(|id| (id, "SelfThisMember")),
-            Receiver::Field(field) => c
-                .enclosing_class
-                .as_deref()
-                .and_then(|cls| {
-                    field_types
-                        .get(cls)
-                        .and_then(|m| m.get(field.as_str()))
-                        .copied()
-                })
-                .and_then(|ty| match class_by_name.get(ty) {
-                    Some(ids) if ids.len() == 1 => Some(ids[0]),
-                    // same-name classes across apps: the caller file's import
-                    // of the TYPE is the disambiguator (monorepo DI pattern)
-                    Some(ids) => narrow_class_by_import(caller, ty, &import_map, ids, &by_id),
-                    _ => None,
-                })
-                .and_then(|type_cls| {
-                    resolve_member(type_cls, &c.callee_name, &class_members, &class_parents)
-                })
-                .map(|id| (id, "FieldTypeMember")),
-            // `name.method()`: resolve `name`'s static type, then that type's method.
-            // A local/param SHADOWS a field (correct lexical scoping); failing that,
-            // an implicit-`this` field of the enclosing class (Kotlin/Swift/Java write
-            // `field.method()` without `this.`). Unique-or-drop throughout.
-            Receiver::Named(var) => {
-                let via_local = local_types
-                    .get(c.caller_id.as_str())
-                    .and_then(|m| m.get(var.as_str()))
-                    .copied()
-                    // a shadow marker (untyped param/local) is a binding without a
-                    // type: it must BLOCK the field fallback (lexical scoping) yet
-                    // resolve nothing — hence kept as Some with an empty type
-                    .map(|ty| (ty, "LocalVarType"));
-                let via_field = c
-                    .enclosing_class
-                    .as_deref()
-                    .and_then(|cls| {
-                        field_types
-                            .get(cls)
-                            .and_then(|m| m.get(var.as_str()))
-                            .copied()
-                    })
-                    .map(|ty| (ty, "FieldTypeMember"));
-                via_local
-                    .or(via_field)
-                    .and_then(|(ty, tag)| match class_by_name.get(ty) {
-                        Some(ids) if ids.len() == 1 => Some((ids[0], tag)),
-                        Some(ids) => narrow_class_by_import(caller, ty, &import_map, ids, &by_id)
-                            .map(|id| (id, tag)),
-                        _ => None,
-                    })
-                    .and_then(|(type_cls, tag)| {
-                        resolve_member(type_cls, &c.callee_name, &class_members, &class_parents)
-                            .map(|id| (id, tag))
-                    })
-            }
-            _ => None,
-        };
-        let global_unique = || match fn_by_name.get(c.callee_name.as_str()) {
-            Some(cands) if cands.len() == 1 => Some(cands[0]),
-            _ => None,
-        };
-        let resolved: Option<(&str, &'static str)> =
-            receiver_resolved.or_else(|| match &c.receiver {
-                // Unqualified `foo()`: a LOCAL BINDING (param/var named foo) shadows
-                // everything — calling through it must never bind a free function
-                // (audit-caught: a `call_next` param bound to another file's def).
-                // Otherwise: same-file first, then the file's imports (T6 — the
-                // import IS the evidence), then Go package scope, then global-unique.
-                Receiver::Bare => {
-                    if local_types
-                        .get(c.caller_id.as_str())
-                        .and_then(|m| m.get(c.callee_name.as_str()))
-                        .is_some()
-                    {
-                        return None;
-                    }
-                    fn_by_file_name
-                        .get(&(caller.file_path.as_str(), c.callee_name.as_str()))
-                        .copied()
-                        .map(|id| (id, "SameFileUnique"))
-                        .or_else(|| {
-                            resolve_via_import(
-                                caller,
-                                &c.callee_name,
-                                &import_map,
-                                &fn_by_file_name,
-                                &fn_by_name,
-                                &by_id,
-                            )
-                            .map(|id| (id, "ImportNarrowed"))
-                        })
-                        .or_else(|| {
-                            (caller.language == "go")
-                                .then(|| {
-                                    let dir = caller
-                                        .file_path
-                                        .rsplit_once('/')
-                                        .map(|(d, _)| d)
-                                        .unwrap_or("");
-                                    match fn_by_dir_name.get(&(dir, c.callee_name.as_str())) {
-                                        Some(ids) if ids.len() == 1 => Some(ids[0]),
-                                        _ => None,
-                                    }
-                                })
-                                .flatten()
-                                .map(|id| (id, "PackageScope"))
-                        })
-                        .or_else(|| global_unique().map(|id| (id, "GlobalUnique")))
-                }
-                // Qualified call we couldn't type (named var / super / dropped self or
-                // field): the receiver's EXISTENCE is evidence the callee is a member
-                // of some (unknown) type — binding it to a repo-unique free function
-                // ignores that evidence. Audit measured this guess at 27% precision
-                // on a real Python repo (was tagged GlobalUnique). Drop, never guess.
-                _ => None,
-            });
-        if let Some((callee_id, justification)) = resolved {
-            if callee_id == c.caller_id {
-                continue;
-            }
-            // Name/type-inferred resolution is only evidence WITHIN one language and
-            // one top-level project segment — a merged monorepo otherwise binds
-            // phantom cross-service / cross-language edges via same-name or
-            // same-type-name collisions. `ImportNarrowed` is exempt: the explicit
-            // import IS the cross-boundary evidence (shared-package monorepos).
-            if justification != "ImportNarrowed" {
-                if let Some(cand) = by_id.get(callee_id) {
-                    if cand.language != caller.language
-                        || top_segment(&cand.file_path) != top_segment(&caller.file_path)
-                    {
-                        continue;
-                    }
-                }
-            }
-            let mut metadata = Metadata::new();
-            metadata.insert(
-                "justification".to_string(),
-                serde_json::Value::String(justification.to_string()),
-            );
-            push_edge(
-                &mut edges,
-                &mut seen,
-                Edge {
-                    src: c.caller_id.clone(),
-                    dst: callee_id.to_string(),
-                    relation: EdgeRelation::Calls,
-                    tier: ResolutionTier::TreeSitter,
-                    confidence: Confidence::Inferred,
-                    src_file: caller.file_path.clone(),
-                    src_line: c.line,
-                    metadata: metadata.clone(),
-                },
-            );
-            // First-class TESTS edge: a RESOLVED call from a test file covers the
-            // callee (projection of Calls — same precision, no extra guessing).
-            if is_test_path(&caller.file_path) {
+        match resolve_call(c, caller, ix, include_ambiguous) {
+            Resolution::Resolved {
+                callee,
+                justification,
+            } => {
+                let mut metadata = Metadata::new();
+                metadata.insert(
+                    "justification".to_string(),
+                    serde_json::Value::String(justification.to_string()),
+                );
                 push_edge(
-                    &mut edges,
-                    &mut seen,
+                    edges,
+                    seen,
                     Edge {
                         src: c.caller_id.clone(),
-                        dst: callee_id.to_string(),
-                        relation: EdgeRelation::Tests,
+                        dst: callee.to_string(),
+                        relation: EdgeRelation::Calls,
                         tier: ResolutionTier::TreeSitter,
                         confidence: Confidence::Inferred,
                         src_file: caller.file_path.clone(),
                         src_line: c.line,
-                        metadata,
+                        metadata: metadata.clone(),
                     },
                 );
-            }
-        } else if include_ambiguous {
-            // Opt-in honest-recall tier: an unresolved call with a SMALL candidate
-            // set (2–5 same-name defs) emits an edge to EACH, clearly tagged
-            // Ambiguous — never mixed into the precise default graph.
-            if let Some(cands) = fn_by_name.get(c.callee_name.as_str()) {
-                if (2..=5).contains(&cands.len()) {
-                    for &cand in cands.iter() {
-                        if cand == c.caller_id {
-                            continue;
-                        }
-                        let mut metadata = Metadata::new();
-                        metadata.insert(
-                            "justification".to_string(),
-                            serde_json::Value::String("Ambiguous".to_string()),
-                        );
-                        push_edge(
-                            &mut edges,
-                            &mut seen,
-                            Edge {
-                                src: c.caller_id.clone(),
-                                dst: cand.to_string(),
-                                relation: EdgeRelation::Calls,
-                                tier: ResolutionTier::TreeSitter,
-                                confidence: Confidence::Ambiguous,
-                                src_file: caller.file_path.clone(),
-                                src_line: c.line,
-                                metadata,
-                            },
-                        );
-                    }
+                // First-class TESTS edge: a RESOLVED call from a test file covers the
+                // callee (projection of Calls — same precision, no extra guessing).
+                if is_test_path(&caller.file_path) {
+                    push_edge(
+                        edges,
+                        seen,
+                        Edge {
+                            src: c.caller_id.clone(),
+                            dst: callee.to_string(),
+                            relation: EdgeRelation::Tests,
+                            tier: ResolutionTier::TreeSitter,
+                            confidence: Confidence::Inferred,
+                            src_file: caller.file_path.clone(),
+                            src_line: c.line,
+                            metadata,
+                        },
+                    );
                 }
             }
+            Resolution::Ambiguous { candidates } => {
+                for &cand in candidates {
+                    if cand == c.caller_id {
+                        continue;
+                    }
+                    let mut metadata = Metadata::new();
+                    metadata.insert(
+                        "justification".to_string(),
+                        serde_json::Value::String("Ambiguous".to_string()),
+                    );
+                    push_edge(
+                        edges,
+                        seen,
+                        Edge {
+                            src: c.caller_id.clone(),
+                            dst: cand.to_string(),
+                            relation: EdgeRelation::Calls,
+                            tier: ResolutionTier::TreeSitter,
+                            confidence: Confidence::Ambiguous,
+                            src_file: caller.file_path.clone(),
+                            src_line: c.line,
+                            metadata,
+                        },
+                    );
+                }
+            }
+            Resolution::Dropped => {}
         }
     }
+}
 
-    // Inheritance edges (resolved by unique project-wide name) + IMPLEMENTS hyperedges.
+/// Inheritance edges (resolved by unique project-wide name) + IMPLEMENTS hyperedges.
+fn emit_inheritance_edges(
+    nodes: &[Node],
+    inherits: &[RawInherit],
+    ix: &ResolutionIndexes<'_>,
+    edges: &mut Vec<Edge>,
+    seen: &mut HashSet<(String, String, EdgeRelation)>,
+) -> Vec<(Hyperedge, Vec<HyperedgeMember>)> {
     let mut node_by_name: HashMap<&str, Vec<&str>> = HashMap::new();
     for n in nodes.iter().filter(|n| n.label != NodeLabel::File) {
         node_by_name
@@ -753,8 +883,8 @@ pub fn build_with(
         // time, but the graph knows whether B is an Interface. Exception:
         // `interface I extends J` is interface REFINEMENT, not implementation —
         // implementers() must keep returning concrete types only.
-        let imp_label = by_id.get(imp_id).map(|n| n.label);
-        let relation = match (by_id.get(sup_id).map(|n| n.label), inh.kind) {
+        let imp_label = ix.by_id.get(imp_id).map(|n| n.label);
+        let relation = match (ix.by_id.get(sup_id).map(|n| n.label), inh.kind) {
             (Some(NodeLabel::Interface), _) if imp_label == Some(NodeLabel::Interface) => {
                 EdgeRelation::Inherits
             }
@@ -764,19 +894,20 @@ pub fn build_with(
             (_, InheritKind::Implements) => EdgeRelation::Implements,
         };
         push_edge(
-            &mut edges,
-            &mut seen,
+            edges,
+            seen,
             Edge {
                 src: imp_id.to_string(),
                 dst: sup_id.to_string(),
                 relation,
                 tier: ResolutionTier::TreeSitter,
                 confidence: Confidence::Extracted,
-                src_file: by_id
+                src_file: ix
+                    .by_id
                     .get(imp_id)
                     .map(|n| n.file_path.clone())
                     .unwrap_or_default(),
-                src_line: by_id.get(imp_id).map(|n| n.line_start).unwrap_or(1),
+                src_line: ix.by_id.get(imp_id).map(|n| n.line_start).unwrap_or(1),
                 metadata: Metadata::new(),
             },
         );
@@ -796,7 +927,7 @@ pub fn build_with(
             continue;
         }
         let hid = format!("implements::{}", sup_id);
-        let sup_name = by_id.get(sup_id).map(|n| n.name.as_str()).unwrap_or("");
+        let sup_name = ix.by_id.get(sup_id).map(|n| n.name.as_str()).unwrap_or("");
         let h = Hyperedge {
             id: hid.clone(),
             relation: HyperedgeRelation::Implement,
@@ -820,18 +951,40 @@ pub fn build_with(
         });
         hyperedges.push((h, members));
     }
+    hyperedges
+}
 
+/// Materialize the petgraph from the node set + resolved edges.
+fn materialize_graph(nodes: &[Node], edges: &[Edge]) -> CodeGraph {
     let mut graph = CodeGraph::new();
     let mut idx: HashMap<&str, NodeIndex> = HashMap::new();
     for n in nodes {
         idx.insert(n.id.as_str(), graph.add_node(n.id.clone()));
     }
-    for e in &edges {
+    for e in edges {
         if let (Some(&a), Some(&b)) = (idx.get(e.src.as_str()), idx.get(e.dst.as_str())) {
             graph.add_edge(a, b, e.relation);
         }
     }
+    graph
+}
 
+pub fn build_with(
+    nodes: &[Node],
+    calls: &[RawCall],
+    inherits: &[RawInherit],
+    fields: &[RawField],
+    locals: &[RawLocal],
+    imports: &[RawImport],
+    include_ambiguous: bool,
+) -> Built {
+    let ix = ResolutionIndexes::build(nodes, inherits, fields, locals, imports);
+    let mut edges: Vec<Edge> = Vec::new();
+    let mut seen: HashSet<(String, String, EdgeRelation)> = HashSet::new();
+    emit_defines_edges(nodes, &ix, &mut edges, &mut seen);
+    emit_call_edges(calls, &ix, include_ambiguous, &mut edges, &mut seen);
+    let hyperedges = emit_inheritance_edges(nodes, inherits, &ix, &mut edges, &mut seen);
+    let graph = materialize_graph(nodes, &edges);
     Built {
         graph,
         edges,
