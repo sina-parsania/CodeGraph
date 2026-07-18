@@ -2018,8 +2018,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// Serializes every test that sets CODEGRAPH_CACHE_DIR: env vars are
+    /// process-global, and two parallel tests pointing the cache at their own
+    /// temp dirs corrupt each other's `db_path` mid-flight (CI-caught race).
+    /// unwrap_or_else(into_inner): a panicked holder must not poison the rest.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn ensure_fresh_detects_every_change_class() {
+        let _env = env_lock();
         let tmp = std::env::temp_dir().join(format!("cg_fresh_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -2203,6 +2213,7 @@ mod tests {
     /// A different engine version (parse OR release) must flag every graph stale.
     #[test]
     fn engine_version_change_forces_rebuild() {
+        let _env = env_lock();
         let tmp = std::env::temp_dir().join(format!("cg_engv_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
