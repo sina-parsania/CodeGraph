@@ -685,24 +685,22 @@ fn collect_type_refs(root: TsNode, src: &[u8], lang: &str) -> Vec<String> {
             }
             // annotations are plain expressions under a `type` node — take the
             // identifiers inside (Optional[Foo] contributes Optional AND Foo)
-            "python" => {
-                if k == "type" {
-                    let mut inner = vec![n];
-                    while let Some(t) = inner.pop() {
-                        if t.kind() == "identifier" {
-                            if let Some(s) = text(t) {
-                                if keep(&s) {
-                                    out.insert(s);
-                                }
+            "python" if k == "type" => {
+                let mut inner = vec![n];
+                while let Some(t) = inner.pop() {
+                    if t.kind() == "identifier" {
+                        if let Some(s) = text(t) {
+                            if keep(&s) {
+                                out.insert(s);
                             }
                         }
-                        let mut c = t.walk();
-                        for ch in t.children(&mut c) {
-                            inner.push(ch);
-                        }
                     }
-                    continue; // children already walked
+                    let mut c = t.walk();
+                    for ch in t.children(&mut c) {
+                        inner.push(ch);
+                    }
                 }
+                continue; // children already walked
             }
             _ => {}
         }
