@@ -1463,7 +1463,9 @@ mod tests {
         assert!(!scip_file_changed(&store, &tmp, None));
         std::fs::write(tmp.join("index.scip"), b"not a real scip file").unwrap();
         assert!(scip_file_changed(&store, &tmp, None), "new .scip must be picked up");
-        assert!(is_stale(&tmp) || true, "smoke: is_stale must not panic with a .scip present");
+        // the unstamped .scip must make the WHOLE staleness probe fire, not
+        // just the scip_file_changed sub-check asserted above
+        assert!(is_stale(&tmp), "a new .scip on disk must flag the graph stale");
         let mtime = std::fs::metadata(tmp.join("index.scip"))
             .and_then(|m| m.modified())
             .ok()
@@ -1728,8 +1730,12 @@ mod tests {
         let db = tmp.join("graph.db");
         let held = IndexLock::acquire(&db).expect("free lock must acquire");
         // an independent open-file-description must NOT get the lock while held
+        // truncate(false): flock semantics — the lock file's content is never
+        // meaningful and the path may be held by another descriptor; truncating
+        // a live lock file would be exactly the race flock exists to prevent
         let probe = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(db.with_extension("lock"))
             .unwrap();
