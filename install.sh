@@ -7,7 +7,12 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 DEST="${CODEGRAPH_BIN_DIR:-$HOME/.local/bin}"
 
 echo "==> Building codegraph (release)..."
-cargo build --release --manifest-path "$ROOT/Cargo.toml" -p codegraph-cli
+# local-embed: bundled bge-small so `semantic` works out of the box (a stock
+# install that advertises semantic_search and then hard-fails is a field bug).
+# indexstore: Swift compiler-grade tier — macOS only.
+FEATURES="local-embed"
+[ "$(uname)" = "Darwin" ] && FEATURES="$FEATURES,indexstore"
+cargo build --release --manifest-path "$ROOT/Cargo.toml" -p codegraph-cli --features "$FEATURES"
 
 BIN="$ROOT/target/release/codegraph"
 [ -x "$BIN" ] || { echo "error: build did not produce $BIN" >&2; exit 1; }

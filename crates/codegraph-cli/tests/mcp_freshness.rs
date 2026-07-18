@@ -37,17 +37,6 @@ fn init_msgs() -> [&'static str; 2] {
     ]
 }
 
-fn spawn_server(root: &std::path::Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_codegraph"))
-        .args(["mcp", "--path"])
-        .arg(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap()
-}
-
 fn call_tool(child: &mut Child, reader: &mut BufReader<&mut std::process::ChildStdout>, id: u32, tool: &str, args: &str) -> serde_json::Value {
     let msg = format!(
         r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{tool}","arguments":{args}}}}}"#

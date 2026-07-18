@@ -181,6 +181,31 @@ pub struct LimitArgs {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RoutesArgs {
+    /// Max routes returned (default 100 — keeps the payload well under client
+    /// tool-result ceilings; paginate or filter for more).
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Skip this many routes (pagination).
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// Only routes whose path starts with this prefix (e.g. "/baby-tracker").
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    /// Only this HTTP method (GET/POST/PUT/PATCH/DELETE).
+    #[serde(default)]
+    pub method: Option<String>,
+}
+
+/// LIST-shaped MCP responses use this LEAN row — full node JSON (metadata,
+/// pagerank, community, …) measured 232 KB for one `routes` call and got the
+/// result rejected by the very client the tool exists for. Full detail stays
+/// behind `get_node(id)`.
+fn lean(n: &codegraph_core::Node) -> serde_json::Value {
+    serde_json::json!({"name": n.name, "kind": n.label, "file": n.file_path, "line": n.line_start})
+}
+
 #[tool_router]
 impl CodeGraphServer {
     pub fn new(db_path: PathBuf) -> Self {
@@ -329,7 +354,8 @@ impl CodeGraphServer {
         let store = self.open()?;
         let err = |e: codegraph_store::StoreError| McpError::internal_error(e.to_string(), None);
         if let Some(pin) = &args.0.id {
-            let callers = store.callers_of_id(pin).map_err(err)?;
+            let callers: Vec<serde_json::Value> =
+                store.callers_of_id(pin).map_err(err)?.iter().map(lean).collect();
             return Ok(CallToolResult::success(vec![Content::json(
                 serde_json::json!({"pinned": pin, "callers": callers}),
             )?]));
@@ -465,6 +491,20 @@ impl CodeGraphServer {
         let store = self.open()?; // pooled connection, moved into the blocking task
         let q = args.0.query.clone();
         let limit = args.0.limit.unwrap_or(15);
+        // NO EMBEDDER must never be a dead end (field-measured: the tool was
+        // advertised, then hard-failed at runtime): degrade to lexical search
+        // and SAY SO — the agent can still act, and knows why.
+        // spawn_blocking: the probe uses blocking reqwest — calling it on the
+        // async runtime panics ("runtime within a runtime") and wedges the
+        // server (caught by the freshness regression suite).
+        if !embedder_available_async().await? {
+            let hits: Vec<serde_json::Value> =
+                store.search_smart(&q, limit).unwrap_or_default().iter().map(lean).collect();
+            return Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+                "degraded": "lexical fallback — no embedder (rebuild with --features local-embed, or load an embedding model in LM Studio / Ollama)",
+                "hits": hits,
+            }))?]));
+        }
         let results = tokio::task::spawn_blocking(move || semantic_blocking(&store, &snap, &q, limit))
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -710,7 +750,12 @@ impl CodeGraphServer {
         let store = self.open_any()?;
         let err = |e: codegraph_store::StoreError| McpError::internal_error(e.to_string(), None);
         let n = store.node_count().map_err(err)?;
-        let mut out = serde_json::json!({ "nodes": n });
+        // embedder availability up front, so agents route around a degraded
+        // semantic_search instead of discovering it mid-task
+        let mut out = serde_json::json!({
+            "nodes": n,
+            "embedder_available": embedder_available_async().await?,
+        });
         if n == 0 {
             out["EMPTY_GRAPH"] = serde_json::json!(format!(
                 "0 nodes for root {} — likely a stale/wrong server root (moved repo? stale --path?). All other tools will refuse to answer until this is fixed.",
@@ -739,9 +784,12 @@ impl CodeGraphServer {
     #[tool(description = "Dead-code CANDIDATES: functions/methods that no call site in the repo even names (entry points, route handlers, and test files excluded). Static view — dynamic dispatch/exports/reflection are invisible, so treat as candidates to verify, not verdicts.")]
     async fn dead_code(&self, args: Parameters<LimitArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
-        let dead = store
+        let dead: Vec<serde_json::Value> = store
             .dead_code_candidates(args.0.limit.unwrap_or(50))
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            .iter()
+            .map(lean)
+            .collect();
         Ok(CallToolResult::success(vec![Content::json(dead)?]))
     }
 
@@ -853,21 +901,67 @@ impl CodeGraphServer {
     #[tool(description = "List the types that IMPLEMENT or EXTEND a given interface/class/protocol (by name). Use to find every concrete implementation of an abstraction before changing it.")]
     async fn implementers(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
-        let impls = store
+        let impls: Vec<serde_json::Value> = store
             .implementers_of(&args.0.name)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            .iter()
+            .map(lean)
+            .collect();
         Ok(CallToolResult::success(vec![Content::json(impls)?]))
     }
 
-    #[tool(description = "List the HTTP routes/endpoints detected in the repo (NestJS/Express/Flask/Spring/etc.), each with method + path + handler. Use to map a backend's API surface.")]
-    async fn routes(&self) -> Result<CallToolResult, McpError> {
+    #[tool(description = "List the HTTP routes/endpoints detected in the repo (NestJS/Express/Flask/Spring/etc.), each with method + path + handler. Filter with path_prefix/method, paginate with limit/offset. Use to map a backend's API surface.")]
+    async fn routes(&self, args: Parameters<RoutesArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let mut routes = store
             .nodes_by_label("Route")
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         routes.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(CallToolResult::success(vec![Content::json(routes)?]))
+        let meta = |n: &codegraph_core::Node, k: &str| {
+            n.metadata.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
+        };
+        let want_method = args.0.method.as_deref().map(str::to_ascii_uppercase);
+        let filtered: Vec<&codegraph_core::Node> = routes
+            .iter()
+            .filter(|n| {
+                args.0.path_prefix.as_deref().is_none_or(|p| meta(n, "path").starts_with(p))
+                    && want_method.as_deref().is_none_or(|m| meta(n, "method") == m)
+            })
+            .collect();
+        let total = filtered.len();
+        let offset = args.0.offset.unwrap_or(0);
+        let limit = args.0.limit.unwrap_or(100);
+        let rows: Vec<serde_json::Value> = filtered
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|n| {
+                serde_json::json!({
+                    "method": meta(n, "method"), "path": meta(n, "path"),
+                    "handler": meta(n, "handler"), "file": n.file_path, "line": n.line_start,
+                })
+            })
+            .collect();
+        let mut out = serde_json::json!({ "total": total, "routes": rows });
+        if offset + limit < total {
+            out["_note"] = serde_json::json!(format!(
+                "showing {}..{} of {total} — re-call with offset={} (or filter with path_prefix/method)",
+                offset,
+                offset + limit,
+                offset + limit
+            ));
+        }
+        Ok(CallToolResult::success(vec![Content::json(out)?]))
     }
+}
+
+/// `codegraph_llm::embedder_available` probes local LLM servers with BLOCKING
+/// reqwest — it must never run on the async runtime (panic → wedged server).
+/// Result is OnceLock-cached inside the llm crate, so this is one hop once.
+async fn embedder_available_async() -> Result<bool, McpError> {
+    tokio::task::spawn_blocking(codegraph_llm::embedder_available)
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))
 }
 
 fn semantic_blocking(

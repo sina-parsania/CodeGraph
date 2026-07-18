@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.37.0 — lean MCP payloads, semantic that can't dead-end, MCP↔CLI parity
+
+Driven by the third field report (v1.36 head-to-head vs ripgrep on a 5-project
+monorepo — structural queries won; three defects found, all fixed).
+
+- **MCP `routes` was unusable by its own client (232 KB single-line JSON,
+  rejected by Claude Code)**: each route serialized the FULL graph node.
+  Now: lean rows ({method, path, handler, file, line}) + `limit`/`offset`
+  pagination + `path_prefix`/`method` filters; 560 routes ≈ 6 KB. Same lean
+  sweep applied to every list-shaped MCP response that still leaked full
+  nodes: `implementers`, `dead_code`, pinned `callers`. One shared `lean`
+  serializer; full node detail stays behind `get_node(id)`.
+- **`semantic_search` can no longer dead-end**: with no embedder it degrades
+  to lexical search and says so (`"degraded": "lexical fallback — no
+  embedder…"`) instead of hard-failing a tool it advertised. `stats` reports
+  `embedder_available` up front so agents route around it. `install.sh` now
+  builds with `local-embed` (bundled bge-small) by default — and
+  `indexstore` on macOS — so the stock install answers semantic queries out
+  of the box. `CODEGRAPH_NO_EMBEDDER=1` forces lexical-only (also the
+  deterministic test hook).
+- **MCP↔CLI naming parity**: `semantic-search`/`semantic_search` →
+  `semantic`, `blast-radius`/`blast_radius` → `impact`,
+  `trace-path`/`trace_path` → `trace`, `graph-query`/`graph_query` →
+  `cypher`, `dead_code` → `dead-code` (joins the earlier `stats` → `status`).
+  Agents translate MCP names to CLI constantly; every advertised name now
+  resolves.
+- Regression tests: routes payload cap (<25 KB on 300 routes) + pagination +
+  filters, alias resolution for every MCP name, forced no-embedder
+  degradation with `embedder_available:false` in stats.
+
 ## 1.36.0 — speed where it's visible + every fix is now a release gate
 
 Driven by the second field report ("we should be 10–20× faster than grep,

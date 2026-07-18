@@ -188,7 +188,12 @@ pub fn embed_texts(texts: &[String]) -> Option<(Vec<Vec<f32>>, String)> {
 
 /// True when an embedder is available (a bundled local model, or a reachable
 /// server) — so callers can give a precise "no embedder" message.
+/// `CODEGRAPH_NO_EMBEDDER=1` forces false (lexical-only mode; also how the
+/// no-embedder degradation path is tested deterministically).
 pub fn embedder_available() -> bool {
+    if std::env::var("CODEGRAPH_NO_EMBEDDER").as_deref() == Ok("1") {
+        return false;
+    }
     if cfg!(feature = "local-embed") {
         return true;
     }

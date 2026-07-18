@@ -106,8 +106,10 @@ enum Command {
         regex: bool,
     },
     /// Shortest dependency path between two symbols (by name).
+    #[command(visible_alias = "trace-path", alias = "trace_path")]
     Trace { from: String, to: String, #[arg(long, default_value = ".")] path: PathBuf },
     /// Impact / blast-radius: what depends on a symbol (reverse reachability).
+    #[command(visible_alias = "blast-radius", alias = "blast_radius")]
     Impact {
         name: String,
         #[arg(long, default_value = ".")] path: PathBuf,
@@ -146,6 +148,7 @@ enum Command {
     },
     /// Cypher-lite graph query (read-only openCypher subset): 1-2 hop MATCH with
     /// labels/relations, WHERE (=/CONTAINS/STARTS WITH/AND), RETURN props, LIMIT.
+    #[command(visible_alias = "graph-query", alias = "graph_query")]
     Cypher {
         query: String,
         #[arg(long, default_value = ".")]
@@ -210,6 +213,7 @@ enum Command {
     },
     /// Dead-code CANDIDATES: functions/methods no call site in the repo even names
     /// (excludes entry points, route handlers, test files). Candidates, not verdicts.
+    #[command(alias = "dead_code")]
     DeadCode {
         #[arg(long, default_value = ".")]
         path: PathBuf,
@@ -301,6 +305,7 @@ enum Command {
         path: PathBuf,
     },
     /// Semantic (vector) search over embedded symbols.
+    #[command(visible_alias = "semantic-search", alias = "semantic_search")]
     Semantic {
         query: String,
         #[arg(long, default_value = ".")]
