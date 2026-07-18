@@ -3,17 +3,22 @@ on:
   push:
     branches: [main]
   pull_request:
+permissions:
+  contents: read
 jobs:
   test:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with: { components: "rustfmt, clippy" }
       - uses: Swatinem/rust-cache@v2
+      - name: Format gate
+        run: cargo fmt --all -- --check
+      - name: Clippy (zero warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
         run: cargo test --workspace
-      - name: Clippy (zero warnings)
-        run: cargo clippy --all-targets -- -D warnings
       - name: Build release
         run: cargo build --release -p codegraph-cli
       - name: Determinism guarantee (golden check)

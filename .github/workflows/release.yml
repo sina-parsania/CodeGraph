@@ -2,8 +2,12 @@ name: release
 on:
   push:
     tags: ['v*']
+
+# Least privilege: build jobs need nothing beyond checkout (read); only the
+# publish job writes release objects.
 permissions:
-  contents: write
+  contents: read
+
 jobs:
   build:
     strategy:
@@ -37,12 +41,49 @@ jobs:
         run: |
           install_name_tool -add_rpath "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib" "${{ matrix.name }}"
           codesign -f -s - "${{ matrix.name }}"
-      - name: Upload to release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}
+          if-no-files-found: error
+
+  # Single publisher: downloads EVERY expected artifact, validates the set, and
+  # only then creates the release — draft first, published only after all
+  # binaries are attached. A failed platform build means NO release at all,
+  # never a silently incomplete one (the per-job `gh release upload --clobber`
+  # pattern this replaces could publish 2 of 5 binaries).
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Validate artifact set
+        shell: bash
+        run: |
+          expected="codegraph-macos-arm64 codegraph-macos-x64 codegraph-linux-x64 codegraph-linux-arm64 codegraph-windows-x64.exe"
+          missing=0
+          for f in $expected; do
+            if [ ! -s "artifacts/$f" ]; then
+              echo "MISSING or empty artifact: $f"
+              missing=1
+            fi
+          done
+          count=$(ls -1 artifacts | wc -l)
+          echo "artifacts present: $count"
+          ls -l artifacts
+          [ "$missing" -eq 0 ] || exit 1
+          [ "$count" -eq 5 ] || { echo "expected exactly 5 artifacts, found $count"; exit 1; }
+      - name: Create draft release, attach, publish
         env: { GH_TOKEN: "${{ github.token }}" }
         shell: bash
-        # ensure the release object exists — a bare tag push has none, and
-        # `gh release upload` fails with "release not found" (bit v1.31.0).
-        # `create` failing because a parallel job won the race is fine.
         run: |
-          gh release create "${GITHUB_REF_NAME}" --generate-notes --title "${GITHUB_REF_NAME}" 2>/dev/null || true
-          gh release upload "${GITHUB_REF_NAME}" "${{ matrix.name }}" --clobber
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft --generate-notes --title "${GITHUB_REF_NAME}"
+          gh release upload "${GITHUB_REF_NAME}" artifacts/* --repo "${GITHUB_REPOSITORY}"
+          gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --draft=false
