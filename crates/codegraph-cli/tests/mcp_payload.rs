@@ -5,7 +5,11 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 
-fn rpc(child: &mut Child, reader: &mut BufReader<&mut std::process::ChildStdout>, msg: &str) -> Option<serde_json::Value> {
+fn rpc(
+    child: &mut Child,
+    reader: &mut BufReader<&mut std::process::ChildStdout>,
+    msg: &str,
+) -> Option<serde_json::Value> {
     let stdin = child.stdin.as_mut().unwrap();
     writeln!(stdin, "{msg}").unwrap();
     stdin.flush().unwrap();
@@ -26,7 +30,13 @@ fn rpc(child: &mut Child, reader: &mut BufReader<&mut std::process::ChildStdout>
     }
 }
 
-fn call(child: &mut Child, reader: &mut BufReader<&mut std::process::ChildStdout>, id: u32, tool: &str, args: &str) -> String {
+fn call(
+    child: &mut Child,
+    reader: &mut BufReader<&mut std::process::ChildStdout>,
+    id: u32,
+    tool: &str,
+    args: &str,
+) -> String {
     let msg = format!(
         r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{tool}","arguments":{args}}}}}"#
     );
@@ -64,24 +74,54 @@ fn mcp_routes_payload_is_lean_and_paginated() {
         .unwrap();
     let mut stdout = child.stdout.take().unwrap();
     let mut reader = BufReader::new(&mut stdout);
-    rpc(&mut child, &mut reader, r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#);
-    rpc(&mut child, &mut reader, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+    rpc(
+        &mut child,
+        &mut reader,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
+    );
+    rpc(
+        &mut child,
+        &mut reader,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+    );
 
     let text = call(&mut child, &mut reader, 2, "routes", "{}");
-    assert!(text.len() < 25_000, "routes payload must stay lean: {} chars", text.len());
+    assert!(
+        text.len() < 25_000,
+        "routes payload must stay lean: {} chars",
+        text.len()
+    );
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(v["total"], 300);
-    assert!(!text.contains("pagerank") && !text.contains("betweenness"), "full node JSON leaked");
+    assert!(
+        !text.contains("pagerank") && !text.contains("betweenness"),
+        "full node JSON leaked"
+    );
     let first = &v["routes"][0];
     for k in ["method", "path", "file", "line"] {
-        assert!(first.get(k).is_some(), "lean route row must carry {k}: {first}");
+        assert!(
+            first.get(k).is_some(),
+            "lean route row must carry {k}: {first}"
+        );
     }
     // pagination + filtering
-    let page: serde_json::Value =
-        serde_json::from_str(&call(&mut child, &mut reader, 3, "routes", r#"{"limit":5,"offset":295}"#)).unwrap();
+    let page: serde_json::Value = serde_json::from_str(&call(
+        &mut child,
+        &mut reader,
+        3,
+        "routes",
+        r#"{"limit":5,"offset":295}"#,
+    ))
+    .unwrap();
     assert_eq!(page["routes"].as_array().unwrap().len(), 5);
-    let filt: serde_json::Value =
-        serde_json::from_str(&call(&mut child, &mut reader, 4, "routes", r#"{"path_prefix":"/mod1/"}"#)).unwrap();
+    let filt: serde_json::Value = serde_json::from_str(&call(
+        &mut child,
+        &mut reader,
+        4,
+        "routes",
+        r#"{"path_prefix":"/mod1/"}"#,
+    ))
+    .unwrap();
     assert_eq!(filt["total"], 10, "{filt}");
 
     let _ = child.kill();
@@ -107,13 +147,36 @@ fn semantic_search_degrades_without_embedder() {
         .unwrap();
     let mut stdout = child.stdout.take().unwrap();
     let mut reader = BufReader::new(&mut stdout);
-    rpc(&mut child, &mut reader, r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#);
-    rpc(&mut child, &mut reader, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
-    let sem = call(&mut child, &mut reader, 2, "semantic_search", r#"{"query":"target_fn"}"#);
-    assert!(sem.contains("degraded"), "must announce lexical fallback: {sem}");
-    assert!(sem.contains("target_fn"), "lexical fallback must still find the symbol: {sem}");
+    rpc(
+        &mut child,
+        &mut reader,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
+    );
+    rpc(
+        &mut child,
+        &mut reader,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+    );
+    let sem = call(
+        &mut child,
+        &mut reader,
+        2,
+        "semantic_search",
+        r#"{"query":"target_fn"}"#,
+    );
+    assert!(
+        sem.contains("degraded"),
+        "must announce lexical fallback: {sem}"
+    );
+    assert!(
+        sem.contains("target_fn"),
+        "lexical fallback must still find the symbol: {sem}"
+    );
     let stats = call(&mut child, &mut reader, 3, "stats", "{}");
-    assert!(stats.contains("\"embedder_available\":false"), "stats must surface embedder state: {stats}");
+    assert!(
+        stats.contains("\"embedder_available\":false"),
+        "stats must surface embedder state: {stats}"
+    );
     let _ = child.kill();
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -121,8 +184,22 @@ fn semantic_search_degrades_without_embedder() {
 /// Every MCP tool name works as a CLI alias (agents translate constantly).
 #[test]
 fn mcp_names_alias_cli_subcommands() {
-    for alias in ["semantic-search", "semantic_search", "blast-radius", "blast_radius", "trace-path", "trace_path", "graph-query", "graph_query", "dead_code", "stats"] {
-        let out = Command::new(env!("CARGO_BIN_EXE_codegraph")).args([alias, "--help"]).output().unwrap();
+    for alias in [
+        "semantic-search",
+        "semantic_search",
+        "blast-radius",
+        "blast_radius",
+        "trace-path",
+        "trace_path",
+        "graph-query",
+        "graph_query",
+        "dead_code",
+        "stats",
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_codegraph"))
+            .args([alias, "--help"])
+            .output()
+            .unwrap();
         assert!(
             out.status.success(),
             "`codegraph {alias} --help` must resolve: {}",

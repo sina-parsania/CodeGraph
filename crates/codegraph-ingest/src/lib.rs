@@ -17,7 +17,10 @@ pub fn ingest(arg: &str) -> Result<Vec<DocChunk>, String> {
         return ingest_web(arg);
     }
     let p = Path::new(arg);
-    let ext = p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
+    let ext = p
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
     match ext.as_deref() {
         Some("pdf") => ingest_pdf(p),
         Some(e) if is_text_ext(e) => {
@@ -63,7 +66,10 @@ fn ingest_image_arm(p: &Path) -> Result<Vec<DocChunk>, String> {
 
 #[cfg(not(feature = "media"))]
 fn ingest_image_arm(p: &Path) -> Result<Vec<DocChunk>, String> {
-    Err(format!("image OCR requires a build with `--features media` (tesseract): {}", p.display()))
+    Err(format!(
+        "image OCR requires a build with `--features media` (tesseract): {}",
+        p.display()
+    ))
 }
 
 /// OCR an image via tesseract into a Document chunk (media feature).
@@ -90,7 +96,12 @@ pub fn ingest_web(url: &str) -> Result<Vec<DocChunk>, String> {
         .user_agent("codegraph-ingest")
         .build()
         .map_err(|e| e.to_string())?;
-    let html = client.get(url).send().map_err(|e| e.to_string())?.text().map_err(|e| e.to_string())?;
+    let html = client
+        .get(url)
+        .send()
+        .map_err(|e| e.to_string())?
+        .text()
+        .map_err(|e| e.to_string())?;
     let text = html2text::from_read(html.as_bytes(), 100).map_err(|e| e.to_string())?;
     Ok(chunk(&text, "web", url))
 }
@@ -104,13 +115,21 @@ fn chunk(text: &str, ctype: &str, source: &str) -> Vec<DocChunk> {
             continue;
         }
         if buf.len() + para.len() > 1500 && !buf.is_empty() {
-            out.push(DocChunk { content_type: ctype.into(), source: source.into(), text: std::mem::take(&mut buf) });
+            out.push(DocChunk {
+                content_type: ctype.into(),
+                source: source.into(),
+                text: std::mem::take(&mut buf),
+            });
         }
         buf.push_str(para);
         buf.push_str("\n\n");
     }
     if !buf.trim().is_empty() {
-        out.push(DocChunk { content_type: ctype.into(), source: source.into(), text: buf.trim().to_string() });
+        out.push(DocChunk {
+            content_type: ctype.into(),
+            source: source.into(),
+            text: buf.trim().to_string(),
+        });
     }
     out
 }
@@ -121,7 +140,9 @@ mod tests {
 
     #[test]
     fn text_ext_coverage() {
-        for e in ["md", "txt", "json", "jsonl", "log", "yaml", "csv", "xml", "strings", "po", "xliff"] {
+        for e in [
+            "md", "txt", "json", "jsonl", "log", "yaml", "csv", "xml", "strings", "po", "xliff",
+        ] {
             assert!(is_text_ext(e), "{e} should be ingestable text");
         }
         for e in ["png", "jpg", "pdf", "mp4", "rs"] {

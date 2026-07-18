@@ -8,7 +8,11 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 
-fn rpc(child: &mut Child, reader: &mut BufReader<&mut std::process::ChildStdout>, msg: &str) -> Option<serde_json::Value> {
+fn rpc(
+    child: &mut Child,
+    reader: &mut BufReader<&mut std::process::ChildStdout>,
+    msg: &str,
+) -> Option<serde_json::Value> {
     let stdin = child.stdin.as_mut().unwrap();
     writeln!(stdin, "{msg}").unwrap();
     stdin.flush().unwrap();
@@ -37,7 +41,13 @@ fn init_msgs() -> [&'static str; 2] {
     ]
 }
 
-fn call_tool(child: &mut Child, reader: &mut BufReader<&mut std::process::ChildStdout>, id: u32, tool: &str, args: &str) -> serde_json::Value {
+fn call_tool(
+    child: &mut Child,
+    reader: &mut BufReader<&mut std::process::ChildStdout>,
+    id: u32,
+    tool: &str,
+    args: &str,
+) -> serde_json::Value {
     let msg = format!(
         r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{tool}","arguments":{args}}}}}"#
     );
@@ -67,8 +77,17 @@ fn generation_bump_under_running_server_is_served_fresh() {
         rpc(&mut child, &mut reader, m);
     }
 
-    let r1 = call_tool(&mut child, &mut reader, 2, "search", r#"{"query":"first_fn"}"#);
-    assert!(r1.to_string().contains("first_fn"), "baseline symbol must be served: {r1}");
+    let r1 = call_tool(
+        &mut child,
+        &mut reader,
+        2,
+        "search",
+        r#"{"query":"first_fn"}"#,
+    );
+    assert!(
+        r1.to_string().contains("first_fn"),
+        "baseline symbol must be served: {r1}"
+    );
 
     // BUMP THE GENERATION UNDER THE SERVER: new file, out-of-band index run
     // (a second process — exactly the field scenario).
@@ -83,7 +102,13 @@ fn generation_bump_under_running_server_is_served_fresh() {
 
     // The server's very next answer must include the new symbol (>1s debounce window).
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    let r2 = call_tool(&mut child, &mut reader, 3, "search", r#"{"query":"second_fn"}"#);
+    let r2 = call_tool(
+        &mut child,
+        &mut reader,
+        3,
+        "search",
+        r#"{"query":"second_fn"}"#,
+    );
     assert!(
         r2.to_string().contains("second_fn"),
         "generation bump under a running server must be served fresh: {r2}"
@@ -119,17 +144,29 @@ fn empty_graph_refuses_clean_empty_answers() {
 
     // callers on an empty graph: must NOT be a clean "no callers" — must carry
     // the EMPTY diagnosis (isError result carrying the message).
-    let r = call_tool(&mut child, &mut reader, 2, "callers", r#"{"name":"anything"}"#);
+    let r = call_tool(
+        &mut child,
+        &mut reader,
+        2,
+        "callers",
+        r#"{"name":"anything"}"#,
+    );
     let text = r.to_string();
     assert!(
         text.contains("EMPTY") || r["result"]["isError"].as_bool() == Some(true),
         "empty graph must refuse, not answer cleanly: {text}"
     );
-    assert!(!text.contains("\"callers\":[]"), "clean empty callers list is the lie we banned: {text}");
+    assert!(
+        !text.contains("\"callers\":[]"),
+        "clean empty callers list is the lie we banned: {text}"
+    );
 
     // stats stays reachable and names the problem
     let s = call_tool(&mut child, &mut reader, 3, "stats", r#"{}"#);
-    assert!(s.to_string().contains("EMPTY_GRAPH"), "stats must diagnose emptiness: {s}");
+    assert!(
+        s.to_string().contains("EMPTY_GRAPH"),
+        "stats must diagnose emptiness: {s}"
+    );
 
     let _ = child.kill();
     let _ = std::fs::remove_dir_all(&tmp);
@@ -143,5 +180,8 @@ fn dead_root_refuses_to_serve() {
         .unwrap();
     assert!(!out.status.success(), "a dead root must fail startup");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("does not exist"), "startup error must diagnose: {err}");
+    assert!(
+        err.contains("does not exist"),
+        "startup error must diagnose: {err}"
+    );
 }

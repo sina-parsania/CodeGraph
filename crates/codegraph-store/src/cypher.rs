@@ -19,7 +19,10 @@ pub fn to_sql(q: &str) -> Result<String, String> {
     let (ret_part, limit) = match tail.to_lowercase().find(" limit ") {
         Some(l) => (
             tail[..l].trim(),
-            tail[l + 7..].trim().parse::<u32>().map_err(|_| "bad LIMIT")?,
+            tail[l + 7..]
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| "bad LIMIT")?,
         ),
         None => (tail.trim(), 50),
     };
@@ -89,7 +92,11 @@ pub fn to_sql(q: &str) -> Result<String, String> {
         .split(',')
         .map(|c| prop_to_sql(c.trim()))
         .collect::<Result<_, _>>()?;
-    let where_sql = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
+    let where_sql = if conds.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conds.join(" AND "))
+    };
     Ok(format!(
         "SELECT DISTINCT {} FROM {}{} LIMIT {}",
         cols.join(", "),
@@ -132,10 +139,15 @@ fn where_to_sql(w: &str) -> Result<String, String> {
         } else if let Some(p) = c.find('=') {
             (p, "=", 1, None)
         } else {
-            return Err(format!("unsupported WHERE clause: {c} (use =, CONTAINS, STARTS WITH, AND)"));
+            return Err(format!(
+                "unsupported WHERE clause: {c} (use =, CONTAINS, STARTS WITH, AND)"
+            ));
         };
         let lhs = prop_to_sql(c[..op_pos].trim())?;
-        let raw = c[op_pos + op_len..].trim().trim_matches('\'').trim_matches('"');
+        let raw = c[op_pos + op_len..]
+            .trim()
+            .trim_matches('\'')
+            .trim_matches('"');
         match like {
             // LIKE: escape the user's % _ \ so CONTAINS '100%' matches literally.
             Some((pre, post)) => {
@@ -157,7 +169,9 @@ fn where_to_sql(w: &str) -> Result<String, String> {
 
 /// `a.name` → `a.name`, mapping cypher prop names onto real columns.
 fn prop_to_sql(p: &str) -> Result<String, String> {
-    let (var, prop) = p.split_once('.').ok_or_else(|| format!("use var.prop, got: {p}"))?;
+    let (var, prop) = p
+        .split_once('.')
+        .ok_or_else(|| format!("use var.prop, got: {p}"))?;
     let var = var.trim();
     if !var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(format!("bad variable: {var}"));
@@ -170,7 +184,11 @@ fn prop_to_sql(p: &str) -> Result<String, String> {
         "language" | "lang" => "language",
         "id" => "id",
         "pagerank" => "pagerank",
-        other => return Err(format!("unknown property: {other} (name/file/line/label/language/id/pagerank)")),
+        other => {
+            return Err(format!(
+                "unknown property: {other} (name/file/line/label/language/id/pagerank)"
+            ))
+        }
     };
     Ok(format!("{var}.{col}"))
 }
@@ -189,7 +207,10 @@ mod tests {
 
     #[test]
     fn one_hop_with_where() {
-        let sql = to_sql("MATCH (a:Function)-[:Calls]->(b) WHERE b.name = 'save' RETURN a.name, a.file LIMIT 5").unwrap();
+        let sql = to_sql(
+            "MATCH (a:Function)-[:Calls]->(b) WHERE b.name = 'save' RETURN a.name, a.file LIMIT 5",
+        )
+        .unwrap();
         assert!(sql.contains("e0.relation = 'Calls'"));
         assert!(sql.contains("b.name = 'save'"));
         assert!(sql.contains("LIMIT 5"));
@@ -197,7 +218,10 @@ mod tests {
 
     #[test]
     fn two_hop_and_contains() {
-        let sql = to_sql("MATCH (a)-[:Calls]->(b)-[:Calls]->(c) WHERE a.file CONTAINS 'auth' RETURN c.name").unwrap();
+        let sql = to_sql(
+            "MATCH (a)-[:Calls]->(b)-[:Calls]->(c) WHERE a.file CONTAINS 'auth' RETURN c.name",
+        )
+        .unwrap();
         assert!(sql.contains("e1.src = b.id"));
         assert!(sql.contains("LIKE '%auth%'"));
     }
@@ -209,8 +233,12 @@ mod tests {
 
     #[test]
     fn lowercase_and_splits() {
-        let sql = to_sql("MATCH (a)-->(b) WHERE a.name = 'x' and b.name = 'y' RETURN a.name").unwrap();
-        assert!(sql.contains("a.name = 'x'") && sql.contains("b.name = 'y'"), "{sql}");
+        let sql =
+            to_sql("MATCH (a)-->(b) WHERE a.name = 'x' and b.name = 'y' RETURN a.name").unwrap();
+        assert!(
+            sql.contains("a.name = 'x'") && sql.contains("b.name = 'y'"),
+            "{sql}"
+        );
     }
 
     #[test]

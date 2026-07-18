@@ -21,15 +21,40 @@ pub(crate) struct Indexer {
 pub(crate) fn detect(root: &Path) -> Option<Indexer> {
     let has = |f: &str| root.join(f).exists();
     if has("tsconfig.json") || has("package.json") {
-        Some(Indexer { lang: "typescript", bin: "scip-typescript", args: &["index"], install: "npm i -g @sourcegraph/scip-typescript" })
+        Some(Indexer {
+            lang: "typescript",
+            bin: "scip-typescript",
+            args: &["index"],
+            install: "npm i -g @sourcegraph/scip-typescript",
+        })
     } else if has("Cargo.toml") {
-        Some(Indexer { lang: "rust", bin: "rust-analyzer", args: &["scip", "."], install: "rustup component add rust-analyzer" })
+        Some(Indexer {
+            lang: "rust",
+            bin: "rust-analyzer",
+            args: &["scip", "."],
+            install: "rustup component add rust-analyzer",
+        })
     } else if has("pyproject.toml") || has("setup.py") || has("requirements.txt") {
-        Some(Indexer { lang: "python", bin: "scip-python", args: &["index"], install: "npm i -g @sourcegraph/scip-python" })
+        Some(Indexer {
+            lang: "python",
+            bin: "scip-python",
+            args: &["index"],
+            install: "npm i -g @sourcegraph/scip-python",
+        })
     } else if has("pom.xml") || has("build.gradle") || has("build.gradle.kts") {
-        Some(Indexer { lang: "java", bin: "scip-java", args: &["index"], install: "coursier install scip-java" })
+        Some(Indexer {
+            lang: "java",
+            bin: "scip-java",
+            args: &["index"],
+            install: "coursier install scip-java",
+        })
     } else if has("go.mod") {
-        Some(Indexer { lang: "go", bin: "scip-go", args: &[], install: "go install github.com/sourcegraph/scip-go/cmd/scip-go@latest" })
+        Some(Indexer {
+            lang: "go",
+            bin: "scip-go",
+            args: &[],
+            install: "go install github.com/sourcegraph/scip-go/cmd/scip-go@latest",
+        })
     } else {
         None
     }
@@ -48,23 +73,46 @@ pub(crate) fn on_path(bin: &str) -> bool {
 
 pub fn run(root: &Path) -> Result<()> {
     let Some(ix) = detect(root) else {
-        println!("No known SCIP indexer maps to this project. The tree-sitter core works without SCIP;");
+        println!(
+            "No known SCIP indexer maps to this project. The tree-sitter core works without SCIP;"
+        );
         println!("for compiler-grade precision, see https://github.com/sourcegraph/scip#tools.");
         return Ok(());
     };
     if !on_path(ix.bin) {
-        println!("Detected a {} project — its SCIP indexer '{}' is not installed.", ix.lang, ix.bin);
+        println!(
+            "Detected a {} project — its SCIP indexer '{}' is not installed.",
+            ix.lang, ix.bin
+        );
         println!("  install:  {}", ix.install);
-        println!("  run:      cd {} && {} {}", root.display(), ix.bin, ix.args.join(" "));
-        println!("  merge:    codegraph index {} --scip index.scip", root.display());
+        println!(
+            "  run:      cd {} && {} {}",
+            root.display(),
+            ix.bin,
+            ix.args.join(" ")
+        );
+        println!(
+            "  merge:    codegraph index {} --scip index.scip",
+            root.display()
+        );
         return Ok(());
     }
-    println!("Running {} {} in {} …", ix.bin, ix.args.join(" "), root.display());
-    match Command::new(ix.bin).args(ix.args).current_dir(root).status() {
+    println!(
+        "Running {} {} in {} …",
+        ix.bin,
+        ix.args.join(" "),
+        root.display()
+    );
+    match Command::new(ix.bin)
+        .args(ix.args)
+        .current_dir(root)
+        .status()
+    {
         Ok(s) if s.success() => {
             let scip = root.join("index.scip");
             if scip.exists() {
-                let stats = index::index_dir(root, &index::db_path(root), true, Some(&scip), false, None)?;
+                let stats =
+                    index::index_dir(root, &index::db_path(root), true, Some(&scip), false, None)?;
                 println!(
                     "Merged SCIP → {} nodes, {} edges (+{} compiler-grade tier-A).",
                     stats.nodes, stats.edges, stats.scip_edges

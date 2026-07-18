@@ -3,7 +3,8 @@
 //! extraction mode). Adding a language = one grammar dep + one `LangSpec`.
 
 use codegraph_core::{
-    InheritKind, Metadata, Node, NodeLabel, QualifiedName, RawCall, RawField, RawImport, RawInherit, RawLocal, Receiver,
+    InheritKind, Metadata, Node, NodeLabel, QualifiedName, RawCall, RawField, RawImport,
+    RawInherit, RawLocal, Receiver,
 };
 use tree_sitter::{Language, Node as TsNode, Parser};
 
@@ -68,12 +69,16 @@ struct LangSpec {
 /// (tree-sitter classifies them as non-identifier nodes).
 pub fn identifier_spans(rel_path: &str, source: &str, name: &str) -> Vec<(usize, usize, u32)> {
     let ext = rel_path.rsplit('.').next().unwrap_or("");
-    let Some(spec) = spec_for_ext(ext) else { return Vec::new() };
+    let Some(spec) = spec_for_ext(ext) else {
+        return Vec::new();
+    };
     let mut parser = Parser::new();
     if parser.set_language(&(spec.language)()).is_err() {
         return Vec::new();
     }
-    let Some(tree) = parser.parse(source, None) else { return Vec::new() };
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
     let bytes = source.as_bytes();
     let mut out = Vec::new();
     let mut stack = vec![tree.root_node()];
@@ -82,7 +87,11 @@ pub fn identifier_spans(rel_path: &str, source: &str, name: &str) -> Vec<(usize,
         if (k == "identifier" || k == "simple_identifier" || k.ends_with("_identifier"))
             && std::str::from_utf8(&bytes[n.byte_range()]).ok() == Some(name)
         {
-            out.push((n.start_byte(), n.end_byte(), n.start_position().row as u32 + 1));
+            out.push((
+                n.start_byte(),
+                n.end_byte(),
+                n.start_position().row as u32 + 1,
+            ));
         }
         let mut c = n.walk();
         for ch in n.children(&mut c) {
@@ -123,42 +132,209 @@ fn spec_for_ext(ext: &str) -> Option<&'static LangSpec> {
 }
 
 // Back-compat single-language entry points (used by tests).
-pub fn parse_rust(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&RUST, p, r, s) }
-pub fn parse_python(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&PYTHON, p, r, s) }
-pub fn parse_js(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&JS, p, r, s) }
-pub fn parse_ts(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&TS, p, r, s) }
-pub fn parse_tsx(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&TSX, p, r, s) }
-pub fn parse_go(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&GO, p, r, s) }
-pub fn parse_swift(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&SWIFT, p, r, s) }
-pub fn parse_java(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&JAVA, p, r, s) }
-pub fn parse_kotlin(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&KOTLIN, p, r, s) }
+pub fn parse_rust(p: &str, r: &str, s: &str) -> ParsedFile {
+    parse_with(&RUST, p, r, s)
+}
+pub fn parse_python(p: &str, r: &str, s: &str) -> ParsedFile {
+    parse_with(&PYTHON, p, r, s)
+}
+pub fn parse_js(p: &str, r: &str, s: &str) -> ParsedFile {
+    parse_with(&JS, p, r, s)
+}
+pub fn parse_ts(p: &str, r: &str, s: &str) -> ParsedFile {
+    parse_with(&TS, p, r, s)
+}
+pub fn parse_tsx(p: &str, r: &str, s: &str) -> ParsedFile {
+    parse_with(&TSX, p, r, s)
+}
+pub fn parse_go(p: &str, r: &str, s: &str) -> ParsedFile {
+    parse_with(&GO, p, r, s)
+}
+pub fn parse_swift(p: &str, r: &str, s: &str) -> ParsedFile {
+    parse_with(&SWIFT, p, r, s)
+}
+pub fn parse_java(p: &str, r: &str, s: &str) -> ParsedFile {
+    parse_with(&JAVA, p, r, s)
+}
+pub fn parse_kotlin(p: &str, r: &str, s: &str) -> ParsedFile {
+    parse_with(&KOTLIN, p, r, s)
+}
 
-static RUST: LangSpec = LangSpec { name: "rust", language: || tree_sitter_rust::LANGUAGE.into(), label_for: rust_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: Some(rust_inherits), extra_def: None, };
-static PYTHON: LangSpec = LangSpec { name: "python", language: || tree_sitter_python::LANGUAGE.into(), label_for: python_label, call_kinds: &["call"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: Some(py_inherits), extra_def: None, };
-static JS: LangSpec = LangSpec { name: "javascript", language: || tree_sitter_javascript::LANGUAGE.into(), label_for: js_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: None, extra_def: Some(js_extra_def), };
-static TS: LangSpec = LangSpec { name: "typescript", language: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), label_for: ts_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: Some(ts_inherits), extra_def: Some(js_extra_def), };
-static TSX: LangSpec = LangSpec { name: "typescript", language: || tree_sitter_typescript::LANGUAGE_TSX.into(), label_for: ts_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: Some(ts_inherits), extra_def: Some(js_extra_def), };
-static GO: LangSpec = LangSpec { name: "go", language: || tree_sitter_go::LANGUAGE.into(), label_for: go_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: None, extra_def: None, };
-static SWIFT: LangSpec = LangSpec { name: "swift", language: || tree_sitter_swift::LANGUAGE.into(), label_for: swift_label, call_kinds: &["call_expression"], callee_fields: &[], name_mode: NameMode::Field, inherit_fn: Some(swift_inherits), extra_def: None, };
-static JAVA: LangSpec = LangSpec { name: "java", language: || tree_sitter_java::LANGUAGE.into(), label_for: java_label, call_kinds: &["method_invocation"], callee_fields: &["name"], name_mode: NameMode::Field, inherit_fn: Some(java_inherits), extra_def: None, };
-static C: LangSpec = LangSpec { name: "c", language: || tree_sitter_c::LANGUAGE.into(), label_for: c_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::CDeclarator, inherit_fn: None, extra_def: None, };
-static CPP: LangSpec = LangSpec { name: "cpp", language: || tree_sitter_cpp::LANGUAGE.into(), label_for: cpp_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::CDeclarator, inherit_fn: None, extra_def: None, };
-static RUBY: LangSpec = LangSpec { name: "ruby", language: || tree_sitter_ruby::LANGUAGE.into(), label_for: ruby_label, call_kinds: &["call"], callee_fields: &["method"], name_mode: NameMode::Field, inherit_fn: None, extra_def: None, };
-static CSHARP: LangSpec = LangSpec { name: "csharp", language: || tree_sitter_c_sharp::LANGUAGE.into(), label_for: csharp_label, call_kinds: &["invocation_expression"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: None, extra_def: None, };
-static KOTLIN: LangSpec = LangSpec { name: "kotlin", language: || tree_sitter_kotlin_ng::LANGUAGE.into(), label_for: kotlin_label, call_kinds: &["call_expression"], callee_fields: &[], name_mode: NameMode::Field, inherit_fn: Some(kotlin_inherits), extra_def: None, };
-static BASH: LangSpec = LangSpec { name: "bash", language: || tree_sitter_bash::LANGUAGE.into(), label_for: bash_label, call_kinds: &[], callee_fields: &[], name_mode: NameMode::Field, inherit_fn: None, extra_def: None, };
+static RUST: LangSpec = LangSpec {
+    name: "rust",
+    language: || tree_sitter_rust::LANGUAGE.into(),
+    label_for: rust_label,
+    call_kinds: &["call_expression"],
+    callee_fields: &["function"],
+    name_mode: NameMode::Field,
+    inherit_fn: Some(rust_inherits),
+    extra_def: None,
+};
+static PYTHON: LangSpec = LangSpec {
+    name: "python",
+    language: || tree_sitter_python::LANGUAGE.into(),
+    label_for: python_label,
+    call_kinds: &["call"],
+    callee_fields: &["function"],
+    name_mode: NameMode::Field,
+    inherit_fn: Some(py_inherits),
+    extra_def: None,
+};
+static JS: LangSpec = LangSpec {
+    name: "javascript",
+    language: || tree_sitter_javascript::LANGUAGE.into(),
+    label_for: js_label,
+    call_kinds: &["call_expression"],
+    callee_fields: &["function"],
+    name_mode: NameMode::Field,
+    inherit_fn: None,
+    extra_def: Some(js_extra_def),
+};
+static TS: LangSpec = LangSpec {
+    name: "typescript",
+    language: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+    label_for: ts_label,
+    call_kinds: &["call_expression"],
+    callee_fields: &["function"],
+    name_mode: NameMode::Field,
+    inherit_fn: Some(ts_inherits),
+    extra_def: Some(js_extra_def),
+};
+static TSX: LangSpec = LangSpec {
+    name: "typescript",
+    language: || tree_sitter_typescript::LANGUAGE_TSX.into(),
+    label_for: ts_label,
+    call_kinds: &["call_expression"],
+    callee_fields: &["function"],
+    name_mode: NameMode::Field,
+    inherit_fn: Some(ts_inherits),
+    extra_def: Some(js_extra_def),
+};
+static GO: LangSpec = LangSpec {
+    name: "go",
+    language: || tree_sitter_go::LANGUAGE.into(),
+    label_for: go_label,
+    call_kinds: &["call_expression"],
+    callee_fields: &["function"],
+    name_mode: NameMode::Field,
+    inherit_fn: None,
+    extra_def: None,
+};
+static SWIFT: LangSpec = LangSpec {
+    name: "swift",
+    language: || tree_sitter_swift::LANGUAGE.into(),
+    label_for: swift_label,
+    call_kinds: &["call_expression"],
+    callee_fields: &[],
+    name_mode: NameMode::Field,
+    inherit_fn: Some(swift_inherits),
+    extra_def: None,
+};
+static JAVA: LangSpec = LangSpec {
+    name: "java",
+    language: || tree_sitter_java::LANGUAGE.into(),
+    label_for: java_label,
+    call_kinds: &["method_invocation"],
+    callee_fields: &["name"],
+    name_mode: NameMode::Field,
+    inherit_fn: Some(java_inherits),
+    extra_def: None,
+};
+static C: LangSpec = LangSpec {
+    name: "c",
+    language: || tree_sitter_c::LANGUAGE.into(),
+    label_for: c_label,
+    call_kinds: &["call_expression"],
+    callee_fields: &["function"],
+    name_mode: NameMode::CDeclarator,
+    inherit_fn: None,
+    extra_def: None,
+};
+static CPP: LangSpec = LangSpec {
+    name: "cpp",
+    language: || tree_sitter_cpp::LANGUAGE.into(),
+    label_for: cpp_label,
+    call_kinds: &["call_expression"],
+    callee_fields: &["function"],
+    name_mode: NameMode::CDeclarator,
+    inherit_fn: None,
+    extra_def: None,
+};
+static RUBY: LangSpec = LangSpec {
+    name: "ruby",
+    language: || tree_sitter_ruby::LANGUAGE.into(),
+    label_for: ruby_label,
+    call_kinds: &["call"],
+    callee_fields: &["method"],
+    name_mode: NameMode::Field,
+    inherit_fn: None,
+    extra_def: None,
+};
+static CSHARP: LangSpec = LangSpec {
+    name: "csharp",
+    language: || tree_sitter_c_sharp::LANGUAGE.into(),
+    label_for: csharp_label,
+    call_kinds: &["invocation_expression"],
+    callee_fields: &["function"],
+    name_mode: NameMode::Field,
+    inherit_fn: None,
+    extra_def: None,
+};
+static KOTLIN: LangSpec = LangSpec {
+    name: "kotlin",
+    language: || tree_sitter_kotlin_ng::LANGUAGE.into(),
+    label_for: kotlin_label,
+    call_kinds: &["call_expression"],
+    callee_fields: &[],
+    name_mode: NameMode::Field,
+    inherit_fn: Some(kotlin_inherits),
+    extra_def: None,
+};
+static BASH: LangSpec = LangSpec {
+    name: "bash",
+    language: || tree_sitter_bash::LANGUAGE.into(),
+    label_for: bash_label,
+    call_kinds: &[],
+    callee_fields: &[],
+    name_mode: NameMode::Field,
+    inherit_fn: None,
+    extra_def: None,
+};
 
 fn rust_label(k: &str) -> Option<NodeLabel> {
-    match k { "function_item" => Some(NodeLabel::Function), "struct_item" | "union_item" => Some(NodeLabel::Class), "enum_item" => Some(NodeLabel::Enum), "trait_item" => Some(NodeLabel::Interface), "type_item" => Some(NodeLabel::Type), "mod_item" => Some(NodeLabel::Module), _ => None }
+    match k {
+        "function_item" => Some(NodeLabel::Function),
+        "struct_item" | "union_item" => Some(NodeLabel::Class),
+        "enum_item" => Some(NodeLabel::Enum),
+        "trait_item" => Some(NodeLabel::Interface),
+        "type_item" => Some(NodeLabel::Type),
+        "mod_item" => Some(NodeLabel::Module),
+        _ => None,
+    }
 }
 fn python_label(k: &str) -> Option<NodeLabel> {
-    match k { "function_definition" => Some(NodeLabel::Function), "class_definition" => Some(NodeLabel::Class), _ => None }
+    match k {
+        "function_definition" => Some(NodeLabel::Function),
+        "class_definition" => Some(NodeLabel::Class),
+        _ => None,
+    }
 }
 fn js_label(k: &str) -> Option<NodeLabel> {
-    match k { "function_declaration" | "generator_function_declaration" => Some(NodeLabel::Function), "class_declaration" => Some(NodeLabel::Class), "method_definition" => Some(NodeLabel::Method), _ => None }
+    match k {
+        "function_declaration" | "generator_function_declaration" => Some(NodeLabel::Function),
+        "class_declaration" => Some(NodeLabel::Class),
+        "method_definition" => Some(NodeLabel::Method),
+        _ => None,
+    }
 }
 fn ts_label(k: &str) -> Option<NodeLabel> {
-    match k { "interface_declaration" => Some(NodeLabel::Interface), "type_alias_declaration" => Some(NodeLabel::Type), "enum_declaration" => Some(NodeLabel::Enum), "abstract_class_declaration" => Some(NodeLabel::Class), other => js_label(other) }
+    match k {
+        "interface_declaration" => Some(NodeLabel::Interface),
+        "type_alias_declaration" => Some(NodeLabel::Type),
+        "enum_declaration" => Some(NodeLabel::Enum),
+        "abstract_class_declaration" => Some(NodeLabel::Class),
+        other => js_label(other),
+    }
 }
 /// `const Foo = () => {…}` / `const f = function () {…}` — the dominant way React
 /// components and module-level helpers are written. The declarator binds the
@@ -169,33 +345,78 @@ fn js_extra_def(node: TsNode, src: &[u8]) -> Option<String> {
         return None;
     }
     let value = node.child_by_field_name("value")?;
-    if !matches!(value.kind(), "arrow_function" | "function_expression" | "function") {
+    if !matches!(
+        value.kind(),
+        "arrow_function" | "function_expression" | "function"
+    ) {
         return None;
     }
-    let name = node.child_by_field_name("name").filter(|n| n.kind() == "identifier")?;
-    std::str::from_utf8(&src[name.byte_range()]).ok().map(str::to_string)
+    let name = node
+        .child_by_field_name("name")
+        .filter(|n| n.kind() == "identifier")?;
+    std::str::from_utf8(&src[name.byte_range()])
+        .ok()
+        .map(str::to_string)
 }
 fn go_label(k: &str) -> Option<NodeLabel> {
-    match k { "function_declaration" => Some(NodeLabel::Function), "method_declaration" => Some(NodeLabel::Method), "type_spec" => Some(NodeLabel::Class), _ => None }
+    match k {
+        "function_declaration" => Some(NodeLabel::Function),
+        "method_declaration" => Some(NodeLabel::Method),
+        "type_spec" => Some(NodeLabel::Class),
+        _ => None,
+    }
 }
 fn swift_label(k: &str) -> Option<NodeLabel> {
     // tree-sitter-swift parses class/struct/enum/actor all as `class_declaration`.
-    match k { "function_declaration" => Some(NodeLabel::Function), "class_declaration" => Some(NodeLabel::Class), "protocol_declaration" => Some(NodeLabel::Interface), "typealias_declaration" => Some(NodeLabel::Type), _ => None }
+    match k {
+        "function_declaration" => Some(NodeLabel::Function),
+        "class_declaration" => Some(NodeLabel::Class),
+        "protocol_declaration" => Some(NodeLabel::Interface),
+        "typealias_declaration" => Some(NodeLabel::Type),
+        _ => None,
+    }
 }
 fn java_label(k: &str) -> Option<NodeLabel> {
-    match k { "method_declaration" | "constructor_declaration" => Some(NodeLabel::Method), "class_declaration" | "record_declaration" => Some(NodeLabel::Class), "interface_declaration" | "annotation_type_declaration" => Some(NodeLabel::Interface), "enum_declaration" => Some(NodeLabel::Enum), _ => None }
+    match k {
+        "method_declaration" | "constructor_declaration" => Some(NodeLabel::Method),
+        "class_declaration" | "record_declaration" => Some(NodeLabel::Class),
+        "interface_declaration" | "annotation_type_declaration" => Some(NodeLabel::Interface),
+        "enum_declaration" => Some(NodeLabel::Enum),
+        _ => None,
+    }
 }
 fn c_label(k: &str) -> Option<NodeLabel> {
-    match k { "function_definition" => Some(NodeLabel::Function), "struct_specifier" | "union_specifier" => Some(NodeLabel::Class), "enum_specifier" => Some(NodeLabel::Enum), "type_definition" => Some(NodeLabel::Type), _ => None }
+    match k {
+        "function_definition" => Some(NodeLabel::Function),
+        "struct_specifier" | "union_specifier" => Some(NodeLabel::Class),
+        "enum_specifier" => Some(NodeLabel::Enum),
+        "type_definition" => Some(NodeLabel::Type),
+        _ => None,
+    }
 }
 fn cpp_label(k: &str) -> Option<NodeLabel> {
-    match k { "class_specifier" => Some(NodeLabel::Class), "namespace_definition" => Some(NodeLabel::Module), other => c_label(other) }
+    match k {
+        "class_specifier" => Some(NodeLabel::Class),
+        "namespace_definition" => Some(NodeLabel::Module),
+        other => c_label(other),
+    }
 }
 fn ruby_label(k: &str) -> Option<NodeLabel> {
-    match k { "method" | "singleton_method" => Some(NodeLabel::Method), "class" => Some(NodeLabel::Class), "module" => Some(NodeLabel::Module), _ => None }
+    match k {
+        "method" | "singleton_method" => Some(NodeLabel::Method),
+        "class" => Some(NodeLabel::Class),
+        "module" => Some(NodeLabel::Module),
+        _ => None,
+    }
 }
 fn csharp_label(k: &str) -> Option<NodeLabel> {
-    match k { "method_declaration" | "constructor_declaration" => Some(NodeLabel::Method), "class_declaration" | "record_declaration" | "struct_declaration" => Some(NodeLabel::Class), "interface_declaration" => Some(NodeLabel::Interface), "enum_declaration" => Some(NodeLabel::Enum), _ => None }
+    match k {
+        "method_declaration" | "constructor_declaration" => Some(NodeLabel::Method),
+        "class_declaration" | "record_declaration" | "struct_declaration" => Some(NodeLabel::Class),
+        "interface_declaration" => Some(NodeLabel::Interface),
+        "enum_declaration" => Some(NodeLabel::Enum),
+        _ => None,
+    }
 }
 fn kotlin_label(k: &str) -> Option<NodeLabel> {
     // tree-sitter-kotlin parses class/interface/object/enum as class_declaration/object_declaration.
@@ -206,18 +427,31 @@ fn kotlin_label(k: &str) -> Option<NodeLabel> {
     }
 }
 fn bash_label(k: &str) -> Option<NodeLabel> {
-    match k { "function_definition" => Some(NodeLabel::Function), _ => None }
+    match k {
+        "function_definition" => Some(NodeLabel::Function),
+        _ => None,
+    }
 }
 
 fn rust_inherits(node: TsNode, src: &[u8]) -> Vec<RawInherit> {
     if node.kind() != "impl_item" {
         return Vec::new();
     }
-    let Some(typ) = node.child_by_field_name("type").and_then(|t| trailing_ident(t, src)) else {
+    let Some(typ) = node
+        .child_by_field_name("type")
+        .and_then(|t| trailing_ident(t, src))
+    else {
         return Vec::new();
     };
-    if let Some(tr) = node.child_by_field_name("trait").and_then(|t| trailing_ident(t, src)) {
-        return vec![RawInherit { impl_name: typ, super_name: tr, kind: InheritKind::Implements }];
+    if let Some(tr) = node
+        .child_by_field_name("trait")
+        .and_then(|t| trailing_ident(t, src))
+    {
+        return vec![RawInherit {
+            impl_name: typ,
+            super_name: tr,
+            kind: InheritKind::Implements,
+        }];
     }
     Vec::new()
 }
@@ -226,13 +460,21 @@ fn py_inherits(node: TsNode, src: &[u8]) -> Vec<RawInherit> {
     if node.kind() != "class_definition" {
         return Vec::new();
     }
-    let Some(cls) = field_text(node, "name", src) else { return Vec::new() };
-    let Some(args) = node.child_by_field_name("superclasses") else { return Vec::new() };
+    let Some(cls) = field_text(node, "name", src) else {
+        return Vec::new();
+    };
+    let Some(args) = node.child_by_field_name("superclasses") else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     let mut c = args.walk();
     for ch in args.named_children(&mut c) {
         if let Some(sup) = trailing_ident(ch, src) {
-            out.push(RawInherit { impl_name: cls.clone(), super_name: sup, kind: InheritKind::Extends });
+            out.push(RawInherit {
+                impl_name: cls.clone(),
+                super_name: sup,
+                kind: InheritKind::Extends,
+            });
         }
     }
     out
@@ -242,7 +484,9 @@ fn ts_inherits(node: TsNode, src: &[u8]) -> Vec<RawInherit> {
     if node.kind() != "class_declaration" {
         return Vec::new();
     }
-    let Some(cls) = field_text(node, "name", src) else { return Vec::new() };
+    let Some(cls) = field_text(node, "name", src) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     let mut c = node.walk();
     for ch in node.children(&mut c) {
@@ -257,7 +501,11 @@ fn ts_inherits(node: TsNode, src: &[u8]) -> Vec<RawInherit> {
                 _ => continue,
             };
             for sup in type_idents(clause, src) {
-                out.push(RawInherit { impl_name: cls.clone(), super_name: sup, kind });
+                out.push(RawInherit {
+                    impl_name: cls.clone(),
+                    super_name: sup,
+                    kind,
+                });
             }
         }
     }
@@ -265,25 +513,39 @@ fn ts_inherits(node: TsNode, src: &[u8]) -> Vec<RawInherit> {
 }
 
 fn java_inherits(node: TsNode, src: &[u8]) -> Vec<RawInherit> {
-    let Some(cls) = field_text(node, "name", src) else { return Vec::new() };
+    let Some(cls) = field_text(node, "name", src) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     match node.kind() {
         "class_declaration" => {
             if let Some(sc) = node.child_by_field_name("superclass") {
                 for s in type_idents(sc, src) {
-                    out.push(RawInherit { impl_name: cls.clone(), super_name: s, kind: InheritKind::Extends });
+                    out.push(RawInherit {
+                        impl_name: cls.clone(),
+                        super_name: s,
+                        kind: InheritKind::Extends,
+                    });
                 }
             }
             if let Some(ifs) = node.child_by_field_name("interfaces") {
                 for s in type_idents(ifs, src) {
-                    out.push(RawInherit { impl_name: cls.clone(), super_name: s, kind: InheritKind::Implements });
+                    out.push(RawInherit {
+                        impl_name: cls.clone(),
+                        super_name: s,
+                        kind: InheritKind::Implements,
+                    });
                 }
             }
         }
         "interface_declaration" => {
             if let Some(ifs) = node.child_by_field_name("interfaces") {
                 for s in type_idents(ifs, src) {
-                    out.push(RawInherit { impl_name: cls.clone(), super_name: s, kind: InheritKind::Extends });
+                    out.push(RawInherit {
+                        impl_name: cls.clone(),
+                        super_name: s,
+                        kind: InheritKind::Extends,
+                    });
                 }
             }
         }
@@ -343,10 +605,36 @@ fn parse_with(spec: &LangSpec, project: &str, rel_path: &str, source: &str) -> P
     let mut fields = Vec::new();
     let mut locals = Vec::new();
     let mut imports = Vec::new();
-    let ctx = Ctx { spec, project, segs: &file_segs, rel_path, file_id: &file_id };
-    collect(tree.root_node(), bytes, &ctx, None, None, &mut nodes, &mut calls, &mut inherits, &mut fields, &mut locals, &mut imports);
+    let ctx = Ctx {
+        spec,
+        project,
+        segs: &file_segs,
+        rel_path,
+        file_id: &file_id,
+    };
+    collect(
+        tree.root_node(),
+        bytes,
+        &ctx,
+        None,
+        None,
+        &mut nodes,
+        &mut calls,
+        &mut inherits,
+        &mut fields,
+        &mut locals,
+        &mut imports,
+    );
     let type_refs = collect_type_refs(tree.root_node(), bytes, spec.name);
-    ParsedFile { nodes, calls, inherits, fields, locals, imports, type_refs }
+    ParsedFile {
+        nodes,
+        calls,
+        inherits,
+        fields,
+        locals,
+        imports,
+        type_refs,
+    }
 }
 
 /// Every distinct TYPE NAME the file references in a type position — generic
@@ -355,7 +643,11 @@ fn parse_with(spec: &LangSpec, project: &str, rel_path: &str, source: &str) -> P
 /// without any call site or captured field; recorded as file-level evidence
 /// for `type_usages`, never fed to resolution (so no precision risk).
 fn collect_type_refs(root: TsNode, src: &[u8], lang: &str) -> Vec<String> {
-    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let text = |n: TsNode| {
+        std::str::from_utf8(&src[n.byte_range()])
+            .ok()
+            .map(str::to_string)
+    };
     let keep = |s: &str| {
         !s.is_empty()
             && s.len() <= 100
@@ -449,14 +741,30 @@ struct Ctx<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_class: Option<&str>, nodes: &mut Vec<Node>, calls: &mut Vec<RawCall>, inherits: &mut Vec<RawInherit>, fields: &mut Vec<RawField>, locals: &mut Vec<RawLocal>, imports: &mut Vec<RawImport>) {
+fn collect(
+    node: TsNode,
+    src: &[u8],
+    ctx: &Ctx,
+    current_fn: Option<&str>,
+    this_class: Option<&str>,
+    nodes: &mut Vec<Node>,
+    calls: &mut Vec<RawCall>,
+    inherits: &mut Vec<RawInherit>,
+    fields: &mut Vec<RawField>,
+    locals: &mut Vec<RawLocal>,
+    imports: &mut Vec<RawImport>,
+) {
     let mut my_fn_id: Option<String> = None;
     let mut my_class_id: Option<String> = None;
 
     let labeled: Option<(NodeLabel, String)> = match (ctx.spec.label_for)(node.kind()) {
         Some(label) => name_of(node, src, ctx.spec.name_mode).map(|n| (label, n)),
         // `const Foo = () => {…}` — the name lives on the declarator, not the fn.
-        None => ctx.spec.extra_def.and_then(|f| f(node, src)).map(|n| (NodeLabel::Function, n)),
+        None => ctx
+            .spec
+            .extra_def
+            .and_then(|f| f(node, src))
+            .map(|n| (NodeLabel::Function, n)),
     };
     {
         if let Some((label, name)) = labeled {
@@ -465,8 +773,7 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
             // it would only pollute search/ranking/communities. Skip the node.
             // Operator definitions (`==`, `+`) have no letters but ARE real —
             // the gate requires a digit with no letter to reject.
-            if name.chars().any(char::is_alphabetic)
-                || !name.chars().any(|c| c.is_ascii_digit()) {
+            if name.chars().any(char::is_alphabetic) || !name.chars().any(|c| c.is_ascii_digit()) {
                 // B1: methods nest under their enclosing class so two same-named
                 // methods in two classes of ONE file get DISTINCT ids
                 // (`project.dir.file.class.method`) — identical ids previously
@@ -479,12 +786,17 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
                 };
                 match label {
                     NodeLabel::Function | NodeLabel::Method => my_fn_id = Some(id.clone()),
-                    NodeLabel::Class | NodeLabel::Interface | NodeLabel::Enum => my_class_id = Some(id.clone()),
+                    NodeLabel::Class | NodeLabel::Interface | NodeLabel::Enum => {
+                        my_class_id = Some(id.clone())
+                    }
                     _ => {}
                 }
                 let mut metadata = Metadata::new();
                 if matches!(label, NodeLabel::Function | NodeLabel::Method) {
-                    metadata.insert("complexity".into(), serde_json::json!(cyclomatic(node, ctx.spec.label_for)));
+                    metadata.insert(
+                        "complexity".into(),
+                        serde_json::json!(cyclomatic(node, ctx.spec.label_for)),
+                    );
                 }
                 nodes.push(Node {
                     id,
@@ -516,28 +828,44 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
 
     // Import bindings (T6 evidence): TS/JS relative imports + Python from-imports.
     match (ctx.spec.name, node.kind()) {
-        ("typescript" | "javascript", "import_statement") => ts_extract_import(node, src, ctx.rel_path, imports),
+        ("typescript" | "javascript", "import_statement") => {
+            ts_extract_import(node, src, ctx.rel_path, imports)
+        }
         // barrel re-exports (`export { X } from './y'`) BIND X in this file —
         // usage evidence and resolution input exactly like an import
-        ("typescript" | "javascript", "export_statement") if node.child_by_field_name("source").is_some() => {
+        ("typescript" | "javascript", "export_statement")
+            if node.child_by_field_name("source").is_some() =>
+        {
             ts_extract_import(node, src, ctx.rel_path, imports)
         }
         ("python", "import_from_statement") => py_extract_import(node, src, ctx.rel_path, imports),
         // Kotlin `import a.b.FoodDto` / `import a.b.X as Y` binds the last
         // segment (or alias) — usage evidence for type_usages.
         ("kotlin", "import_header") => {
-            let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+            let text = |n: TsNode| {
+                std::str::from_utf8(&src[n.byte_range()])
+                    .ok()
+                    .map(str::to_string)
+            };
             let module = (0..node.named_child_count() as u32)
                 .filter_map(|i| node.named_child(i))
                 .find(|c| c.kind() == "identifier" || c.kind() == "qualified_identifier")
                 .and_then(text);
             if let Some(module) = module {
                 let alias = named_child_of(node, "import_alias")
-                    .and_then(|a| (0..a.named_child_count() as u32).filter_map(|i| a.named_child(i)).find(|c| c.kind().ends_with("identifier")))
+                    .and_then(|a| {
+                        (0..a.named_child_count() as u32)
+                            .filter_map(|i| a.named_child(i))
+                            .find(|c| c.kind().ends_with("identifier"))
+                    })
                     .and_then(text);
                 let bound = alias.or_else(|| module.rsplit('.').next().map(str::to_string));
                 if let Some(name) = bound.filter(|n| !n.is_empty() && *n != "*") {
-                    imports.push(RawImport { file_path: ctx.rel_path.to_string(), name, module });
+                    imports.push(RawImport {
+                        file_path: ctx.rel_path.to_string(),
+                        name,
+                        module,
+                    });
                 }
             }
         }
@@ -606,9 +934,15 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
                         let line = node.start_position().row as u32 + 1;
                         let mut md = Metadata::new();
                         md.insert("path".to_string(), serde_json::Value::String(path.clone()));
-                        md.insert("method".to_string(), serde_json::Value::String(method.clone()));
+                        md.insert(
+                            "method".to_string(),
+                            serde_json::Value::String(method.clone()),
+                        );
                         if let Some(h) = current_fn {
-                            md.insert("handler".to_string(), serde_json::Value::String(h.to_string()));
+                            md.insert(
+                                "handler".to_string(),
+                                serde_json::Value::String(h.to_string()),
+                            );
                         }
                         if symbolic {
                             // path contains a «CONSTANT» — real endpoint, path
@@ -646,11 +980,15 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
             // enclosing class so the resolver can do Class-Hierarchy-Analysis.
             let receiver = detect_receiver(node, src);
             let enclosing_class = match &receiver {
-                Receiver::SelfThis | Receiver::Super | Receiver::Field(_) => this_class.map(str::to_string),
+                Receiver::SelfThis | Receiver::Super | Receiver::Field(_) => {
+                    this_class.map(str::to_string)
+                }
                 // In implicit-member languages a bare `field.method()` is an
                 // implicit `this.field.method()`, so carry the class to let the
                 // resolver try its fields (a local var shadows it — resolver order).
-                Receiver::Named(_) if has_implicit_member(ctx.spec.name) => this_class.map(str::to_string),
+                Receiver::Named(_) if has_implicit_member(ctx.spec.name) => {
+                    this_class.map(str::to_string)
+                }
                 _ => None,
             };
             calls.push(RawCall {
@@ -677,7 +1015,19 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
     };
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect(child, src, ctx, next_fn, next_this_class, nodes, calls, inherits, fields, locals, imports);
+        collect(
+            child,
+            src,
+            ctx,
+            next_fn,
+            next_this_class,
+            nodes,
+            calls,
+            inherits,
+            fields,
+            locals,
+            imports,
+        );
     }
 }
 
@@ -722,8 +1072,13 @@ fn classify_receiver(recv: &str) -> Receiver {
 fn is_subscript(call: TsNode, src: &[u8]) -> bool {
     for i in 0..call.child_count() as u32 {
         let Some(ch) = call.child(i) else { continue };
-        if matches!(ch.kind(), "call_suffix" | "value_arguments" | "arguments" | "argument_list") {
-            return node_str(ch, src).map(|t| t.trim_start().starts_with('[')).unwrap_or(false);
+        if matches!(
+            ch.kind(),
+            "call_suffix" | "value_arguments" | "arguments" | "argument_list"
+        ) {
+            return node_str(ch, src)
+                .map(|t| t.trim_start().starts_with('['))
+                .unwrap_or(false);
         }
     }
     false
@@ -739,7 +1094,11 @@ fn first_callee(call: TsNode<'_>) -> Option<TsNode<'_>> {
         if let Some(ch) = call.child(i) {
             if !matches!(
                 ch.kind(),
-                "arguments" | "argument_list" | "value_arguments" | "type_arguments" | "call_suffix"
+                "arguments"
+                    | "argument_list"
+                    | "value_arguments"
+                    | "type_arguments"
+                    | "call_suffix"
             ) {
                 return Some(ch);
             }
@@ -753,7 +1112,10 @@ fn detect_receiver(call: TsNode, src: &[u8]) -> Receiver {
     if let Some(obj) = call.child_by_field_name("object") {
         return classify_receiver(node_str(obj, src).unwrap_or(""));
     }
-    match first_callee(call).and_then(|c| node_str(c, src)).and_then(|t| t.rsplit_once('.')) {
+    match first_callee(call)
+        .and_then(|c| node_str(c, src))
+        .and_then(|t| t.rsplit_once('.'))
+    {
         Some((recv, _name)) => classify_receiver(recv),
         None => Receiver::Bare,
     }
@@ -767,12 +1129,18 @@ fn detect_receiver(call: TsNode, src: &[u8]) -> Receiver {
 /// the generic base) · `Foo | null` / `Foo | undefined` → Foo (the only value
 /// with members). Anything else (real unions, tuples, functions) → None.
 fn ts_base_type(ty: TsNode, src: &[u8]) -> Option<String> {
-    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let text = |n: TsNode| {
+        std::str::from_utf8(&src[n.byte_range()])
+            .ok()
+            .map(str::to_string)
+    };
     match ty.kind() {
         "type_identifier" => text(ty),
         "generic_type" => {
             let mut c = ty.walk();
-            let base = ty.named_children(&mut c).find(|n| n.kind() == "type_identifier")?;
+            let base = ty
+                .named_children(&mut c)
+                .find(|n| n.kind() == "type_identifier")?;
             text(base)
         }
         "union_type" => {
@@ -794,33 +1162,56 @@ fn ts_base_type(ty: TsNode, src: &[u8]) -> Option<String> {
 /// The declared type of a parameter/declarator via its `type_annotation`.
 fn ts_annotation_type(n: TsNode, src: &[u8]) -> Option<String> {
     let mut c = n.walk();
-    let ann = n.named_children(&mut c).find(|ch| ch.kind() == "type_annotation")?;
+    let ann = n
+        .named_children(&mut c)
+        .find(|ch| ch.kind() == "type_annotation")?;
     let mut c2 = ann.walk();
     let ty = ann.named_children(&mut c2).next()?;
     ts_base_type(ty, src)
 }
 
 fn ts_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Vec<RawField>) {
-    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let text = |n: TsNode| {
+        std::str::from_utf8(&src[n.byte_range()])
+            .ok()
+            .map(str::to_string)
+    };
     let type_in = |n: TsNode| ts_annotation_type(n, src);
     let mut stack = vec![class];
     while let Some(n) = stack.pop() {
         // a nested class owns its own fields — don't attribute them here
-        if n.id() != class.id() && matches!(n.kind(), "class_declaration" | "abstract_class_declaration") {
+        if n.id() != class.id()
+            && matches!(n.kind(), "class_declaration" | "abstract_class_declaration")
+        {
             continue;
         }
         match n.kind() {
             "public_field_definition" => {
-                if let (Some(name), Some(ty)) = (n.child_by_field_name("name").and_then(text), type_in(n)) {
-                    out.push(RawField { class_id: class_id.into(), field_name: name, type_name: ty });
+                if let (Some(name), Some(ty)) =
+                    (n.child_by_field_name("name").and_then(text), type_in(n))
+                {
+                    out.push(RawField {
+                        class_id: class_id.into(),
+                        field_name: name,
+                        type_name: ty,
+                    });
                 }
             }
             "required_parameter" | "optional_parameter" => {
                 let mut c = n.walk();
-                let is_property = n.children(&mut c).any(|ch| ch.kind() == "accessibility_modifier");
-                let name = n.child_by_field_name("pattern").filter(|p| p.kind() == "identifier").and_then(text);
+                let is_property = n
+                    .children(&mut c)
+                    .any(|ch| ch.kind() == "accessibility_modifier");
+                let name = n
+                    .child_by_field_name("pattern")
+                    .filter(|p| p.kind() == "identifier")
+                    .and_then(text);
                 if let (true, Some(name), Some(ty)) = (is_property, name, type_in(n)) {
-                    out.push(RawField { class_id: class_id.into(), field_name: name, type_name: ty });
+                    out.push(RawField {
+                        class_id: class_id.into(),
+                        field_name: name,
+                        type_name: ty,
+                    });
                 }
             }
             _ => {}
@@ -838,7 +1229,11 @@ fn ts_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Vec<Ra
 /// Stops at nested function boundaries (their locals are their own scope) and
 /// only accepts simple `type_identifier` types — matching the field extractor.
 fn ts_infer_locals(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<RawLocal>) {
-    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let text = |n: TsNode| {
+        std::str::from_utf8(&src[n.byte_range()])
+            .ok()
+            .map(str::to_string)
+    };
     // Declared annotation first; else `const x = new Foo()` — the constructor
     // IS the type (still evidence, not a guess).
     let type_in = |n: TsNode| -> Option<String> {
@@ -852,10 +1247,14 @@ fn ts_infer_locals(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<RawLocal
         if value.kind() != "new_expression" {
             return None;
         }
-        value.child_by_field_name("constructor").filter(|c| c.kind() == "identifier").and_then(text)
+        value
+            .child_by_field_name("constructor")
+            .filter(|c| c.kind() == "identifier")
+            .and_then(text)
     };
     // BTreeMap → deterministic emit order. `None` = poisoned (conflicting types).
-    let mut found: std::collections::BTreeMap<String, Option<String>> = std::collections::BTreeMap::new();
+    let mut found: std::collections::BTreeMap<String, Option<String>> =
+        std::collections::BTreeMap::new();
     const FN_KINDS: [&str; 5] = [
         "function_declaration",
         "function_expression",
@@ -877,18 +1276,25 @@ fn ts_infer_locals(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<RawLocal
         }
         let name_ty = match n.kind() {
             "variable_declarator" | "required_parameter" | "optional_parameter" => n
-                .child_by_field_name(if n.kind() == "variable_declarator" { "name" } else { "pattern" })
+                .child_by_field_name(if n.kind() == "variable_declarator" {
+                    "name"
+                } else {
+                    "pattern"
+                })
                 .filter(|p| p.kind() == "identifier")
                 .and_then(text)
                 .zip(type_in(n)),
             _ => None,
         };
         if let Some((name, ty)) = name_ty {
-            found.entry(name).and_modify(|e| {
-                if e.as_deref() != Some(ty.as_str()) {
-                    *e = None; // conflicting declared types in one scope → drop
-                }
-            }).or_insert(Some(ty));
+            found
+                .entry(name)
+                .and_modify(|e| {
+                    if e.as_deref() != Some(ty.as_str()) {
+                        *e = None; // conflicting declared types in one scope → drop
+                    }
+                })
+                .or_insert(Some(ty));
         }
         let mut c = n.walk();
         for ch in n.children(&mut c) {
@@ -897,7 +1303,11 @@ fn ts_infer_locals(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<RawLocal
     }
     for (name, ty) in found {
         if let Some(t) = ty {
-            out.push(RawLocal { caller_id: fn_id.into(), var_name: name, type_name: t });
+            out.push(RawLocal {
+                caller_id: fn_id.into(),
+                var_name: name,
+                type_name: t,
+            });
         }
     }
 }
@@ -909,7 +1319,11 @@ fn ts_infer_locals(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<RawLocal
 /// name is locally bound). Over-collection (e.g. Swift argument labels) only
 /// SUPPRESSES resolution — precision-safe by construction.
 fn collect_param_shadows(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<RawLocal>) {
-    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let text = |n: TsNode| {
+        std::str::from_utf8(&src[n.byte_range()])
+            .ok()
+            .map(str::to_string)
+    };
     let is_binding_ident = |k: &str| k == "identifier" || k == "simple_identifier";
     // arrow-component defs start at the declarator; the fn literal holds the params
     let root = if func.kind() == "variable_declarator" {
@@ -927,7 +1341,11 @@ fn collect_param_shadows(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<Ra
         for param in container.named_children(&mut pc) {
             if is_binding_ident(param.kind()) {
                 if let Some(name) = text(param) {
-                    out.push(RawLocal { caller_id: fn_id.into(), var_name: name, type_name: String::new() });
+                    out.push(RawLocal {
+                        caller_id: fn_id.into(),
+                        var_name: name,
+                        type_name: String::new(),
+                    });
                 }
                 continue;
             }
@@ -935,7 +1353,11 @@ fn collect_param_shadows(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<Ra
             for ch in param.named_children(&mut ic) {
                 if is_binding_ident(ch.kind()) {
                     if let Some(name) = text(ch) {
-                        out.push(RawLocal { caller_id: fn_id.into(), var_name: name, type_name: String::new() });
+                        out.push(RawLocal {
+                            caller_id: fn_id.into(),
+                            var_name: name,
+                            type_name: String::new(),
+                        });
                     }
                 }
             }
@@ -953,17 +1375,29 @@ fn cyclomatic(func: TsNode, label_for: fn(&str) -> Option<NodeLabel>) -> u32 {
     let mut stack = vec![func];
     while let Some(node) = stack.pop() {
         if node.id() != func.id()
-            && matches!(label_for(node.kind()), Some(NodeLabel::Function | NodeLabel::Method))
+            && matches!(
+                label_for(node.kind()),
+                Some(NodeLabel::Function | NodeLabel::Method)
+            )
         {
             continue;
         }
         let k = node.kind();
-        if k.contains("if_") || k.starts_with("if") && k.ends_with("statement")
-            || k.contains("for_") || k.contains("while")
-            || k.contains("case") || k.contains("catch")
-            || k.contains("guard_statement") || k.contains("conditional_expression")
-            || k.contains("ternary") || k == "match_arm" || k.contains("when_entry")
-            || k == "&&" || k == "||" || k == "elif_clause" || k.contains("except_clause")
+        if k.contains("if_")
+            || k.starts_with("if") && k.ends_with("statement")
+            || k.contains("for_")
+            || k.contains("while")
+            || k.contains("case")
+            || k.contains("catch")
+            || k.contains("guard_statement")
+            || k.contains("conditional_expression")
+            || k.contains("ternary")
+            || k == "match_arm"
+            || k.contains("when_entry")
+            || k == "&&"
+            || k == "||"
+            || k == "elif_clause"
+            || k.contains("except_clause")
         {
             n += 1;
         }
@@ -978,14 +1412,19 @@ fn cyclomatic(func: TsNode, label_for: fn(&str) -> Option<NodeLabel>) -> u32 {
 /// First named child of `n` with the given kind (indexing borrows the tree, not
 /// a cursor, so the result can be reassigned/returned).
 fn named_child_of<'t>(n: TsNode<'t>, kind: &str) -> Option<TsNode<'t>> {
-    (0..n.named_child_count() as u32).filter_map(|i| n.named_child(i)).find(|c| c.kind() == kind)
+    (0..n.named_child_count() as u32)
+        .filter_map(|i| n.named_child(i))
+        .find(|c| c.kind() == kind)
 }
 
 /// Kotlin `user_type` (possibly wrapped in `nullable_type`) → its base identifier.
 fn kotlin_user_type(n: TsNode, src: &[u8]) -> Option<String> {
-    let user = named_child_of(n, "user_type")
-        .or_else(|| named_child_of(n, "nullable_type").and_then(|nt| named_child_of(nt, "user_type")))?;
-    std::str::from_utf8(&src[named_child_of(user, "identifier")?.byte_range()]).ok().map(str::to_string)
+    let user = named_child_of(n, "user_type").or_else(|| {
+        named_child_of(n, "nullable_type").and_then(|nt| named_child_of(nt, "user_type"))
+    })?;
+    std::str::from_utf8(&src[named_child_of(user, "identifier")?.byte_range()])
+        .ok()
+        .map(str::to_string)
 }
 
 /// Capture Kotlin stored-property types for T3 (`val x: T`). Unwraps `T?`
@@ -994,7 +1433,11 @@ fn kotlin_user_type(n: TsNode, src: &[u8]) -> Option<String> {
 /// dominant Kotlin DI pattern — but only `val`/`var` parameters (a plain
 /// parameter is not a field).
 fn kotlin_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Vec<RawField>) {
-    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let text = |n: TsNode| {
+        std::str::from_utf8(&src[n.byte_range()])
+            .ok()
+            .map(str::to_string)
+    };
     let mut stack = vec![class];
     while let Some(n) = stack.pop() {
         if n.id() != class.id() && matches!(n.kind(), "class_declaration" | "object_declaration") {
@@ -1006,16 +1449,27 @@ fn kotlin_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Ve
                     // tree-sitter-kotlin-ng names both the var and the type `identifier`.
                     let name = named_child_of(vd, "identifier").and_then(text);
                     if let (Some(name), Some(ty)) = (name, kotlin_user_type(vd, src)) {
-                        out.push(RawField { class_id: class_id.into(), field_name: name, type_name: ty });
+                        out.push(RawField {
+                            class_id: class_id.into(),
+                            field_name: name,
+                            type_name: ty,
+                        });
                     }
                 }
             }
             "class_parameter" => {
                 let mut c = n.walk();
-                let is_property = n.children(&mut c).any(|ch| matches!(ch.kind(), "val" | "var"));
+                let is_property = n
+                    .children(&mut c)
+                    .any(|ch| matches!(ch.kind(), "val" | "var"));
                 let name = named_child_of(n, "identifier").and_then(text);
-                if let (true, Some(name), Some(ty)) = (is_property, name, kotlin_user_type(n, src)) {
-                    out.push(RawField { class_id: class_id.into(), field_name: name, type_name: ty });
+                if let (true, Some(name), Some(ty)) = (is_property, name, kotlin_user_type(n, src))
+                {
+                    out.push(RawField {
+                        class_id: class_id.into(),
+                        field_name: name,
+                        type_name: ty,
+                    });
                 }
             }
             _ => {}
@@ -1032,8 +1486,13 @@ fn kotlin_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Ve
 /// a constructor invocation by Kotlin naming convention. The resolver still
 /// gates on unique-class + member-exists, so a misread factory drops out.
 fn kotlin_infer_locals(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<RawLocal>) {
-    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
-    let mut found: std::collections::BTreeMap<String, Option<String>> = std::collections::BTreeMap::new();
+    let text = |n: TsNode| {
+        std::str::from_utf8(&src[n.byte_range()])
+            .ok()
+            .map(str::to_string)
+    };
+    let mut found: std::collections::BTreeMap<String, Option<String>> =
+        std::collections::BTreeMap::new();
     let mut stack = vec![func];
     while let Some(n) = stack.pop() {
         // Lambdas are NOT a boundary: calls inside a lambda attribute to the
@@ -1044,13 +1503,22 @@ fn kotlin_infer_locals(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<RawL
             continue; // nested named scope owns its locals
         }
         if n.kind() == "property_declaration" {
-            let name = named_child_of(n, "variable_declaration").and_then(|vd| named_child_of(vd, "identifier")).and_then(text);
+            let name = named_child_of(n, "variable_declaration")
+                .and_then(|vd| named_child_of(vd, "identifier"))
+                .and_then(text);
             let ty = named_child_of(n, "variable_declaration")
                 .and_then(|vd| kotlin_user_type(vd, src))
                 .or_else(|| {
                     let call = named_child_of(n, "call_expression")?;
-                    let callee = call.named_child(0).filter(|c| c.kind() == "identifier").and_then(text)?;
-                    callee.chars().next().filter(|c| c.is_uppercase()).map(|_| callee)
+                    let callee = call
+                        .named_child(0)
+                        .filter(|c| c.kind() == "identifier")
+                        .and_then(text)?;
+                    callee
+                        .chars()
+                        .next()
+                        .filter(|c| c.is_uppercase())
+                        .map(|_| callee)
                 });
             if let (Some(name), Some(ty)) = (name, ty) {
                 found
@@ -1070,7 +1538,11 @@ fn kotlin_infer_locals(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<RawL
     }
     for (name, ty) in found {
         if let Some(t) = ty {
-            out.push(RawLocal { caller_id: fn_id.into(), var_name: name, type_name: t });
+            out.push(RawLocal {
+                caller_id: fn_id.into(),
+                var_name: name,
+                type_name: t,
+            });
         }
     }
 }
@@ -1083,18 +1555,35 @@ fn kotlin_inherits(node: TsNode, src: &[u8]) -> Vec<RawInherit> {
     if node.kind() != "class_declaration" && node.kind() != "object_declaration" {
         return Vec::new();
     }
-    let Some(cls) = field_text(node, "name", src) else { return Vec::new() };
-    let Some(specs) = named_child_of(node, "delegation_specifiers") else { return Vec::new() };
-    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let Some(cls) = field_text(node, "name", src) else {
+        return Vec::new();
+    };
+    let Some(specs) = named_child_of(node, "delegation_specifiers") else {
+        return Vec::new();
+    };
+    let text = |n: TsNode| {
+        std::str::from_utf8(&src[n.byte_range()])
+            .ok()
+            .map(str::to_string)
+    };
     let mut out = Vec::new();
     for i in 0..specs.named_child_count() as u32 {
-        let Some(spec) = specs.named_child(i) else { continue };
+        let Some(spec) = specs.named_child(i) else {
+            continue;
+        };
         let (user, kind) = match named_child_of(spec, "constructor_invocation") {
             Some(ci) => (named_child_of(ci, "user_type"), InheritKind::Extends),
             None => (named_child_of(spec, "user_type"), InheritKind::Implements),
         };
-        if let Some(sup) = user.and_then(|u| named_child_of(u, "identifier")).and_then(text) {
-            out.push(RawInherit { impl_name: cls.clone(), super_name: sup, kind });
+        if let Some(sup) = user
+            .and_then(|u| named_child_of(u, "identifier"))
+            .and_then(text)
+        {
+            out.push(RawInherit {
+                impl_name: cls.clone(),
+                super_name: sup,
+                kind,
+            });
         }
     }
     out
@@ -1107,11 +1596,19 @@ fn swift_inherits(node: TsNode, src: &[u8]) -> Vec<RawInherit> {
     if node.kind() != "class_declaration" {
         return Vec::new();
     }
-    let Some(cls) = field_text(node, "name", src) else { return Vec::new() };
-    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let Some(cls) = field_text(node, "name", src) else {
+        return Vec::new();
+    };
+    let text = |n: TsNode| {
+        std::str::from_utf8(&src[n.byte_range()])
+            .ok()
+            .map(str::to_string)
+    };
     let mut out = Vec::new();
     for i in 0..node.named_child_count() as u32 {
-        let Some(ch) = node.named_child(i) else { continue };
+        let Some(ch) = node.named_child(i) else {
+            continue;
+        };
         if ch.kind() != "inheritance_specifier" {
             continue;
         }
@@ -1119,7 +1616,11 @@ fn swift_inherits(node: TsNode, src: &[u8]) -> Vec<RawInherit> {
             .and_then(|u| named_child_of(u, "type_identifier"))
             .and_then(text);
         if let Some(sup) = sup {
-            out.push(RawInherit { impl_name: cls.clone(), super_name: sup, kind: InheritKind::Extends });
+            out.push(RawInherit {
+                impl_name: cls.clone(),
+                super_name: sup,
+                kind: InheritKind::Extends,
+            });
         }
     }
     out
@@ -1128,21 +1629,36 @@ fn swift_inherits(node: TsNode, src: &[u8]) -> Vec<RawInherit> {
 /// Capture Java field types for T3 (`T field;`). Simple `type_identifier` types
 /// only (generics/arrays rejected for precision); handles `T a, b;` declarators.
 fn java_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Vec<RawField>) {
-    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let text = |n: TsNode| {
+        std::str::from_utf8(&src[n.byte_range()])
+            .ok()
+            .map(str::to_string)
+    };
     let mut stack = vec![class];
     while let Some(n) = stack.pop() {
         if n.id() != class.id()
-            && matches!(n.kind(), "class_declaration" | "interface_declaration" | "enum_declaration")
+            && matches!(
+                n.kind(),
+                "class_declaration" | "interface_declaration" | "enum_declaration"
+            )
         {
             continue;
         }
         if n.kind() == "field_declaration" {
-            if let Some(ty) = n.child_by_field_name("type").filter(|t| t.kind() == "type_identifier").and_then(text) {
+            if let Some(ty) = n
+                .child_by_field_name("type")
+                .filter(|t| t.kind() == "type_identifier")
+                .and_then(text)
+            {
                 let mut c = n.walk();
                 for ch in n.children(&mut c) {
                     if ch.kind() == "variable_declarator" {
                         if let Some(name) = ch.child_by_field_name("name").and_then(text) {
-                            out.push(RawField { class_id: class_id.into(), field_name: name, type_name: ty.clone() });
+                            out.push(RawField {
+                                class_id: class_id.into(),
+                                field_name: name,
+                                type_name: ty.clone(),
+                            });
                         }
                     }
                 }
@@ -1160,7 +1676,11 @@ fn java_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Vec<
 /// `T?` optional layer, and REJECTS arrays/dictionaries/tuples/closures so a
 /// `[Foo]` field never resolves a call to `Foo` — precision over recall.
 fn swift_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Vec<RawField>) {
-    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let text = |n: TsNode| {
+        std::str::from_utf8(&src[n.byte_range()])
+            .ok()
+            .map(str::to_string)
+    };
     let type_in = |n: TsNode| -> Option<String> {
         let ann = named_child_of(n, "type_annotation")?;
         let mut t = ann.named_child(0)?;
@@ -1184,7 +1704,11 @@ fn swift_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Vec
                 .and_then(|pat| named_child_of(pat, "simple_identifier").or(Some(pat)))
                 .and_then(text);
             if let (Some(name), Some(ty)) = (name, type_in(n)) {
-                out.push(RawField { class_id: class_id.into(), field_name: name, type_name: ty });
+                out.push(RawField {
+                    class_id: class_id.into(),
+                    field_name: name,
+                    type_name: ty,
+                });
             }
         }
         let mut c = n.walk();
@@ -1201,14 +1725,20 @@ fn swift_extract_fields(class: TsNode, src: &[u8], class_id: &str, out: &mut Vec
 /// (member access without an explicit receiver). TS/JS/Python/Rust/Go require an
 /// explicit `this`/`self`, so a bare name there is never an implicit field.
 fn has_implicit_member(spec: &str) -> bool {
-    matches!(spec, "swift" | "kotlin" | "java" | "csharp" | "cpp" | "ruby")
+    matches!(
+        spec,
+        "swift" | "kotlin" | "java" | "csharp" | "cpp" | "ruby"
+    )
 }
 
 fn rebinds_this(spec: &str, kind: &str) -> bool {
     matches!(spec, "typescript" | "javascript")
         && matches!(
             kind,
-            "function_declaration" | "function_expression" | "generator_function" | "generator_function_declaration"
+            "function_declaration"
+                | "function_expression"
+                | "generator_function"
+                | "generator_function_declaration"
         )
 }
 
@@ -1224,7 +1754,9 @@ fn name_of(node: TsNode, src: &[u8], mode: NameMode) -> Option<String> {
             loop {
                 match d.kind() {
                     "identifier" | "field_identifier" | "type_identifier" | "operator_name" => {
-                        return std::str::from_utf8(&src[d.byte_range()]).ok().map(|s| s.to_string());
+                        return std::str::from_utf8(&src[d.byte_range()])
+                            .ok()
+                            .map(|s| s.to_string());
                     }
                     _ => d = d.child_by_field_name("declarator")?,
                 }
@@ -1234,20 +1766,36 @@ fn name_of(node: TsNode, src: &[u8], mode: NameMode) -> Option<String> {
 }
 
 fn field_text(node: TsNode, field: &str, src: &[u8]) -> Option<String> {
-    std::str::from_utf8(&src[node.child_by_field_name(field)?.byte_range()]).ok().map(|s| s.to_string())
+    std::str::from_utf8(&src[node.child_by_field_name(field)?.byte_range()])
+        .ok()
+        .map(|s| s.to_string())
 }
 
 fn is_http_method(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "get" | "post" | "put" | "delete" | "patch" | "all" | "head" | "options" | "route"
-            | "getmapping" | "postmapping" | "putmapping" | "deletemapping" | "patchmapping"
+        "get"
+            | "post"
+            | "put"
+            | "delete"
+            | "patch"
+            | "all"
+            | "head"
+            | "options"
+            | "route"
+            | "getmapping"
+            | "postmapping"
+            | "putmapping"
+            | "deletemapping"
+            | "patchmapping"
             | "requestmapping"
     )
 }
 
 fn normalize_path(p: &str) -> String {
-    p.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
+    p.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
 }
 
 /// Test/spec files register no API surface: `request(app).get('/x')` in an
@@ -1263,7 +1811,9 @@ fn is_test_file(rel: &str) -> bool {
         || name.contains("-e2e")
         || name.starts_with("e2e")
         || name.starts_with("test_")
-        || lower.split('/').any(|seg| matches!(seg, "test" | "tests" | "__tests__" | "e2e" | "spec"))
+        || lower
+            .split('/')
+            .any(|seg| matches!(seg, "test" | "tests" | "__tests__" | "e2e" | "spec"))
 }
 
 /// The class-level route prefix for a decorator route: walk to the enclosing
@@ -1287,7 +1837,10 @@ fn controller_prefix(node: TsNode, src: &[u8]) -> Option<String> {
                     continue;
                 }
                 let callee = callee_name(call, src, &["function"]);
-                if matches!(callee.as_deref(), Some("Controller") | Some("RequestMapping")) {
+                if matches!(
+                    callee.as_deref(),
+                    Some("Controller") | Some("RequestMapping")
+                ) {
                     // `@Controller('x')` or the object form `@Controller({ path: 'x', … })`
                     return first_string_arg(call, src).or_else(|| object_path_prop(call, src));
                 }
@@ -1297,14 +1850,22 @@ fn controller_prefix(node: TsNode, src: &[u8]) -> Option<String> {
     };
     // `@Controller('x')\nexport class C {}` hangs the decorator off the
     // export_statement, not the class_declaration — check both hosts.
-    scan(cur).or_else(|| cur.parent().filter(|p| p.kind() == "export_statement").and_then(scan))
+    scan(cur).or_else(|| {
+        cur.parent()
+            .filter(|p| p.kind() == "export_statement")
+            .and_then(scan)
+    })
 }
 
 /// `("baby-tracker/children", ":id")` → `/baby-tracker/children/:id` —
 /// slash-normalized join of controller prefix + method sub-path.
 fn join_route(prefix: &str, sub: &str) -> String {
     let mut out = String::from("/");
-    for part in prefix.split('/').chain(sub.split('/')).filter(|s| !s.is_empty()) {
+    for part in prefix
+        .split('/')
+        .chain(sub.split('/'))
+        .filter(|s| !s.is_empty())
+    {
         if !out.ends_with('/') {
             out.push('/');
         }
@@ -1339,7 +1900,10 @@ fn object_path_prop(call: TsNode, src: &[u8]) -> Option<String> {
             let v = pair.child_by_field_name("value")?;
             if v.kind().contains("string") {
                 let t = std::str::from_utf8(&src[v.byte_range()]).ok()?;
-                return Some(t.trim_matches(|ch| ch == '"' || ch == '\'' || ch == '`').to_string());
+                return Some(
+                    t.trim_matches(|ch| ch == '"' || ch == '\'' || ch == '`')
+                        .to_string(),
+                );
             }
         }
     }
@@ -1349,7 +1913,9 @@ fn object_path_prop(call: TsNode, src: &[u8]) -> Option<String> {
 /// Does a call carry any argument at all? (Distinguishes `@Get()` — a real
 /// controller-root route — from `@Get(SOME_CONST)` — a statically unknowable path.)
 fn has_args(call: TsNode) -> bool {
-    call.child_by_field_name("arguments").map(|a| a.named_child_count() > 0).unwrap_or(false)
+    call.child_by_field_name("arguments")
+        .map(|a| a.named_child_count() > 0)
+        .unwrap_or(false)
 }
 
 /// Source text of the first argument (identifier / member expression), capped —
@@ -1357,7 +1923,10 @@ fn has_args(call: TsNode) -> bool {
 fn first_arg_text(call: TsNode, src: &[u8]) -> Option<String> {
     let args = call.child_by_field_name("arguments")?;
     let a = args.named_child(0)?;
-    let t = std::str::from_utf8(&src[a.byte_range()]).ok()?.trim().to_string();
+    let t = std::str::from_utf8(&src[a.byte_range()])
+        .ok()?
+        .trim()
+        .to_string();
     (!t.is_empty() && t.len() <= 60 && !t.contains('\n')).then_some(t)
 }
 
@@ -1367,7 +1936,10 @@ fn first_string_arg(call: TsNode, src: &[u8]) -> Option<String> {
     for a in args.named_children(&mut c) {
         if a.kind().contains("string") {
             let t = std::str::from_utf8(&src[a.byte_range()]).ok()?;
-            return Some(t.trim_matches(|ch| ch == '"' || ch == '\'' || ch == '`').to_string());
+            return Some(
+                t.trim_matches(|ch| ch == '"' || ch == '\'' || ch == '`')
+                    .to_string(),
+            );
         }
     }
     None
@@ -1395,7 +1967,9 @@ fn callee_name(call: TsNode, src: &[u8], fields: &[&str]) -> Option<String> {
 fn trailing_ident(node: TsNode, src: &[u8]) -> Option<String> {
     let k = node.kind();
     if k == "identifier" || k == "simple_identifier" || k.ends_with("_identifier") {
-        return std::str::from_utf8(&src[node.byte_range()]).ok().map(|s| s.to_string());
+        return std::str::from_utf8(&src[node.byte_range()])
+            .ok()
+            .map(|s| s.to_string());
     }
     for field in ["name", "field", "attribute", "property", "method", "suffix"] {
         if let Some(c) = node.child_by_field_name(field) {
@@ -1430,17 +2004,19 @@ fn trailing_ident(node: TsNode, src: &[u8]) -> Option<String> {
     None
 }
 
-
 /// TS/JS `import { A, B as C } from './mod'` / `import X from './mod'` → bindings.
 /// Only RELATIVE modules (./ ../) are kept — they map to project files; package
 /// imports are external and can never resolve to an internal node.
 fn ts_extract_import(node: TsNode, src: &[u8], rel_path: &str, out: &mut Vec<RawImport>) {
-    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
-    let Some(module) = node
-        .child_by_field_name("source")
-        .and_then(text)
-        .map(|m| m.trim_matches(|c| c == '"' || c == '\'' || c == '`').to_string())
-    else {
+    let text = |n: TsNode| {
+        std::str::from_utf8(&src[n.byte_range()])
+            .ok()
+            .map(str::to_string)
+    };
+    let Some(module) = node.child_by_field_name("source").and_then(text).map(|m| {
+        m.trim_matches(|c| c == '"' || c == '\'' || c == '`')
+            .to_string()
+    }) else {
         return;
     };
     // Keep non-relative specifiers too: the indexer rewrites tsconfig-path
@@ -1448,7 +2024,11 @@ fn ts_extract_import(node: TsNode, src: &[u8], rel_path: &str, out: &mut Vec<Raw
     // Parsing stays IO-free — it can't know the alias map.
     let mut push = |name: String| {
         if !name.is_empty() {
-            out.push(RawImport { file_path: rel_path.to_string(), name, module: module.clone() });
+            out.push(RawImport {
+                file_path: rel_path.to_string(),
+                name,
+                module: module.clone(),
+            });
         }
     };
     let mut stack = vec![node];
@@ -1457,7 +2037,9 @@ fn ts_extract_import(node: TsNode, src: &[u8], rel_path: &str, out: &mut Vec<Raw
             "import_specifier" | "export_specifier" => {
                 // `A as B` binds B locally; plain `A` binds A. Export specifiers
                 // only reach here for re-exports (`export {A} from './y'`).
-                let bound = n.child_by_field_name("alias").or_else(|| n.child_by_field_name("name"));
+                let bound = n
+                    .child_by_field_name("alias")
+                    .or_else(|| n.child_by_field_name("name"));
                 if let Some(name) = bound.and_then(text) {
                     push(name);
                 }
@@ -1495,21 +2077,37 @@ fn ts_extract_import(node: TsNode, src: &[u8], rel_path: &str, out: &mut Vec<Raw
 /// Python `from a.b import X, Y as Z` → bindings (module kept dotted; relative
 /// `from . import x` keeps the leading dots for the resolver to interpret).
 fn py_extract_import(node: TsNode, src: &[u8], rel_path: &str, out: &mut Vec<RawImport>) {
-    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
-    let Some(module) = node.child_by_field_name("module_name").and_then(text) else { return };
+    let text = |n: TsNode| {
+        std::str::from_utf8(&src[n.byte_range()])
+            .ok()
+            .map(str::to_string)
+    };
+    let Some(module) = node.child_by_field_name("module_name").and_then(text) else {
+        return;
+    };
     for i in 0..node.named_child_count() as u32 {
-        let Some(ch) = node.named_child(i) else { continue };
+        let Some(ch) = node.named_child(i) else {
+            continue;
+        };
         match ch.kind() {
             "dotted_name" if Some(ch) != node.child_by_field_name("module_name") => {
                 if let Some(name) = text(ch) {
                     if !name.contains('.') {
-                        out.push(RawImport { file_path: rel_path.to_string(), name, module: module.clone() });
+                        out.push(RawImport {
+                            file_path: rel_path.to_string(),
+                            name,
+                            module: module.clone(),
+                        });
                     }
                 }
             }
             "aliased_import" => {
                 if let Some(name) = ch.child_by_field_name("alias").and_then(text) {
-                    out.push(RawImport { file_path: rel_path.to_string(), name, module: module.clone() });
+                    out.push(RawImport {
+                        file_path: rel_path.to_string(),
+                        name,
+                        module: module.clone(),
+                    });
                 }
             }
             _ => {}
@@ -1535,16 +2133,52 @@ mod tests {
             "Repo.kt",
             "class UserRepo(val api: ApiClient, private var cache: Cache?, plain: Int) : BaseRepo(), Syncable {\n  fun load() {\n    val svc = UserService()\n    val typed: Formatter = make()\n    val lower = factory()\n  }\n}\n",
         );
-        let field = |n: &str| pf.fields.iter().find(|f| f.field_name == n).map(|f| f.type_name.clone());
-        assert_eq!(field("api").as_deref(), Some("ApiClient"), "val ctor property is a field");
-        assert_eq!(field("cache").as_deref(), Some("Cache"), "var ctor property unwraps T?");
+        let field = |n: &str| {
+            pf.fields
+                .iter()
+                .find(|f| f.field_name == n)
+                .map(|f| f.type_name.clone())
+        };
+        assert_eq!(
+            field("api").as_deref(),
+            Some("ApiClient"),
+            "val ctor property is a field"
+        );
+        assert_eq!(
+            field("cache").as_deref(),
+            Some("Cache"),
+            "var ctor property unwraps T?"
+        );
         assert_eq!(field("plain"), None, "plain param is NOT a field");
-        let local = |n: &str| pf.locals.iter().find(|l| l.var_name == n).map(|l| l.type_name.clone());
-        assert_eq!(local("svc").as_deref(), Some("UserService"), "capitalized ctor call types the local");
-        assert_eq!(local("typed").as_deref(), Some("Formatter"), "declared annotation wins");
-        assert_eq!(local("lower"), None, "lowercase factory call is not evidence");
-        assert!(pf.inherits.iter().any(|i| i.super_name == "BaseRepo" && i.kind == InheritKind::Extends));
-        assert!(pf.inherits.iter().any(|i| i.super_name == "Syncable" && i.kind == InheritKind::Implements));
+        let local = |n: &str| {
+            pf.locals
+                .iter()
+                .find(|l| l.var_name == n)
+                .map(|l| l.type_name.clone())
+        };
+        assert_eq!(
+            local("svc").as_deref(),
+            Some("UserService"),
+            "capitalized ctor call types the local"
+        );
+        assert_eq!(
+            local("typed").as_deref(),
+            Some("Formatter"),
+            "declared annotation wins"
+        );
+        assert_eq!(
+            local("lower"),
+            None,
+            "lowercase factory call is not evidence"
+        );
+        assert!(pf
+            .inherits
+            .iter()
+            .any(|i| i.super_name == "BaseRepo" && i.kind == InheritKind::Extends));
+        assert!(pf
+            .inherits
+            .iter()
+            .any(|i| i.super_name == "Syncable" && i.kind == InheritKind::Implements));
     }
 
     #[test]
@@ -1555,7 +2189,11 @@ mod tests {
             "class OrderVC: UIViewController, Trackable {\n  func go() {}\n}\n",
         );
         let sups: Vec<&str> = pf.inherits.iter().map(|i| i.super_name.as_str()).collect();
-        assert_eq!(sups, vec!["UIViewController", "Trackable"], "both supertypes captured: {sups:?}");
+        assert_eq!(
+            sups,
+            vec!["UIViewController", "Trackable"],
+            "both supertypes captured: {sups:?}"
+        );
     }
 
     #[test]
@@ -1565,17 +2203,36 @@ mod tests {
             "App.tsx",
             "export const App = () => { helper(); return null; };\nconst helper = function () {};\nconst notADef = useMemo(() => 1);\n",
         );
-        assert!(has(&pf, "App", NodeLabel::Function), "arrow component must be a Function node");
-        assert!(has(&pf, "helper", NodeLabel::Function), "function-expression binding must be a node");
-        assert!(!has(&pf, "notADef", NodeLabel::Function), "a call initializer is NOT a definition");
+        assert!(
+            has(&pf, "App", NodeLabel::Function),
+            "arrow component must be a Function node"
+        );
+        assert!(
+            has(&pf, "helper", NodeLabel::Function),
+            "function-expression binding must be a node"
+        );
+        assert!(
+            !has(&pf, "notADef", NodeLabel::Function),
+            "a call initializer is NOT a definition"
+        );
         // calls inside the arrow body attribute to the component, not the file
-        assert!(pf.calls.iter().any(|c| c.callee_name == "helper" && c.caller_id.ends_with("app")));
+        assert!(pf
+            .calls
+            .iter()
+            .any(|c| c.callee_name == "helper" && c.caller_id.ends_with("app")));
     }
 
     #[test]
     fn junk_names_are_skipped() {
-        let pf = parse_ts("p", "codes.ts", "const handlers = { $200() { return 1; }, valid() { return 2; } };\n");
-        assert!(!names(&pf).iter().any(|(n, _)| n == "$200"), "no-letter names are noise");
+        let pf = parse_ts(
+            "p",
+            "codes.ts",
+            "const handlers = { $200() { return 1; }, valid() { return 2; } };\n",
+        );
+        assert!(
+            !names(&pf).iter().any(|(n, _)| n == "$200"),
+            "no-letter names are noise"
+        );
         assert!(has(&pf, "valid", NodeLabel::Method));
     }
 
@@ -1586,9 +2243,22 @@ mod tests {
             "svc.ts",
             "class Repo<T> { save(x: T) {} }\nfunction run() {\n  const r = new Repo();\n  const s: Repo<string> = make();\n  const n: Repo | null = maybe();\n  const u: Repo | Error = both();\n  r.save(1); s.save(2); n.save(3);\n}\n",
         );
-        let ty = |v: &str| pf.locals.iter().find(|l| l.var_name == v).map(|l| l.type_name.clone());
-        assert_eq!(ty("r").as_deref(), Some("Repo"), "new-expression initializer types the local");
-        assert_eq!(ty("s").as_deref(), Some("Repo"), "generic annotation unwraps to its base");
+        let ty = |v: &str| {
+            pf.locals
+                .iter()
+                .find(|l| l.var_name == v)
+                .map(|l| l.type_name.clone())
+        };
+        assert_eq!(
+            ty("r").as_deref(),
+            Some("Repo"),
+            "new-expression initializer types the local"
+        );
+        assert_eq!(
+            ty("s").as_deref(),
+            Some("Repo"),
+            "generic annotation unwraps to its base"
+        );
         assert_eq!(ty("n").as_deref(), Some("Repo"), "| null unwraps");
         assert_eq!(ty("u"), None, "a real union stays dropped");
     }
@@ -1601,7 +2271,9 @@ mod tests {
             "class Svc { constructor(private repo: Repo<User>) {} }\n",
         );
         assert!(
-            pf.fields.iter().any(|f| f.field_name == "repo" && f.type_name == "Repo"),
+            pf.fields
+                .iter()
+                .any(|f| f.field_name == "repo" && f.type_name == "Repo"),
             "constructor param property with generic type unwraps to base: {:?}",
             pf.fields
         );
@@ -1609,17 +2281,47 @@ mod tests {
 
     #[test]
     fn ts_imports_keep_alias_specifiers() {
-        let pf = parse_ts("p", "a.ts", "import { doThing } from '@app/svc';\nimport { rel } from './rel';\n");
-        assert!(pf.imports.iter().any(|i| i.name == "doThing" && i.module == "@app/svc"));
-        assert!(pf.imports.iter().any(|i| i.name == "rel" && i.module == "./rel"));
+        let pf = parse_ts(
+            "p",
+            "a.ts",
+            "import { doThing } from '@app/svc';\nimport { rel } from './rel';\n",
+        );
+        assert!(pf
+            .imports
+            .iter()
+            .any(|i| i.name == "doThing" && i.module == "@app/svc"));
+        assert!(pf
+            .imports
+            .iter()
+            .any(|i| i.name == "rel" && i.module == "./rel"));
     }
 
     #[test]
     fn rust_python_js_ts_go_still_work() {
-        assert!(has(&parse_rust("p", "a.rs", "fn helper(){}\nfn main(){ helper(); }\nstruct S;\ntrait T{}\n"), "helper", NodeLabel::Function));
-        assert!(has(&parse_python("p", "a.py", "def foo():\n  pass\nclass Bar:\n  pass\n"), "Bar", NodeLabel::Class));
-        assert!(has(&parse_ts("p", "a.ts", "interface I{}\nfunction f(){}\n"), "I", NodeLabel::Interface));
-        assert!(has(&parse_go("p", "a.go", "package m\nfunc run(){}\ntype S struct{}\n"), "run", NodeLabel::Function));
+        assert!(has(
+            &parse_rust(
+                "p",
+                "a.rs",
+                "fn helper(){}\nfn main(){ helper(); }\nstruct S;\ntrait T{}\n"
+            ),
+            "helper",
+            NodeLabel::Function
+        ));
+        assert!(has(
+            &parse_python("p", "a.py", "def foo():\n  pass\nclass Bar:\n  pass\n"),
+            "Bar",
+            NodeLabel::Class
+        ));
+        assert!(has(
+            &parse_ts("p", "a.ts", "interface I{}\nfunction f(){}\n"),
+            "I",
+            NodeLabel::Interface
+        ));
+        assert!(has(
+            &parse_go("p", "a.go", "package m\nfunc run(){}\ntype S struct{}\n"),
+            "run",
+            NodeLabel::Function
+        ));
     }
 
     #[test]
@@ -1631,7 +2333,10 @@ mod tests {
         assert!(has(&pf, "P", NodeLabel::Interface));
         assert!(has(&pf, "E", NodeLabel::Class));
         assert!(has(&pf, "S", NodeLabel::Class));
-        assert!(pf.calls.iter().any(|c| c.callee_name == "helper" && c.caller_id.ends_with("run")));
+        assert!(pf
+            .calls
+            .iter()
+            .any(|c| c.callee_name == "helper" && c.caller_id.ends_with("run")));
     }
 
     #[test]
@@ -1655,26 +2360,61 @@ mod tests {
 
     #[test]
     fn ruby_csharp_bash() {
-        assert!(has(&parse_file("p", "a.rb", "def foo\nend\nclass Bar\nend\n"), "Bar", NodeLabel::Class));
-        assert!(has(&parse_file("p", "a.cs", "class C { void M() {} }"), "M", NodeLabel::Method));
-        assert!(has(&parse_file("p", "a.sh", "greet() { echo hi; }\n"), "greet", NodeLabel::Function));
+        assert!(has(
+            &parse_file("p", "a.rb", "def foo\nend\nclass Bar\nend\n"),
+            "Bar",
+            NodeLabel::Class
+        ));
+        assert!(has(
+            &parse_file("p", "a.cs", "class C { void M() {} }"),
+            "M",
+            NodeLabel::Method
+        ));
+        assert!(has(
+            &parse_file("p", "a.sh", "greet() { echo hi; }\n"),
+            "greet",
+            NodeLabel::Function
+        ));
     }
-
 
     #[test]
     fn inheritance_extraction() {
-        let py = parse_python("p", "a.py", "class Animal:\n    pass\nclass Dog(Animal):\n    pass\n");
-        assert!(py.inherits.iter().any(|i| i.impl_name == "Dog" && i.super_name == "Animal" && i.kind == InheritKind::Extends));
+        let py = parse_python(
+            "p",
+            "a.py",
+            "class Animal:\n    pass\nclass Dog(Animal):\n    pass\n",
+        );
+        assert!(py.inherits.iter().any(|i| i.impl_name == "Dog"
+            && i.super_name == "Animal"
+            && i.kind == InheritKind::Extends));
         let ts = parse_ts("p", "a.ts", "interface Service {}\nclass Impl implements Service {}\nclass Base {}\nclass Sub extends Base {}\n");
-        assert!(ts.inherits.iter().any(|i| i.impl_name == "Impl" && i.super_name == "Service" && i.kind == InheritKind::Implements));
-        assert!(ts.inherits.iter().any(|i| i.impl_name == "Sub" && i.super_name == "Base" && i.kind == InheritKind::Extends));
-        let java = parse_java("p", "A.java", "interface I {}\nclass A implements I {}\nclass B extends A {}\n");
-        assert!(java.inherits.iter().any(|i| i.impl_name == "A" && i.super_name == "I" && i.kind == InheritKind::Implements));
-        assert!(java.inherits.iter().any(|i| i.impl_name == "B" && i.super_name == "A" && i.kind == InheritKind::Extends));
-        let rust = parse_rust("p", "a.rs", "struct Foo;\ntrait Show {}\nimpl Show for Foo {}\n");
-        assert!(rust.inherits.iter().any(|i| i.impl_name == "Foo" && i.super_name == "Show" && i.kind == InheritKind::Implements));
+        assert!(ts.inherits.iter().any(|i| i.impl_name == "Impl"
+            && i.super_name == "Service"
+            && i.kind == InheritKind::Implements));
+        assert!(ts.inherits.iter().any(|i| i.impl_name == "Sub"
+            && i.super_name == "Base"
+            && i.kind == InheritKind::Extends));
+        let java = parse_java(
+            "p",
+            "A.java",
+            "interface I {}\nclass A implements I {}\nclass B extends A {}\n",
+        );
+        assert!(java.inherits.iter().any(|i| i.impl_name == "A"
+            && i.super_name == "I"
+            && i.kind == InheritKind::Implements));
+        assert!(java
+            .inherits
+            .iter()
+            .any(|i| i.impl_name == "B" && i.super_name == "A" && i.kind == InheritKind::Extends));
+        let rust = parse_rust(
+            "p",
+            "a.rs",
+            "struct Foo;\ntrait Show {}\nimpl Show for Foo {}\n",
+        );
+        assert!(rust.inherits.iter().any(|i| i.impl_name == "Foo"
+            && i.super_name == "Show"
+            && i.kind == InheritKind::Implements));
     }
-
 
     #[test]
     fn kotlin_defs_and_calls() {
@@ -1683,16 +2423,36 @@ mod tests {
         assert!(has(&pf, "Vm", NodeLabel::Class));
         assert!(has(&pf, "Service", NodeLabel::Class));
         assert!(has(&pf, "Singleton", NodeLabel::Class));
-        assert!(pf.calls.iter().any(|c| c.callee_name == "say" && c.caller_id.ends_with("greet")));
+        assert!(pf
+            .calls
+            .iter()
+            .any(|c| c.callee_name == "say" && c.caller_id.ends_with("greet")));
     }
 
     #[test]
     fn http_route_extraction() {
-        let ts = parse_ts("p", "r.ts", "class C { @Get('/users') list() {} }\napp.post('/login', handler);\n");
-        assert!(ts.nodes.iter().any(|n| n.label == NodeLabel::Route && n.name == "GET /users"));
-        assert!(ts.nodes.iter().any(|n| n.label == NodeLabel::Route && n.name == "POST /login"));
-        let py = parse_python("p", "r.py", "@app.route('/health')\ndef health():\n    pass\n");
-        assert!(py.nodes.iter().any(|n| n.label == NodeLabel::Route && n.name.contains("/health")));
+        let ts = parse_ts(
+            "p",
+            "r.ts",
+            "class C { @Get('/users') list() {} }\napp.post('/login', handler);\n",
+        );
+        assert!(ts
+            .nodes
+            .iter()
+            .any(|n| n.label == NodeLabel::Route && n.name == "GET /users"));
+        assert!(ts
+            .nodes
+            .iter()
+            .any(|n| n.label == NodeLabel::Route && n.name == "POST /login"));
+        let py = parse_python(
+            "p",
+            "r.py",
+            "@app.route('/health')\ndef health():\n    pass\n",
+        );
+        assert!(py
+            .nodes
+            .iter()
+            .any(|n| n.label == NodeLabel::Route && n.name.contains("/health")));
     }
 
     /// NestJS shape: relative decorator paths (or none at all) joined with the
@@ -1707,34 +2467,76 @@ mod tests {
             .filter(|n| n.label == NodeLabel::Route)
             .map(|n| n.name.as_str())
             .collect();
-        assert!(routes.contains(&"GET /baby-tracker/children/:id"), "{routes:?}");
-        assert!(routes.contains(&"POST /baby-tracker/children"), "empty @Post() must inherit the prefix: {routes:?}");
-        assert!(routes.contains(&"GET /baby-tracker/children/summary/all"), "{routes:?}");
+        assert!(
+            routes.contains(&"GET /baby-tracker/children/:id"),
+            "{routes:?}"
+        );
+        assert!(
+            routes.contains(&"POST /baby-tracker/children"),
+            "empty @Post() must inherit the prefix: {routes:?}"
+        );
+        assert!(
+            routes.contains(&"GET /baby-tracker/children/summary/all"),
+            "{routes:?}"
+        );
         // object-form controller: `@Controller({ path: 'x', version: … })`
         let obj = parse_ts("p", "w.controller.ts", "@Controller({ path: 'adapty-webhook', version: VERSION_NEUTRAL })\nexport class W {\n  @Post()\n  handle() {}\n}\n");
         assert!(
-            obj.nodes.iter().any(|n| n.label == NodeLabel::Route && n.name == "POST /adapty-webhook"),
+            obj.nodes
+                .iter()
+                .any(|n| n.label == NodeLabel::Route && n.name == "POST /adapty-webhook"),
             "object-form @Controller path must join: {:?}",
-            obj.nodes.iter().filter(|n| n.label == NodeLabel::Route).map(|n| &n.name).collect::<Vec<_>>()
+            obj.nodes
+                .iter()
+                .filter(|n| n.label == NodeLabel::Route)
+                .map(|n| &n.name)
+                .collect::<Vec<_>>()
         );
         // constant path → SYMBOLIC route: the endpoint is real, the path needs
         // the constant — never a fabricated "/", never silently dropped
-        let cst = parse_ts("p", "c.controller.ts", "@Controller('x')\nclass C {\n  @Delete(API_PATHS.BY_ID)\n  del() {}\n}\n");
-        let sym: Vec<_> = cst.nodes.iter().filter(|n| n.label == NodeLabel::Route).collect();
+        let cst = parse_ts(
+            "p",
+            "c.controller.ts",
+            "@Controller('x')\nclass C {\n  @Delete(API_PATHS.BY_ID)\n  del() {}\n}\n",
+        );
+        let sym: Vec<_> = cst
+            .nodes
+            .iter()
+            .filter(|n| n.label == NodeLabel::Route)
+            .collect();
         assert_eq!(sym.len(), 1, "constant-arg decorator is a real endpoint");
-        assert_eq!(sym[0].name, "DELETE /x/«API_PATHS.BY_ID»", "{:?}", sym[0].name);
-        assert_eq!(sym[0].metadata.get("path_unresolved"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            sym[0].name, "DELETE /x/«API_PATHS.BY_ID»",
+            "{:?}",
+            sym[0].name
+        );
+        assert_eq!(
+            sym[0].metadata.get("path_unresolved"),
+            Some(&serde_json::Value::Bool(true))
+        );
         // route-noise negatives: names that merely CONTAIN test-ish substrings
-        for f in ["src/latest.ts", "src/phase2export.ts", "src/contest/router.ts"] {
+        for f in [
+            "src/latest.ts",
+            "src/phase2export.ts",
+            "src/contest/router.ts",
+        ] {
             let ts = parse_ts("p", f, "app.get('/users', h);\n");
-            assert!(ts.nodes.iter().any(|n| n.label == NodeLabel::Route), "{f} is NOT a test file");
+            assert!(
+                ts.nodes.iter().any(|n| n.label == NodeLabel::Route),
+                "{f} is NOT a test file"
+            );
         }
     }
 
     /// e2e/spec traffic is not API surface — measured noise in the field.
     #[test]
     fn test_files_register_no_routes() {
-        for f in ["app.e2e-spec.ts", "test/nursing.e2e-spec.ts", "a.test.ts", "__tests__/b.ts"] {
+        for f in [
+            "app.e2e-spec.ts",
+            "test/nursing.e2e-spec.ts",
+            "a.test.ts",
+            "__tests__/b.ts",
+        ] {
             let ts = parse_ts("p", f, "app.get('/users', h);\nrequest(app).get('/x');\n");
             assert!(
                 !ts.nodes.iter().any(|n| n.label == NodeLabel::Route),
@@ -1745,8 +2547,6 @@ mod tests {
         let ts = parse_ts("p", "src/router.ts", "app.get('/users', h);\n");
         assert!(ts.nodes.iter().any(|n| n.label == NodeLabel::Route));
     }
-
-
 
     #[test]
     fn unknown_extension_is_empty() {
@@ -1759,7 +2559,11 @@ mod tests {
         // and the `// foo` comment are NOT — the rename safety gate depends on this.
         let src = "fn foo() {}\nfn bar() { foo(); let s = \"foo\"; }\n// foo here\n";
         let spans = identifier_spans("a.rs", src, "foo");
-        assert_eq!(spans.len(), 2, "only identifier tokens, not string/comment occurrences");
+        assert_eq!(
+            spans.len(),
+            2,
+            "only identifier tokens, not string/comment occurrences"
+        );
         for (s, e, _) in spans {
             assert_eq!(&src[s..e], "foo");
         }
@@ -1770,9 +2574,18 @@ mod tests {
         // tree-sitter-swift models `arr[i]` as a call_expression with a `[]`
         // suffix — those are subscripts, not method calls (no phantom edge).
         let pf = parse_swift("p", "a.swift", "class A {\n  func go() {\n    let x = arr[0]\n    cell.configure(with: rows[i])\n  }\n}");
-        assert!(!pf.calls.iter().any(|c| c.callee_name == "arr"), "arr[0] subscript is not a call");
-        assert!(!pf.calls.iter().any(|c| c.callee_name == "rows"), "rows[i] subscript is not a call");
-        assert!(pf.calls.iter().any(|c| c.callee_name == "configure"), "configure(...) IS a call");
+        assert!(
+            !pf.calls.iter().any(|c| c.callee_name == "arr"),
+            "arr[0] subscript is not a call"
+        );
+        assert!(
+            !pf.calls.iter().any(|c| c.callee_name == "rows"),
+            "rows[i] subscript is not a call"
+        );
+        assert!(
+            pf.calls.iter().any(|c| c.callee_name == "configure"),
+            "configure(...) IS a call"
+        );
     }
 
     #[test]
@@ -1780,6 +2593,9 @@ mod tests {
         // `static let f: X = { … return formatter }()` is an immediately-invoked
         // closure — it must NOT mint a call to the closure's last identifier.
         let pf = parse_swift("p", "a.swift", "class A {\n  static let f: X = {\n    let formatter = Y()\n    return formatter\n  }()\n}");
-        assert!(!pf.calls.iter().any(|c| c.callee_name == "formatter"), "IIFE body must not become a callee");
+        assert!(
+            !pf.calls.iter().any(|c| c.callee_name == "formatter"),
+            "IIFE body must not become a callee"
+        );
     }
 }

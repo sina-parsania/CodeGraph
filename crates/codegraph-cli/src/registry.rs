@@ -38,7 +38,10 @@ pub struct GcReport {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn registry_path() -> Option<PathBuf> {
@@ -66,7 +69,10 @@ fn save(reg: &Registry) {
 }
 
 fn key(root: &Path) -> String {
-    root.canonicalize().unwrap_or_else(|_| root.to_path_buf()).to_string_lossy().into_owned()
+    root.canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// TTL in seconds from `CODEGRAPH_TTL_DAYS` (default 30; `0` disables auto-GC).
@@ -100,7 +106,12 @@ pub fn list_projects() -> Vec<ProjectInfo> {
             let db = PathBuf::from(&e.db);
             let exists = db.exists();
             let bytes = db.parent().filter(|_| exists).map(dir_size).unwrap_or(0);
-            ProjectInfo { root, bytes, idle_secs: t.saturating_sub(e.last_touch), exists }
+            ProjectInfo {
+                root,
+                bytes,
+                idle_secs: t.saturating_sub(e.last_touch),
+                exists,
+            }
         })
         .collect();
     out.sort_by_key(|p| std::cmp::Reverse(p.bytes));
@@ -126,7 +137,10 @@ fn dir_size(dir: &Path) -> u64 {
 /// `force_all` only prunes dangling entries (time-based deletion disabled).
 fn sweep(reg: &mut Registry, ttl_secs: u64, force_all: bool, dry_run: bool) -> GcReport {
     let t = now();
-    let mut report = GcReport { removed: Vec::new(), freed_bytes: 0 };
+    let mut report = GcReport {
+        removed: Vec::new(),
+        freed_bytes: 0,
+    };
     let mut keep = BTreeMap::new();
     for (root, e) in std::mem::take(&mut reg.projects) {
         let db = PathBuf::from(&e.db);
@@ -159,7 +173,11 @@ pub fn run_gc(ttl_secs_override: Option<u64>, force_all: bool, dry_run: bool) ->
     let mut reg = load();
     let ttl = ttl_secs_override.unwrap_or_else(|| {
         let env = ttl_secs();
-        if env == 0 { DEFAULT_TTL_DAYS * SECS_PER_DAY } else { env }
+        if env == 0 {
+            DEFAULT_TTL_DAYS * SECS_PER_DAY
+        } else {
+            env
+        }
     });
     let report = sweep(&mut reg, ttl, force_all, dry_run);
     if !dry_run {
@@ -230,9 +248,11 @@ mod tests {
             last_touch: t.saturating_sub(age),
             indexed_at: 0,
         };
-        reg.projects.insert("old".into(), mk(&old_db, 100 * SECS_PER_DAY));
+        reg.projects
+            .insert("old".into(), mk(&old_db, 100 * SECS_PER_DAY));
         reg.projects.insert("new".into(), mk(&new_db, 0));
-        reg.projects.insert("gone".into(), mk(&tmp.join("gone/.codegraph/graph.db"), 0));
+        reg.projects
+            .insert("gone".into(), mk(&tmp.join("gone/.codegraph/graph.db"), 0));
 
         let report = sweep(&mut reg, 30 * SECS_PER_DAY, false, false);
 

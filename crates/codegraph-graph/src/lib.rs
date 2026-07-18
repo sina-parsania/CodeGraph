@@ -5,8 +5,9 @@
 use std::collections::{HashMap, HashSet};
 
 use codegraph_core::{
-    Confidence, Edge, EdgeRelation, Hyperedge, HyperedgeMember, HyperedgeRelation, InheritKind, Metadata,
-    Node, NodeLabel, RawCall, RawField, RawImport, RawInherit, RawLocal, Receiver, ResolutionTier,
+    Confidence, Edge, EdgeRelation, Hyperedge, HyperedgeMember, HyperedgeRelation, InheritKind,
+    Metadata, Node, NodeLabel, RawCall, RawField, RawImport, RawInherit, RawLocal, Receiver,
+    ResolutionTier,
 };
 
 /// Class-Hierarchy-Analysis member resolution (docs/RESOLUTION.md): find the method
@@ -75,7 +76,11 @@ fn narrow_class_by_import<'a>(
         return None; // conflicting imports of the same name → drop
     }
     let module = modules[0];
-    let dir = caller.file_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let dir = caller
+        .file_path
+        .rsplit_once('/')
+        .map(|(d, _)| d)
+        .unwrap_or("");
     let mut hits: Vec<&'a str> = Vec::new();
     for &id in candidates {
         let Some(n) = by_id.get(id) else { continue };
@@ -89,7 +94,8 @@ fn narrow_class_by_import<'a>(
             // exact extension set (same as resolve_via_import) — a bare
             // `starts_with('.')` would also match `profile.service.helpers.ts`
             file.strip_prefix(base.as_str()).is_some_and(|rest| {
-                matches!(rest, ".ts" | ".tsx" | ".js" | ".jsx" | ".mjs") || rest.starts_with("/index.")
+                matches!(rest, ".ts" | ".tsx" | ".js" | ".jsx" | ".mjs")
+                    || rest.starts_with("/index.")
             })
         } else if caller.language == "python" {
             let root = module.replace('.', "/");
@@ -125,7 +131,11 @@ fn resolve_via_import<'a>(
         return None; // conflicting imports of the same name → drop
     }
     let module = modules[0];
-    let dir = caller.file_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let dir = caller
+        .file_path
+        .rsplit_once('/')
+        .map(|(d, _)| d)
+        .unwrap_or("");
     let mut hits: Vec<&str> = Vec::new();
     if module.starts_with('.') || module.starts_with('/') {
         // TS/JS relative: normalize ./ ../ against the caller's dir.
@@ -137,9 +147,14 @@ fn resolve_via_import<'a>(
             join_normalize(dir, module)
         };
         for cand in [
-            format!("{base}.ts"), format!("{base}.tsx"), format!("{base}.js"),
-            format!("{base}.jsx"), format!("{base}.mjs"),
-            format!("{base}/index.ts"), format!("{base}/index.tsx"), format!("{base}/index.js"),
+            format!("{base}.ts"),
+            format!("{base}.tsx"),
+            format!("{base}.js"),
+            format!("{base}.jsx"),
+            format!("{base}.mjs"),
+            format!("{base}/index.ts"),
+            format!("{base}/index.tsx"),
+            format!("{base}/index.js"),
         ] {
             if let Some(&id) = fn_by_file_name.get(&(cand.as_str(), callee)) {
                 if !hits.contains(&id) {
@@ -154,7 +169,11 @@ fn resolve_via_import<'a>(
         let root = module.replace('.', "/");
         let tail = format!("{root}.py");
         let init = format!("{root}/__init__.py");
-        for &id in fn_by_name.get(callee).map(Vec::as_slice).unwrap_or_default() {
+        for &id in fn_by_name
+            .get(callee)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
             let Some(n) = by_id.get(id) else { continue };
             let file = n.file_path.as_str();
             if (file.ends_with(&tail) || file.ends_with(&init)) && !hits.contains(&id) {
@@ -180,7 +199,6 @@ fn join_normalize(dir: &str, module: &str) -> String {
     parts.join("/")
 }
 
-
 /// Test-file predicate shared with the store's SQL queries (token-aware,
 /// `latest_prices.rs` is not a test) — one definition in codegraph-core so the
 /// TESTS edges and the dead-code/test-coverage queries can never disagree.
@@ -194,9 +212,14 @@ pub fn detect_entry_points(nodes: &[Node]) -> Vec<(&Node, &'static str)> {
     let mut out: Vec<(&Node, &'static str)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut fn_by_file_name: HashMap<(&str, &str), &Node> = HashMap::new();
-    for n in nodes.iter().filter(|n| matches!(n.label, Function | Method)) {
+    for n in nodes
+        .iter()
+        .filter(|n| matches!(n.label, Function | Method))
+    {
         // first definition wins — matches the previous linear-scan semantics
-        fn_by_file_name.entry((n.file_path.as_str(), n.name.as_str())).or_insert(n);
+        fn_by_file_name
+            .entry((n.file_path.as_str(), n.name.as_str()))
+            .or_insert(n);
     }
     for r in nodes.iter().filter(|n| n.label == Route) {
         if let Some(h) = r.metadata.get("handler").and_then(|v| v.as_str()) {
@@ -207,9 +230,20 @@ pub fn detect_entry_points(nodes: &[Node]) -> Vec<(&Node, &'static str)> {
             }
         }
     }
-    for f in nodes.iter().filter(|n| matches!(n.label, Function | Method)) {
-        let fan_in = f.metadata.get("fan_in").and_then(|v| v.as_u64()).unwrap_or(0);
-        let fan_out = f.metadata.get("fan_out").and_then(|v| v.as_u64()).unwrap_or(0);
+    for f in nodes
+        .iter()
+        .filter(|n| matches!(n.label, Function | Method))
+    {
+        let fan_in = f
+            .metadata
+            .get("fan_in")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let fan_out = f
+            .metadata
+            .get("fan_out")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let is_main = f.name == "main";
         if (is_main || (fan_in == 0 && fan_out >= 3)) && seen.insert(&f.id) {
             out.push((f, if is_main { "main" } else { "task" }));
@@ -217,7 +251,6 @@ pub fn detect_entry_points(nodes: &[Node]) -> Vec<(&Node, &'static str)> {
     }
     out
 }
-
 
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 
@@ -268,8 +301,20 @@ pub fn resolve_files(
     include_ambiguous: bool,
     changed: &HashSet<String>,
 ) -> Vec<Edge> {
-    let built = build_with(nodes, calls_in_changed, inherits, fields, locals, imports, include_ambiguous);
-    built.edges.into_iter().filter(|e| changed.contains(&e.src_file)).collect()
+    let built = build_with(
+        nodes,
+        calls_in_changed,
+        inherits,
+        fields,
+        locals,
+        imports,
+        include_ambiguous,
+    );
+    built
+        .edges
+        .into_iter()
+        .filter(|e| changed.contains(&e.src_file))
+        .collect()
 }
 
 /// `include_ambiguous`: ALSO emit edges for unresolved calls with 2–5 same-name
@@ -292,19 +337,33 @@ pub fn build_with(
         .collect();
     let mut fn_by_file_name: HashMap<(&str, &str), &str> = HashMap::new();
     let mut fn_by_name: HashMap<&str, Vec<&str>> = HashMap::new();
-    for n in nodes.iter().filter(|n| matches!(n.label, NodeLabel::Function | NodeLabel::Method)) {
+    for n in nodes
+        .iter()
+        .filter(|n| matches!(n.label, NodeLabel::Function | NodeLabel::Method))
+    {
         fn_by_file_name.insert((n.file_path.as_str(), n.name.as_str()), n.id.as_str());
-        fn_by_name.entry(n.name.as_str()).or_default().push(n.id.as_str());
+        fn_by_name
+            .entry(n.name.as_str())
+            .or_default()
+            .push(n.id.as_str());
     }
 
     // Class-Hierarchy-Analysis tables for receiver-aware (self/this) resolution.
     let class_nodes: Vec<&Node> = nodes
         .iter()
-        .filter(|n| matches!(n.label, NodeLabel::Class | NodeLabel::Interface | NodeLabel::Enum))
+        .filter(|n| {
+            matches!(
+                n.label,
+                NodeLabel::Class | NodeLabel::Interface | NodeLabel::Enum
+            )
+        })
         .collect();
     let mut class_by_name: HashMap<&str, Vec<&str>> = HashMap::new();
     for c in &class_nodes {
-        class_by_name.entry(c.name.as_str()).or_default().push(c.id.as_str());
+        class_by_name
+            .entry(c.name.as_str())
+            .or_default()
+            .push(c.id.as_str());
     }
     // class_members: class id -> method name -> method ids, by innermost containment.
     // Includes Function nodes too (Swift/Python/Rust/Kotlin label methods Function).
@@ -312,10 +371,16 @@ pub fn build_with(
     // classes — the all-classes scan was O(methods × classes) repo-wide.
     let mut classes_by_file: HashMap<&str, Vec<&Node>> = HashMap::new();
     for c in &class_nodes {
-        classes_by_file.entry(c.file_path.as_str()).or_default().push(c);
+        classes_by_file
+            .entry(c.file_path.as_str())
+            .or_default()
+            .push(c);
     }
     let mut class_members: HashMap<&str, HashMap<&str, Vec<&str>>> = HashMap::new();
-    for m in nodes.iter().filter(|n| matches!(n.label, NodeLabel::Method | NodeLabel::Function)) {
+    for m in nodes
+        .iter()
+        .filter(|n| matches!(n.label, NodeLabel::Method | NodeLabel::Function))
+    {
         let owner = classes_by_file
             .get(m.file_path.as_str())
             .into_iter()
@@ -323,15 +388,21 @@ pub fn build_with(
             .filter(|c| c.line_start <= m.line_start && m.line_end <= c.line_end && c.id != m.id)
             .min_by_key(|c| c.line_end - c.line_start);
         if let Some(c) = owner {
-            class_members.entry(c.id.as_str()).or_default().entry(m.name.as_str()).or_default().push(m.id.as_str());
+            class_members
+                .entry(c.id.as_str())
+                .or_default()
+                .entry(m.name.as_str())
+                .or_default()
+                .push(m.id.as_str());
         }
     }
     // class_parents: child class id -> parent class ids (resolved by unique name).
     let mut class_parents: HashMap<&str, Vec<&str>> = HashMap::new();
     for inh in inherits {
-        if let (Some(ch), Some(pa)) =
-            (class_by_name.get(inh.impl_name.as_str()), class_by_name.get(inh.super_name.as_str()))
-        {
+        if let (Some(ch), Some(pa)) = (
+            class_by_name.get(inh.impl_name.as_str()),
+            class_by_name.get(inh.super_name.as_str()),
+        ) {
             if ch.len() == 1 && pa.len() == 1 {
                 class_parents.entry(ch[0]).or_default().push(pa[0]);
             }
@@ -348,13 +419,22 @@ pub fn build_with(
     // import_map: (file, bound name) -> imported-from modules (T6 evidence).
     let mut import_map: HashMap<(&str, &str), Vec<&str>> = HashMap::new();
     for im in imports {
-        import_map.entry((im.file_path.as_str(), im.name.as_str())).or_default().push(im.module.as_str());
+        import_map
+            .entry((im.file_path.as_str(), im.name.as_str()))
+            .or_default()
+            .push(im.module.as_str());
     }
     // fn_by_dir_name: (dir, name) -> fn ids (Go package scope: dir == package).
     let mut fn_by_dir_name: HashMap<(&str, &str), Vec<&str>> = HashMap::new();
-    for n in nodes.iter().filter(|n| matches!(n.label, NodeLabel::Function | NodeLabel::Method)) {
+    for n in nodes
+        .iter()
+        .filter(|n| matches!(n.label, NodeLabel::Function | NodeLabel::Method))
+    {
         let dir = n.file_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-        fn_by_dir_name.entry((dir, n.name.as_str())).or_default().push(n.id.as_str());
+        fn_by_dir_name
+            .entry((dir, n.name.as_str()))
+            .or_default()
+            .push(n.id.as_str());
     }
 
     // local_types: caller fn id -> local var name -> inferred type name (T5).
@@ -377,39 +457,55 @@ pub fn build_with(
 
     for n in nodes.iter().filter(|n| n.label != NodeLabel::File) {
         if let Some(&file_id) = file_by_path.get(n.file_path.as_str()) {
-            push_edge(&mut edges, &mut seen, Edge {
-                src: file_id.to_string(),
-                dst: n.id.clone(),
-                relation: EdgeRelation::Defines,
-                tier: ResolutionTier::TreeSitter,
-                confidence: Confidence::Extracted,
-                src_file: n.file_path.clone(),
-                src_line: n.line_start,
-                metadata: Metadata::new(),
-            });
+            push_edge(
+                &mut edges,
+                &mut seen,
+                Edge {
+                    src: file_id.to_string(),
+                    dst: n.id.clone(),
+                    relation: EdgeRelation::Defines,
+                    tier: ResolutionTier::TreeSitter,
+                    confidence: Confidence::Extracted,
+                    src_file: n.file_path.clone(),
+                    src_line: n.line_start,
+                    metadata: Metadata::new(),
+                },
+            );
         }
     }
 
     // Route-hub ids present in this graph (for exact-id HTTP linking).
-    let route_ids: HashSet<&str> =
-        nodes.iter().filter(|n| n.label == NodeLabel::Route).map(|n| n.id.as_str()).collect();
+    let route_ids: HashSet<&str> = nodes
+        .iter()
+        .filter(|n| n.label == NodeLabel::Route)
+        .map(|n| n.id.as_str())
+        .collect();
 
     for c in calls {
-        let Some(caller) = by_id.get(c.caller_id.as_str()) else { continue };
+        let Some(caller) = by_id.get(c.caller_id.as_str()) else {
+            continue;
+        };
         // HTTP hub link: callee is a route id (exact path+method key) -> direct edge.
         if c.callee_name.starts_with("route.") && route_ids.contains(c.callee_name.as_str()) {
             let mut metadata = Metadata::new();
-            metadata.insert("justification".to_string(), serde_json::Value::String("HttpPath".to_string()));
-            push_edge(&mut edges, &mut seen, Edge {
-                src: c.caller_id.clone(),
-                dst: c.callee_name.clone(),
-                relation: EdgeRelation::HttpCalls,
-                tier: ResolutionTier::TreeSitter,
-                confidence: Confidence::Extracted,
-                src_file: caller.file_path.clone(),
-                src_line: c.line,
-                metadata,
-            });
+            metadata.insert(
+                "justification".to_string(),
+                serde_json::Value::String("HttpPath".to_string()),
+            );
+            push_edge(
+                &mut edges,
+                &mut seen,
+                Edge {
+                    src: c.caller_id.clone(),
+                    dst: c.callee_name.clone(),
+                    relation: EdgeRelation::HttpCalls,
+                    tier: ResolutionTier::TreeSitter,
+                    confidence: Confidence::Extracted,
+                    src_file: caller.file_path.clone(),
+                    src_line: c.line,
+                    metadata,
+                },
+            );
             continue;
         }
         // Receiver-aware tiers (provably correct, unique-or-drop, never a guess):
@@ -427,7 +523,12 @@ pub fn build_with(
             Receiver::Field(field) => c
                 .enclosing_class
                 .as_deref()
-                .and_then(|cls| field_types.get(cls).and_then(|m| m.get(field.as_str())).copied())
+                .and_then(|cls| {
+                    field_types
+                        .get(cls)
+                        .and_then(|m| m.get(field.as_str()))
+                        .copied()
+                })
                 .and_then(|ty| match class_by_name.get(ty) {
                     Some(ids) if ids.len() == 1 => Some(ids[0]),
                     // same-name classes across apps: the caller file's import
@@ -435,7 +536,9 @@ pub fn build_with(
                     Some(ids) => narrow_class_by_import(caller, ty, &import_map, ids, &by_id),
                     _ => None,
                 })
-                .and_then(|type_cls| resolve_member(type_cls, &c.callee_name, &class_members, &class_parents))
+                .and_then(|type_cls| {
+                    resolve_member(type_cls, &c.callee_name, &class_members, &class_parents)
+                })
                 .map(|id| (id, "FieldTypeMember")),
             // `name.method()`: resolve `name`'s static type, then that type's method.
             // A local/param SHADOWS a field (correct lexical scoping); failing that,
@@ -453,19 +556,24 @@ pub fn build_with(
                 let via_field = c
                     .enclosing_class
                     .as_deref()
-                    .and_then(|cls| field_types.get(cls).and_then(|m| m.get(var.as_str())).copied())
+                    .and_then(|cls| {
+                        field_types
+                            .get(cls)
+                            .and_then(|m| m.get(var.as_str()))
+                            .copied()
+                    })
                     .map(|ty| (ty, "FieldTypeMember"));
                 via_local
                     .or(via_field)
                     .and_then(|(ty, tag)| match class_by_name.get(ty) {
                         Some(ids) if ids.len() == 1 => Some((ids[0], tag)),
-                        Some(ids) => {
-                            narrow_class_by_import(caller, ty, &import_map, ids, &by_id).map(|id| (id, tag))
-                        }
+                        Some(ids) => narrow_class_by_import(caller, ty, &import_map, ids, &by_id)
+                            .map(|id| (id, tag)),
                         _ => None,
                     })
                     .and_then(|(type_cls, tag)| {
-                        resolve_member(type_cls, &c.callee_name, &class_members, &class_parents).map(|id| (id, tag))
+                        resolve_member(type_cls, &c.callee_name, &class_members, &class_parents)
+                            .map(|id| (id, tag))
                     })
             }
             _ => None,
@@ -474,49 +582,61 @@ pub fn build_with(
             Some(cands) if cands.len() == 1 => Some(cands[0]),
             _ => None,
         };
-        let resolved: Option<(&str, &'static str)> = receiver_resolved.or_else(|| match &c.receiver {
-            // Unqualified `foo()`: a LOCAL BINDING (param/var named foo) shadows
-            // everything — calling through it must never bind a free function
-            // (audit-caught: a `call_next` param bound to another file's def).
-            // Otherwise: same-file first, then the file's imports (T6 — the
-            // import IS the evidence), then Go package scope, then global-unique.
-            Receiver::Bare => {
-                if local_types
-                    .get(c.caller_id.as_str())
-                    .and_then(|m| m.get(c.callee_name.as_str()))
-                    .is_some()
-                {
-                    return None;
-                }
-                fn_by_file_name
-                    .get(&(caller.file_path.as_str(), c.callee_name.as_str()))
-                    .copied()
-                    .map(|id| (id, "SameFileUnique"))
-                    .or_else(|| {
-                        resolve_via_import(caller, &c.callee_name, &import_map, &fn_by_file_name, &fn_by_name, &by_id)
+        let resolved: Option<(&str, &'static str)> =
+            receiver_resolved.or_else(|| match &c.receiver {
+                // Unqualified `foo()`: a LOCAL BINDING (param/var named foo) shadows
+                // everything — calling through it must never bind a free function
+                // (audit-caught: a `call_next` param bound to another file's def).
+                // Otherwise: same-file first, then the file's imports (T6 — the
+                // import IS the evidence), then Go package scope, then global-unique.
+                Receiver::Bare => {
+                    if local_types
+                        .get(c.caller_id.as_str())
+                        .and_then(|m| m.get(c.callee_name.as_str()))
+                        .is_some()
+                    {
+                        return None;
+                    }
+                    fn_by_file_name
+                        .get(&(caller.file_path.as_str(), c.callee_name.as_str()))
+                        .copied()
+                        .map(|id| (id, "SameFileUnique"))
+                        .or_else(|| {
+                            resolve_via_import(
+                                caller,
+                                &c.callee_name,
+                                &import_map,
+                                &fn_by_file_name,
+                                &fn_by_name,
+                                &by_id,
+                            )
                             .map(|id| (id, "ImportNarrowed"))
-                    })
-                    .or_else(|| {
-                        (caller.language == "go")
-                            .then(|| {
-                                let dir = caller.file_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-                                match fn_by_dir_name.get(&(dir, c.callee_name.as_str())) {
-                                    Some(ids) if ids.len() == 1 => Some(ids[0]),
-                                    _ => None,
-                                }
-                            })
-                            .flatten()
-                            .map(|id| (id, "PackageScope"))
-                    })
-                    .or_else(|| global_unique().map(|id| (id, "GlobalUnique")))
-            }
-            // Qualified call we couldn't type (named var / super / dropped self or
-            // field): the receiver's EXISTENCE is evidence the callee is a member
-            // of some (unknown) type — binding it to a repo-unique free function
-            // ignores that evidence. Audit measured this guess at 27% precision
-            // on a real Python repo (was tagged GlobalUnique). Drop, never guess.
-            _ => None,
-        });
+                        })
+                        .or_else(|| {
+                            (caller.language == "go")
+                                .then(|| {
+                                    let dir = caller
+                                        .file_path
+                                        .rsplit_once('/')
+                                        .map(|(d, _)| d)
+                                        .unwrap_or("");
+                                    match fn_by_dir_name.get(&(dir, c.callee_name.as_str())) {
+                                        Some(ids) if ids.len() == 1 => Some(ids[0]),
+                                        _ => None,
+                                    }
+                                })
+                                .flatten()
+                                .map(|id| (id, "PackageScope"))
+                        })
+                        .or_else(|| global_unique().map(|id| (id, "GlobalUnique")))
+                }
+                // Qualified call we couldn't type (named var / super / dropped self or
+                // field): the receiver's EXISTENCE is evidence the callee is a member
+                // of some (unknown) type — binding it to a repo-unique free function
+                // ignores that evidence. Audit measured this guess at 27% precision
+                // on a real Python repo (was tagged GlobalUnique). Drop, never guess.
+                _ => None,
+            });
         if let Some((callee_id, justification)) = resolved {
             if callee_id == c.caller_id {
                 continue;
@@ -536,30 +656,41 @@ pub fn build_with(
                 }
             }
             let mut metadata = Metadata::new();
-            metadata.insert("justification".to_string(), serde_json::Value::String(justification.to_string()));
-            push_edge(&mut edges, &mut seen, Edge {
-                src: c.caller_id.clone(),
-                dst: callee_id.to_string(),
-                relation: EdgeRelation::Calls,
-                tier: ResolutionTier::TreeSitter,
-                confidence: Confidence::Inferred,
-                src_file: caller.file_path.clone(),
-                src_line: c.line,
-                metadata: metadata.clone(),
-            });
-            // First-class TESTS edge: a RESOLVED call from a test file covers the
-            // callee (projection of Calls — same precision, no extra guessing).
-            if is_test_path(&caller.file_path) {
-                push_edge(&mut edges, &mut seen, Edge {
+            metadata.insert(
+                "justification".to_string(),
+                serde_json::Value::String(justification.to_string()),
+            );
+            push_edge(
+                &mut edges,
+                &mut seen,
+                Edge {
                     src: c.caller_id.clone(),
                     dst: callee_id.to_string(),
-                    relation: EdgeRelation::Tests,
+                    relation: EdgeRelation::Calls,
                     tier: ResolutionTier::TreeSitter,
                     confidence: Confidence::Inferred,
                     src_file: caller.file_path.clone(),
                     src_line: c.line,
-                    metadata,
-                });
+                    metadata: metadata.clone(),
+                },
+            );
+            // First-class TESTS edge: a RESOLVED call from a test file covers the
+            // callee (projection of Calls — same precision, no extra guessing).
+            if is_test_path(&caller.file_path) {
+                push_edge(
+                    &mut edges,
+                    &mut seen,
+                    Edge {
+                        src: c.caller_id.clone(),
+                        dst: callee_id.to_string(),
+                        relation: EdgeRelation::Tests,
+                        tier: ResolutionTier::TreeSitter,
+                        confidence: Confidence::Inferred,
+                        src_file: caller.file_path.clone(),
+                        src_line: c.line,
+                        metadata,
+                    },
+                );
             }
         } else if include_ambiguous {
             // Opt-in honest-recall tier: an unresolved call with a SMALL candidate
@@ -572,17 +703,24 @@ pub fn build_with(
                             continue;
                         }
                         let mut metadata = Metadata::new();
-                        metadata.insert("justification".to_string(), serde_json::Value::String("Ambiguous".to_string()));
-                        push_edge(&mut edges, &mut seen, Edge {
-                            src: c.caller_id.clone(),
-                            dst: cand.to_string(),
-                            relation: EdgeRelation::Calls,
-                            tier: ResolutionTier::TreeSitter,
-                            confidence: Confidence::Ambiguous,
-                            src_file: caller.file_path.clone(),
-                            src_line: c.line,
-                            metadata,
-                        });
+                        metadata.insert(
+                            "justification".to_string(),
+                            serde_json::Value::String("Ambiguous".to_string()),
+                        );
+                        push_edge(
+                            &mut edges,
+                            &mut seen,
+                            Edge {
+                                src: c.caller_id.clone(),
+                                dst: cand.to_string(),
+                                relation: EdgeRelation::Calls,
+                                tier: ResolutionTier::TreeSitter,
+                                confidence: Confidence::Ambiguous,
+                                src_file: caller.file_path.clone(),
+                                src_line: c.line,
+                                metadata,
+                            },
+                        );
                     }
                 }
             }
@@ -592,7 +730,10 @@ pub fn build_with(
     // Inheritance edges (resolved by unique project-wide name) + IMPLEMENTS hyperedges.
     let mut node_by_name: HashMap<&str, Vec<&str>> = HashMap::new();
     for n in nodes.iter().filter(|n| n.label != NodeLabel::File) {
-        node_by_name.entry(n.name.as_str()).or_default().push(n.id.as_str());
+        node_by_name
+            .entry(n.name.as_str())
+            .or_default()
+            .push(n.id.as_str());
     }
     let mut implementers: HashMap<&str, Vec<String>> = HashMap::new();
     for inh in inherits {
@@ -614,24 +755,36 @@ pub fn build_with(
         // implementers() must keep returning concrete types only.
         let imp_label = by_id.get(imp_id).map(|n| n.label);
         let relation = match (by_id.get(sup_id).map(|n| n.label), inh.kind) {
-            (Some(NodeLabel::Interface), _) if imp_label == Some(NodeLabel::Interface) => EdgeRelation::Inherits,
+            (Some(NodeLabel::Interface), _) if imp_label == Some(NodeLabel::Interface) => {
+                EdgeRelation::Inherits
+            }
             (Some(NodeLabel::Interface), _) => EdgeRelation::Implements,
             (Some(NodeLabel::Class), _) => EdgeRelation::Inherits,
             (_, InheritKind::Extends) => EdgeRelation::Inherits,
             (_, InheritKind::Implements) => EdgeRelation::Implements,
         };
-        push_edge(&mut edges, &mut seen, Edge {
-            src: imp_id.to_string(),
-            dst: sup_id.to_string(),
-            relation,
-            tier: ResolutionTier::TreeSitter,
-            confidence: Confidence::Extracted,
-            src_file: by_id.get(imp_id).map(|n| n.file_path.clone()).unwrap_or_default(),
-            src_line: by_id.get(imp_id).map(|n| n.line_start).unwrap_or(1),
-            metadata: Metadata::new(),
-        });
+        push_edge(
+            &mut edges,
+            &mut seen,
+            Edge {
+                src: imp_id.to_string(),
+                dst: sup_id.to_string(),
+                relation,
+                tier: ResolutionTier::TreeSitter,
+                confidence: Confidence::Extracted,
+                src_file: by_id
+                    .get(imp_id)
+                    .map(|n| n.file_path.clone())
+                    .unwrap_or_default(),
+                src_line: by_id.get(imp_id).map(|n| n.line_start).unwrap_or(1),
+                metadata: Metadata::new(),
+            },
+        );
         if relation == EdgeRelation::Implements {
-            implementers.entry(sup_id).or_default().push(imp_id.to_string());
+            implementers
+                .entry(sup_id)
+                .or_default()
+                .push(imp_id.to_string());
         }
     }
     let mut hyperedges: Vec<(Hyperedge, Vec<HyperedgeMember>)> = Vec::new();
@@ -654,9 +807,17 @@ pub fn build_with(
         };
         let mut members: Vec<HyperedgeMember> = impls
             .iter()
-            .map(|id| HyperedgeMember { hyperedge_id: hid.clone(), node_id: id.clone(), role: Some("implementer".to_string()) })
+            .map(|id| HyperedgeMember {
+                hyperedge_id: hid.clone(),
+                node_id: id.clone(),
+                role: Some("implementer".to_string()),
+            })
             .collect();
-        members.push(HyperedgeMember { hyperedge_id: hid.clone(), node_id: sup_id.to_string(), role: Some("interface".to_string()) });
+        members.push(HyperedgeMember {
+            hyperedge_id: hid.clone(),
+            node_id: sup_id.to_string(),
+            role: Some("interface".to_string()),
+        });
         hyperedges.push((h, members));
     }
 
@@ -671,14 +832,14 @@ pub fn build_with(
         }
     }
 
-    Built { graph, edges, hyperedges }
+    Built {
+        graph,
+        edges,
+        hyperedges,
+    }
 }
 
-fn push_edge(
-    edges: &mut Vec<Edge>,
-    seen: &mut HashSet<(String, String, EdgeRelation)>,
-    e: Edge,
-) {
+fn push_edge(edges: &mut Vec<Edge>, seen: &mut HashSet<(String, String, EdgeRelation)>, e: Edge) {
     let key = (e.src.clone(), e.dst.clone(), e.relation);
     if seen.insert(key) {
         edges.push(e);
@@ -692,19 +853,43 @@ mod tests {
 
     #[test]
     fn structural_and_call_edges() {
-        let pf = codegraph_parse::parse_rust("proj", "src/main.rs", "fn helper() {}\nfn main() { helper(); helper(); }\n");
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals, &pf.imports);
+        let pf = codegraph_parse::parse_rust(
+            "proj",
+            "src/main.rs",
+            "fn helper() {}\nfn main() { helper(); helper(); }\n",
+        );
+        let built = build(
+            &pf.nodes,
+            &pf.calls,
+            &pf.inherits,
+            &pf.fields,
+            &pf.locals,
+            &pf.imports,
+        );
 
-        let calls: Vec<_> = built.edges.iter().filter(|e| e.relation == EdgeRelation::Calls).collect();
+        let calls: Vec<_> = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls)
+            .collect();
         assert_eq!(calls.len(), 1, "duplicate calls should dedupe to one edge");
         assert!(calls[0].src.ends_with("main") && calls[0].dst.ends_with("helper"));
-        assert!(built.edges.iter().any(|e| e.relation == EdgeRelation::Defines));
+        assert!(built
+            .edges
+            .iter()
+            .any(|e| e.relation == EdgeRelation::Defines));
         assert_eq!(built.graph.node_count(), pf.nodes.len());
     }
 
     fn build_ts(files: &[(&str, &str)]) -> Built {
-        let (mut nodes, mut calls, mut inherits, mut fields, mut locals, mut imports) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut nodes, mut calls, mut inherits, mut fields, mut locals, mut imports) = (
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
         for (f, src) in files {
             let pf = codegraph_parse::parse_ts("p", f, src);
             nodes.extend(pf.nodes);
@@ -718,8 +903,14 @@ mod tests {
     }
 
     fn build_swift(files: &[(&str, &str)]) -> Built {
-        let (mut nodes, mut calls, mut inherits, mut fields, mut locals, mut imports) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut nodes, mut calls, mut inherits, mut fields, mut locals, mut imports) = (
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
         for (f, src) in files {
             let pf = codegraph_parse::parse_swift("p", f, src);
             nodes.extend(pf.nodes);
@@ -739,16 +930,32 @@ mod tests {
         let built = build_swift(&[
             ("home_vm.swift", "class HomeVM {\n  func fetch() {}\n}"),
             ("other_vm.swift", "class OtherVM {\n  func fetch() {}\n}"),
-            ("vc.swift", "class VC {\n  let vm: HomeVM\n  func go() { self.vm.fetch() }\n}"),
+            (
+                "vc.swift",
+                "class VC {\n  let vm: HomeVM\n  func go() { self.vm.fetch() }\n}",
+            ),
         ]);
         let fetch: Vec<_> = built
             .edges
             .iter()
             .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".fetch"))
             .collect();
-        assert_eq!(fetch.len(), 1, "self.vm.fetch() resolves to exactly one method");
-        assert!(fetch[0].dst.contains("home_vm"), "resolved to HomeVM.fetch, not OtherVM");
-        assert_eq!(fetch[0].metadata.get("justification").and_then(|v| v.as_str()), Some("FieldTypeMember"));
+        assert_eq!(
+            fetch.len(),
+            1,
+            "self.vm.fetch() resolves to exactly one method"
+        );
+        assert!(
+            fetch[0].dst.contains("home_vm"),
+            "resolved to HomeVM.fetch, not OtherVM"
+        );
+        assert_eq!(
+            fetch[0]
+                .metadata
+                .get("justification")
+                .and_then(|v| v.as_str()),
+            Some("FieldTypeMember")
+        );
     }
 
     /// The promom field-test shape: NestJS constructor-injected service whose
@@ -787,9 +994,23 @@ mod tests {
             .iter()
             .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".getuserprofile"))
             .collect();
-        assert_eq!(hits.len(), 1, "DI call must resolve despite the duplicate class name: {hits:?}");
-        assert!(hits[0].dst.contains("backend_app"), "import narrows to backend-app's ProfileService: {}", hits[0].dst);
-        assert_eq!(hits[0].metadata.get("justification").and_then(|v| v.as_str()), Some("FieldTypeMember"));
+        assert_eq!(
+            hits.len(),
+            1,
+            "DI call must resolve despite the duplicate class name: {hits:?}"
+        );
+        assert!(
+            hits[0].dst.contains("backend_app"),
+            "import narrows to backend-app's ProfileService: {}",
+            hits[0].dst
+        );
+        assert_eq!(
+            hits[0]
+                .metadata
+                .get("justification")
+                .and_then(|v| v.as_str()),
+            Some("FieldTypeMember")
+        );
     }
 
     #[test]
@@ -799,16 +1020,29 @@ mod tests {
         let built = build_swift(&[
             ("home_vm.swift", "class HomeVM {\n  func fetch() {}\n}"),
             ("other_vm.swift", "class OtherVM {\n  func fetch() {}\n}"),
-            ("vc.swift", "class VC {\n  let vm: HomeVM\n  func go() { vm.fetch() }\n}"),
+            (
+                "vc.swift",
+                "class VC {\n  let vm: HomeVM\n  func go() { vm.fetch() }\n}",
+            ),
         ]);
         let fetch: Vec<_> = built
             .edges
             .iter()
             .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".fetch"))
             .collect();
-        assert_eq!(fetch.len(), 1, "implicit-member vm.fetch() resolves to one method");
+        assert_eq!(
+            fetch.len(),
+            1,
+            "implicit-member vm.fetch() resolves to one method"
+        );
         assert!(fetch[0].dst.contains("home_vm"), "resolved to HomeVM.fetch");
-        assert_eq!(fetch[0].metadata.get("justification").and_then(|v| v.as_str()), Some("FieldTypeMember"));
+        assert_eq!(
+            fetch[0]
+                .metadata
+                .get("justification")
+                .and_then(|v| v.as_str()),
+            Some("FieldTypeMember")
+        );
     }
 
     #[test]
@@ -819,10 +1053,20 @@ mod tests {
         let built = build_swift(&[
             ("home_vm.swift", "class HomeVM {\n  func fetch() {}\n}"),
             ("other_vm.swift", "class OtherVM {\n  func fetch() {}\n}"),
-            ("vc.swift", "class VC {\n  let vms: [HomeVM]\n  func go() { self.vms.fetch() }\n}"),
+            (
+                "vc.swift",
+                "class VC {\n  let vms: [HomeVM]\n  func go() { self.vms.fetch() }\n}",
+            ),
         ]);
-        let n = built.edges.iter().filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".fetch")).count();
-        assert_eq!(n, 0, "array-typed field must not resolve an ambiguous call to the element type");
+        let n = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".fetch"))
+            .count();
+        assert_eq!(
+            n, 0,
+            "array-typed field must not resolve an ambiguous call to the element type"
+        );
     }
 
     #[test]
@@ -834,19 +1078,36 @@ mod tests {
             "src/two.ts",
             "class A { foo() { this.bar(); } bar() {} }\nclass B { bar() {} }",
         )]);
-        let pf = codegraph_parse::parse_ts("p", "src/two.ts", "class A { foo() { this.bar(); } bar() {} }\nclass B { bar() {} }");
+        let pf = codegraph_parse::parse_ts(
+            "p",
+            "src/two.ts",
+            "class A { foo() { this.bar(); } bar() {} }\nclass B { bar() {} }",
+        );
         let bars: Vec<_> = pf.nodes.iter().filter(|n| n.name == "bar").collect();
         assert_eq!(bars.len(), 2, "two distinct bar nodes");
         assert_ne!(bars[0].id, bars[1].id, "ids must differ (class-qualified)");
-        assert!(bars.iter().any(|n| n.id.contains(".a.")), "one nests under class a");
-        assert!(bars.iter().any(|n| n.id.contains(".b.")), "one nests under class b");
+        assert!(
+            bars.iter().any(|n| n.id.contains(".a.")),
+            "one nests under class a"
+        );
+        assert!(
+            bars.iter().any(|n| n.id.contains(".b.")),
+            "one nests under class b"
+        );
         let this_bar: Vec<_> = built
             .edges
             .iter()
             .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".bar"))
             .collect();
-        assert_eq!(this_bar.len(), 1, "this.bar() resolves to exactly one method");
-        assert!(this_bar[0].dst.contains(".a."), "resolved to A.bar, not B.bar");
+        assert_eq!(
+            this_bar.len(),
+            1,
+            "this.bar() resolves to exactly one method"
+        );
+        assert!(
+            this_bar[0].dst.contains(".a."),
+            "resolved to A.bar, not B.bar"
+        );
     }
 
     #[test]
@@ -863,9 +1124,22 @@ mod tests {
             .iter()
             .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".save"))
             .collect();
-        assert_eq!(save.len(), 1, "typed local r.save() resolves to exactly one method");
-        assert!(save[0].dst.contains("user_repo"), "resolved to UserRepo.save, not OtherRepo");
-        assert_eq!(save[0].metadata.get("justification").and_then(|v| v.as_str()), Some("LocalVarType"));
+        assert_eq!(
+            save.len(),
+            1,
+            "typed local r.save() resolves to exactly one method"
+        );
+        assert!(
+            save[0].dst.contains("user_repo"),
+            "resolved to UserRepo.save, not OtherRepo"
+        );
+        assert_eq!(
+            save[0]
+                .metadata
+                .get("justification")
+                .and_then(|v| v.as_str()),
+            Some("LocalVarType")
+        );
     }
 
     #[test]
@@ -884,7 +1158,6 @@ mod tests {
         assert_eq!(save, 0, "conflicting local types must drop, not guess");
     }
 
-
     #[test]
     fn t6_import_narrowed_resolves_ambiguous_cross_file() {
         // `save` is defined in TWO files (globally ambiguous). The caller imports it
@@ -892,16 +1165,29 @@ mod tests {
         let built = build_ts(&[
             ("src/a.ts", "export function save() {}"),
             ("src/b.ts", "export function save() {}"),
-            ("src/svc.ts", "import { save } from './a';\nexport function go() { save(); }"),
+            (
+                "src/svc.ts",
+                "import { save } from './a';\nexport function go() { save(); }",
+            ),
         ]);
         let hits: Vec<_> = built
             .edges
             .iter()
             .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".save"))
             .collect();
-        assert_eq!(hits.len(), 1, "import-narrowed call resolves to exactly one def");
+        assert_eq!(
+            hits.len(),
+            1,
+            "import-narrowed call resolves to exactly one def"
+        );
         assert!(hits[0].dst.contains(".a_ts."), "resolved to a.ts, not b.ts");
-        assert_eq!(hits[0].metadata.get("justification").and_then(|v| v.as_str()), Some("ImportNarrowed"));
+        assert_eq!(
+            hits[0]
+                .metadata
+                .get("justification")
+                .and_then(|v| v.as_str()),
+            Some("ImportNarrowed")
+        );
     }
 
     #[test]
@@ -912,7 +1198,11 @@ mod tests {
             ("src/b.ts", "export function save() {}"),
             ("src/svc.ts", "export function go() { save(); }"),
         ]);
-        let n = built.edges.iter().filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".save")).count();
+        let n = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".save"))
+            .count();
         assert_eq!(n, 0, "ambiguous without evidence must drop");
     }
 
@@ -922,15 +1212,36 @@ mod tests {
         // justification — the per-tier measurement + precision-audit surface.
         let built = build_ts(&[
             ("a.ts", "class A { foo() { this.bar(); } bar() {} }"),
-            ("b.ts", "class B { run() { helper(); } }\nfunction helper() {}"),
+            (
+                "b.ts",
+                "class B { run() { helper(); } }\nfunction helper() {}",
+            ),
         ]);
-        let call_edges: Vec<_> = built.edges.iter().filter(|e| e.relation == EdgeRelation::Calls).collect();
+        let call_edges: Vec<_> = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls)
+            .collect();
         assert!(!call_edges.is_empty());
         for e in &call_edges {
             let tag = e.metadata.get("justification").and_then(|v| v.as_str());
-            assert!(tag.is_some(), "CALLS edge {}->{} has no justification tag", e.src, e.dst);
             assert!(
-                ["SelfThisMember", "FieldTypeMember", "LocalVarType", "SameFileUnique", "ImportNarrowed", "PackageScope", "GlobalUnique"].contains(&tag.unwrap()),
+                tag.is_some(),
+                "CALLS edge {}->{} has no justification tag",
+                e.src,
+                e.dst
+            );
+            assert!(
+                [
+                    "SelfThisMember",
+                    "FieldTypeMember",
+                    "LocalVarType",
+                    "SameFileUnique",
+                    "ImportNarrowed",
+                    "PackageScope",
+                    "GlobalUnique"
+                ]
+                .contains(&tag.unwrap()),
                 "unexpected justification tag: {:?}",
                 tag
             );
@@ -942,7 +1253,10 @@ mod tests {
         // `save` is project-ambiguous (A.save + B.save); self.save() in A must
         // resolve to A.save via T1 (the receiver type IS the enclosing class).
         let built = build_swift(&[
-            ("a.swift", "class A {\n  func go() { self.save() }\n  func save() {}\n}"),
+            (
+                "a.swift",
+                "class A {\n  func go() { self.save() }\n  func save() {}\n}",
+            ),
             ("b.swift", "class B {\n  func save() {}\n}"),
         ]);
         let save: Vec<_> = built
@@ -951,7 +1265,10 @@ mod tests {
             .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".save"))
             .collect();
         assert_eq!(save.len(), 1, "self.save() resolves to exactly one method");
-        assert!(save[0].dst.contains("a_swift"), "must be A.save, not B.save");
+        assert!(
+            save[0].dst.contains("a_swift"),
+            "must be A.save, not B.save"
+        );
     }
 
     #[test]
@@ -959,7 +1276,10 @@ mod tests {
         // obj.save() with an ambiguous `save` must NOT resolve to a same-file
         // `save` — the receiver's type is unknown, so it drops (precision guard).
         let built = build_swift(&[
-            ("a.swift", "class A {\n  func go() { let obj = vm; obj.save() }\n  func save() {}\n}"),
+            (
+                "a.swift",
+                "class A {\n  func go() { let obj = vm; obj.save() }\n  func save() {}\n}",
+            ),
             ("b.swift", "class B {\n  func save() {}\n}"),
         ]);
         let save_edges = built
@@ -967,7 +1287,10 @@ mod tests {
             .iter()
             .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".save"))
             .count();
-        assert_eq!(save_edges, 0, "ambiguous qualified obj.save() must drop, not guess a same-file member");
+        assert_eq!(
+            save_edges, 0,
+            "ambiguous qualified obj.save() must drop, not guess a same-file member"
+        );
     }
 
     #[test]
@@ -977,7 +1300,10 @@ mod tests {
         // to a repo-unique method of an unrelated class is a guess. The audit
         // measured this exact pattern at 27% precision on a real repo. Drop.
         let built = build_swift(&[
-            ("a.swift", "class A {\n  func go() { let obj = repo; obj.persistUniquely() }\n}"),
+            (
+                "a.swift",
+                "class A {\n  func go() { let obj = repo; obj.persistUniquely() }\n}",
+            ),
             ("b.swift", "class B {\n  func persistUniquely() {}\n}"),
         ]);
         let resolved = built
@@ -985,7 +1311,10 @@ mod tests {
             .iter()
             .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".persistuniquely"))
             .count();
-        assert_eq!(resolved, 0, "unknown-receiver call must drop, never bind by name uniqueness");
+        assert_eq!(
+            resolved, 0,
+            "unknown-receiver call must drop, never bind by name uniqueness"
+        );
     }
 
     #[test]
@@ -993,7 +1322,10 @@ mod tests {
         // `call_next` is a PARAMETER of `handler` — calling it must not bind
         // the same-named free function defined elsewhere (audit-caught).
         let built = build_ts(&[
-            ("mw.ts", "export function handler(call_next: Handler) { call_next(); }"),
+            (
+                "mw.ts",
+                "export function handler(call_next: Handler) { call_next(); }",
+            ),
             ("other.ts", "export function call_next() {}"),
         ]);
         let bound = built
@@ -1001,7 +1333,10 @@ mod tests {
             .iter()
             .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".call_next"))
             .count();
-        assert_eq!(bound, 0, "a locally-bound name must never resolve to a free function");
+        assert_eq!(
+            bound, 0,
+            "a locally-bound name must never resolve to a free function"
+        );
     }
 
     #[test]
@@ -1020,7 +1355,10 @@ mod tests {
             .collect();
         assert_eq!(bar_calls.len(), 1, "exactly one resolved bar call");
         assert!(bar_calls[0].src.ends_with(".foo"));
-        assert!(bar_calls[0].dst.contains("base"), "resolved to Base.bar, not Other.bar");
+        assert!(
+            bar_calls[0].dst.contains("base"),
+            "resolved to Base.bar, not Other.bar"
+        );
     }
 
     #[test]
@@ -1037,7 +1375,10 @@ mod tests {
             .iter()
             .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".widget"))
             .count();
-        assert_eq!(widget_calls, 0, "ambiguous self-call must not produce a phantom edge");
+        assert_eq!(
+            widget_calls, 0,
+            "ambiguous self-call must not produce a phantom edge"
+        );
     }
 
     #[test]
@@ -1056,7 +1397,10 @@ mod tests {
             .collect();
         assert_eq!(find_calls.len(), 1, "exactly one resolved find call");
         assert!(find_calls[0].src.ends_with(".go"));
-        assert!(find_calls[0].dst.contains("user_service"), "resolved to UserService.find, not OtherService");
+        assert!(
+            find_calls[0].dst.contains("user_service"),
+            "resolved to UserService.find, not OtherService"
+        );
     }
 
     #[test]
@@ -1082,17 +1426,42 @@ mod tests {
             "p", "a.ts",
             "interface Repo {}\nclass SqlRepo implements Repo {}\nclass MemRepo implements Repo {}\n",
         );
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals, &pf.imports);
-        assert!(built.edges.iter().any(|e| e.relation == EdgeRelation::Implements));
-        let he = built.hyperedges.iter().find(|(h, _)| h.label.contains("Repo")).expect("hyperedge");
+        let built = build(
+            &pf.nodes,
+            &pf.calls,
+            &pf.inherits,
+            &pf.fields,
+            &pf.locals,
+            &pf.imports,
+        );
+        assert!(built
+            .edges
+            .iter()
+            .any(|e| e.relation == EdgeRelation::Implements));
+        let he = built
+            .hyperedges
+            .iter()
+            .find(|(h, _)| h.label.contains("Repo"))
+            .expect("hyperedge");
         // 2 implementers + the interface = 3 members
         assert_eq!(he.1.len(), 3);
     }
 
     #[test]
     fn end_to_end_persist_and_query() {
-        let pf = codegraph_parse::parse_rust("proj", "src/main.rs", "fn helper() {}\nfn main() { helper(); }\n");
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals, &pf.imports);
+        let pf = codegraph_parse::parse_rust(
+            "proj",
+            "src/main.rs",
+            "fn helper() {}\nfn main() { helper(); }\n",
+        );
+        let built = build(
+            &pf.nodes,
+            &pf.calls,
+            &pf.inherits,
+            &pf.fields,
+            &pf.locals,
+            &pf.imports,
+        );
         let store = Store::open_in_memory().unwrap();
         for n in &pf.nodes {
             store.upsert_node(n).unwrap();
@@ -1100,9 +1469,17 @@ mod tests {
         for e in &built.edges {
             store.upsert_edge(e).unwrap();
         }
-        let main_id = pf.nodes.iter().find(|n| n.name == "main").unwrap().id.clone();
+        let main_id = pf
+            .nodes
+            .iter()
+            .find(|n| n.name == "main")
+            .unwrap()
+            .id
+            .clone();
         let edges = store.get_edges_for_node(&main_id).unwrap();
-        assert!(edges.iter().any(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with("helper")));
+        assert!(edges
+            .iter()
+            .any(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with("helper")));
     }
 
     #[test]
@@ -1112,9 +1489,17 @@ mod tests {
         let other = codegraph_parse::parse_rust("proj", "b.rs", "fn ghost() {}\n");
         pf.nodes.extend(other.nodes);
         pf.calls.extend(other.calls);
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals, &pf.imports);
+        let built = build(
+            &pf.nodes,
+            &pf.calls,
+            &pf.inherits,
+            &pf.fields,
+            &pf.locals,
+            &pf.imports,
+        );
         assert!(built.edges.iter().any(|e| e.relation == EdgeRelation::Calls
-            && e.src.ends_with(".main") && e.dst.ends_with(".ghost")));
+            && e.src.ends_with(".main")
+            && e.dst.ends_with(".ghost")));
     }
 
     #[test]
@@ -1126,8 +1511,18 @@ mod tests {
         a.nodes.extend(b.nodes);
         a.nodes.extend(c.nodes);
         a.calls.extend(c.calls);
-        let built = build(&a.nodes, &a.calls, &a.inherits, &a.fields, &a.locals, &a.imports);
-        assert!(!built.edges.iter().any(|e| e.relation == EdgeRelation::Calls));
+        let built = build(
+            &a.nodes,
+            &a.calls,
+            &a.inherits,
+            &a.fields,
+            &a.locals,
+            &a.imports,
+        );
+        assert!(!built
+            .edges
+            .iter()
+            .any(|e| e.relation == EdgeRelation::Calls));
     }
 }
 
@@ -1173,19 +1568,28 @@ impl LoadedGraph {
     pub fn shortest_path(&self, from: &str, to: &str) -> Option<Vec<String>> {
         let (s, g) = (*self.idx.get(from)?, *self.idx.get(to)?);
         let (_, path) = petgraph::algo::astar(&self.graph, s, |n| n == g, |_| 1, |_| 0)?;
-        Some(path.into_iter().map(|ni| self.ids[ni.index()].clone()).collect())
+        Some(
+            path.into_iter()
+                .map(|ni| self.ids[ni.index()].clone())
+                .collect(),
+        )
     }
 
     /// Reverse reachability (who depends on `target`) up to `max_depth` hops.
     pub fn blast_radius(&self, target: &str, max_depth: usize) -> Vec<String> {
-        let Some(&start) = self.idx.get(target) else { return Vec::new() };
+        let Some(&start) = self.idx.get(target) else {
+            return Vec::new();
+        };
         let mut visited: HashSet<_> = HashSet::from([start]);
         let mut frontier = vec![start];
         let mut out = Vec::new();
         for _ in 0..max_depth {
             let mut next = Vec::new();
             for &n in &frontier {
-                for pred in self.graph.neighbors_directed(n, petgraph::Direction::Incoming) {
+                for pred in self
+                    .graph
+                    .neighbors_directed(n, petgraph::Direction::Incoming)
+                {
                     if visited.insert(pred) {
                         next.push(pred);
                         out.push(self.ids[pred.index()].clone());
@@ -1200,18 +1604,23 @@ impl LoadedGraph {
         out
     }
 
-
     /// Forward reachability over CALLS edges from `start` (the flow body).
     pub fn flow_from(&self, start: &str, max_depth: usize) -> Vec<String> {
         use petgraph::visit::EdgeRef;
-        let Some(&s) = self.idx.get(start) else { return Vec::new() };
+        let Some(&s) = self.idx.get(start) else {
+            return Vec::new();
+        };
         let mut visited: HashSet<_> = HashSet::from([s]);
         let mut frontier = vec![s];
         let mut out = Vec::new();
         for _ in 0..max_depth {
             let mut next = Vec::new();
             for &n in &frontier {
-                for e in self.graph.edges(n).filter(|e| *e.weight() == EdgeRelation::Calls) {
+                for e in self
+                    .graph
+                    .edges(n)
+                    .filter(|e| *e.weight() == EdgeRelation::Calls)
+                {
                     let t = e.target();
                     if visited.insert(t) {
                         next.push(t);
@@ -1230,7 +1639,9 @@ impl LoadedGraph {
     /// Direct callees (outgoing CALLS edges) of a node id.
     pub fn callees(&self, of: &str) -> Vec<String> {
         use petgraph::visit::EdgeRef;
-        let Some(&n) = self.idx.get(of) else { return Vec::new() };
+        let Some(&n) = self.idx.get(of) else {
+            return Vec::new();
+        };
         self.graph
             .edges(n)
             .filter(|e| *e.weight() == EdgeRelation::Calls)
@@ -1244,7 +1655,10 @@ impl LoadedGraph {
     /// symbols structurally closest to what the query is about — using real resolved
     /// edges, not aider's name-match. Deterministic (fixed iterations, no RNG).
     pub fn personalized_pagerank_top(&self, seed_ids: &[String], k: usize) -> Vec<(String, f64)> {
-        let seeds: Vec<usize> = seed_ids.iter().filter_map(|id| self.idx.get(id).map(|ni| ni.index())).collect();
+        let seeds: Vec<usize> = seed_ids
+            .iter()
+            .filter_map(|id| self.idx.get(id).map(|ni| ni.index()))
+            .collect();
         let ranks = self.personalized_page_rank(&seeds);
         let mut scored: Vec<(String, f64)> = self
             .ids
@@ -1252,7 +1666,11 @@ impl LoadedGraph {
             .enumerate()
             .map(|(i, id)| (id.clone(), ranks.get(i).copied().unwrap_or(0.0)))
             .collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
         scored.truncate(k);
         scored
     }
@@ -1317,7 +1735,9 @@ impl LoadedGraph {
             .map(|(i, id)| (id.clone(), ranks.get(i).copied().unwrap_or(0.0)))
             .collect();
         scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
         });
         scored.truncate(k);
         scored
@@ -1332,7 +1752,11 @@ impl LoadedGraph {
             .filter(|n| {
                 matches!(
                     n.label,
-                    NodeLabel::Function | NodeLabel::Method | NodeLabel::Class | NodeLabel::Interface | NodeLabel::Route
+                    NodeLabel::Function
+                        | NodeLabel::Method
+                        | NodeLabel::Class
+                        | NodeLabel::Interface
+                        | NodeLabel::Route
                 )
             })
             .map(|n| (n.id.as_str(), ()))
@@ -1355,11 +1779,16 @@ impl LoadedGraph {
                     .edges_directed(ni, petgraph::Direction::Outgoing)
                     .filter(|e| *e.weight() == EdgeRelation::Calls)
                     .count() as u32;
-                (id.clone(), hub_score(ranks.get(i).copied().unwrap_or(0.0), fan_in, fan_out))
+                (
+                    id.clone(),
+                    hub_score(ranks.get(i).copied().unwrap_or(0.0), fan_in, fan_out),
+                )
             })
             .collect();
         scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
         });
         scored.truncate(k);
         scored
@@ -1457,10 +1886,13 @@ impl LoadedGraph {
                         *k_in.entry(comm[u]).or_default() += 1.0;
                     }
                     let mut best_c = cv;
-                    let mut best_gain = k_in.get(&cv).copied().unwrap_or(0.0) - deg[v] * sigma_tot[cv] / m2;
+                    let mut best_gain =
+                        k_in.get(&cv).copied().unwrap_or(0.0) - deg[v] * sigma_tot[cv] / m2;
                     for (&c, &kin) in &k_in {
                         let gain = kin - deg[v] * sigma_tot[c] / m2;
-                        if gain > best_gain + 1e-12 || ((gain - best_gain).abs() <= 1e-12 && c < best_c) {
+                        if gain > best_gain + 1e-12
+                            || ((gain - best_gain).abs() <= 1e-12 && c < best_c)
+                        {
                             best_gain = gain;
                             best_c = c;
                         }
@@ -1573,7 +2005,14 @@ mod traversal_tests {
             "src/lib.rs",
             "fn a() { b(); }\nfn b() { c(); }\nfn c() {}\nfn lonely() {}\n",
         );
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals, &pf.imports);
+        let built = build(
+            &pf.nodes,
+            &pf.calls,
+            &pf.inherits,
+            &pf.fields,
+            &pf.locals,
+            &pf.imports,
+        );
         (pf.nodes, built.edges)
     }
 
@@ -1596,44 +2035,102 @@ mod traversal_tests {
     fn communities_and_betweenness() {
         use codegraph_core::{Confidence, EdgeRelation, Metadata, NodeLabel, ResolutionTier};
         let mk_n = |x: &str| Node {
-            id: x.into(), label: NodeLabel::Function, name: x.into(), file_path: "f".into(),
-            line_start: 1, line_end: 1, language: "rust".into(), metadata: Metadata::new(),
-            community: None, pagerank: 0.0, betweenness: 0.0,
+            id: x.into(),
+            label: NodeLabel::Function,
+            name: x.into(),
+            file_path: "f".into(),
+            line_start: 1,
+            line_end: 1,
+            language: "rust".into(),
+            metadata: Metadata::new(),
+            community: None,
+            pagerank: 0.0,
+            betweenness: 0.0,
         };
-        let nodes: Vec<Node> = ["a", "b", "c", "d", "e", "f"].iter().map(|x| mk_n(x)).collect();
+        let nodes: Vec<Node> = ["a", "b", "c", "d", "e", "f"]
+            .iter()
+            .map(|x| mk_n(x))
+            .collect();
         let mk_e = |s: &str, d: &str| Edge {
-            src: s.into(), dst: d.into(), relation: EdgeRelation::Calls, tier: ResolutionTier::TreeSitter,
-            confidence: Confidence::Inferred, src_file: "f".into(), src_line: 1, metadata: Metadata::new(),
+            src: s.into(),
+            dst: d.into(),
+            relation: EdgeRelation::Calls,
+            tier: ResolutionTier::TreeSitter,
+            confidence: Confidence::Inferred,
+            src_file: "f".into(),
+            src_line: 1,
+            metadata: Metadata::new(),
         };
         // two triangles {a,b,c} and {d,e,f} bridged by c->d
-        let edges = vec![mk_e("a","b"), mk_e("b","c"), mk_e("c","a"), mk_e("c","d"), mk_e("d","e"), mk_e("e","f"), mk_e("f","d")];
+        let edges = vec![
+            mk_e("a", "b"),
+            mk_e("b", "c"),
+            mk_e("c", "a"),
+            mk_e("c", "d"),
+            mk_e("d", "e"),
+            mk_e("e", "f"),
+            mk_e("f", "d"),
+        ];
         let lg = LoadedGraph::load(&nodes, &edges);
         let a = lg.analyze();
         let comms: std::collections::HashSet<u32> = a.values().map(|v| v.0).collect();
         assert!(comms.len() >= 2, "expected at least two communities");
-        assert!(a["c"].2 > 0.0 || a["d"].2 > 0.0, "bridge node should have betweenness");
+        assert!(
+            a["c"].2 > 0.0 || a["d"].2 > 0.0,
+            "bridge node should have betweenness"
+        );
     }
 
     #[test]
     fn personalized_pagerank_localizes_and_is_deterministic() {
         let mk_n = |x: &str| Node {
-            id: x.into(), label: NodeLabel::Function, name: x.into(), file_path: "f".into(),
-            line_start: 1, line_end: 1, language: "rust".into(), metadata: Metadata::new(),
-            community: None, pagerank: 0.0, betweenness: 0.0,
+            id: x.into(),
+            label: NodeLabel::Function,
+            name: x.into(),
+            file_path: "f".into(),
+            line_start: 1,
+            line_end: 1,
+            language: "rust".into(),
+            metadata: Metadata::new(),
+            community: None,
+            pagerank: 0.0,
+            betweenness: 0.0,
         };
         let mk_e = |s: &str, d: &str| Edge {
-            src: s.into(), dst: d.into(), relation: EdgeRelation::Calls, tier: ResolutionTier::TreeSitter,
-            confidence: Confidence::Inferred, src_file: "f".into(), src_line: 1, metadata: Metadata::new(),
+            src: s.into(),
+            dst: d.into(),
+            relation: EdgeRelation::Calls,
+            tier: ResolutionTier::TreeSitter,
+            confidence: Confidence::Inferred,
+            src_file: "f".into(),
+            src_line: 1,
+            metadata: Metadata::new(),
         };
         // two disconnected components: a->b->c and x->y->z
-        let nodes: Vec<Node> = ["a", "b", "c", "x", "y", "z"].iter().map(|s| mk_n(s)).collect();
-        let edges = vec![mk_e("a", "b"), mk_e("b", "c"), mk_e("x", "y"), mk_e("y", "z")];
+        let nodes: Vec<Node> = ["a", "b", "c", "x", "y", "z"]
+            .iter()
+            .map(|s| mk_n(s))
+            .collect();
+        let edges = vec![
+            mk_e("a", "b"),
+            mk_e("b", "c"),
+            mk_e("x", "y"),
+            mk_e("y", "z"),
+        ];
         let lg = LoadedGraph::load(&nodes, &edges);
         let top = lg.personalized_pagerank_top(&["a".to_string()], 6);
-        let score = |id: &str| top.iter().find(|(i, _)| i == id).map(|(_, s)| *s).unwrap_or(0.0);
+        let score = |id: &str| {
+            top.iter()
+                .find(|(i, _)| i == id)
+                .map(|(_, s)| *s)
+                .unwrap_or(0.0)
+        };
         // seeding at `a` must rank its reachable component above the disconnected one
         assert!(score("a") > score("x"), "seed outranks unrelated node");
-        assert!(score("b") > score("z"), "seed's reachable neighbor outranks unrelated node");
+        assert!(
+            score("b") > score("z"),
+            "seed's reachable neighbor outranks unrelated node"
+        );
         // determinism: identical seeds → bit-identical ranking
         assert_eq!(top, lg.personalized_pagerank_top(&["a".to_string()], 6));
     }
@@ -1649,8 +2146,16 @@ mod traversal_tests {
         for (id, va) in &a {
             let vb = b.get(id).expect("same node set");
             assert_eq!(va.0, vb.0, "community id must be stable for {id}");
-            assert_eq!(va.1.to_bits(), vb.1.to_bits(), "pagerank must be bit-identical for {id}");
-            assert_eq!(va.2.to_bits(), vb.2.to_bits(), "betweenness must be bit-identical for {id}");
+            assert_eq!(
+                va.1.to_bits(),
+                vb.1.to_bits(),
+                "pagerank must be bit-identical for {id}"
+            );
+            assert_eq!(
+                va.2.to_bits(),
+                vb.2.to_bits(),
+                "betweenness must be bit-identical for {id}"
+            );
         }
     }
 

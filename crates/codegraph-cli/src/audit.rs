@@ -56,10 +56,14 @@ pub fn run(root: &Path, sample: usize, seed: u64, json_out: bool) -> Result<()> 
     let nodes = store.graph_nodes()?;
     // Which languages the oracle actually covers — precision is only measured
     // THERE; tiers whose language the oracle never saw stay `unverifiable`.
-    let lang_of: HashMap<&str, &str> =
-        nodes.iter().map(|n| (n.id.as_str(), n.language.as_str())).collect();
-    let mut oracle_langs: Vec<&str> =
-        covered_srcs.iter().filter_map(|s| lang_of.get(s).copied()).collect();
+    let lang_of: HashMap<&str, &str> = nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.language.as_str()))
+        .collect();
+    let mut oracle_langs: Vec<&str> = covered_srcs
+        .iter()
+        .filter_map(|s| lang_of.get(s).copied())
+        .collect();
     oracle_langs.sort_unstable();
     oracle_langs.dedup();
     let oracle_langs: Vec<String> = oracle_langs.into_iter().map(String::from).collect();
@@ -136,8 +140,9 @@ pub fn run(root: &Path, sample: usize, seed: u64, json_out: bool) -> Result<()> 
             )
         })
         .collect();
-    let (checked, confirmed): (usize, usize) =
-        tiers.values().fold((0, 0), |(c, k), t| (c + t.checked, k + t.confirmed));
+    let (checked, confirmed): (usize, usize) = tiers
+        .values()
+        .fold((0, 0), |(c, k), t| (c + t.checked, k + t.confirmed));
     let result = serde_json::json!({
         "oracle_edges": oracle.len(),
         "oracle_languages": oracle_langs,
@@ -164,10 +169,20 @@ pub fn run(root: &Path, sample: usize, seed: u64, json_out: bool) -> Result<()> 
         take
     );
     println!("# LOWER BOUND on oracle-covered code; tiers with checked=0 are not verified by this oracle\n");
-    println!("{:<20} {:>8} {:>10} {:>13} {:>10}", "tier", "checked", "confirmed", "unverifiable", "precision");
+    println!(
+        "{:<20} {:>8} {:>10} {:>13} {:>10}",
+        "tier", "checked", "confirmed", "unverifiable", "precision"
+    );
     for (j, t) in &tiers {
-        let p = if t.checked > 0 { format!("{:.1}%", t.confirmed as f64 * 100.0 / t.checked as f64) } else { "—".into() };
-        println!("{j:<20} {:>8} {:>10} {:>13} {:>10}", t.checked, t.confirmed, t.unverifiable, p);
+        let p = if t.checked > 0 {
+            format!("{:.1}%", t.confirmed as f64 * 100.0 / t.checked as f64)
+        } else {
+            "—".into()
+        };
+        println!(
+            "{j:<20} {:>8} {:>10} {:>13} {:>10}",
+            t.checked, t.confirmed, t.unverifiable, p
+        );
     }
     if checked > 0 {
         println!("\noverall: {confirmed}/{checked} = {:.1}%  (stored in meta `audit_result`; shown in MCP stats + report)", confirmed as f64 * 100.0 / checked as f64);

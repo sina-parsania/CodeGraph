@@ -27,13 +27,21 @@ fn meta_u64(n: &Node, key: &str) -> u64 {
 fn is_ranked_symbol(n: &Node) -> bool {
     matches!(
         n.label,
-        NodeLabel::Function | NodeLabel::Method | NodeLabel::Class | NodeLabel::Interface | NodeLabel::Route
+        NodeLabel::Function
+            | NodeLabel::Method
+            | NodeLabel::Class
+            | NodeLabel::Interface
+            | NodeLabel::Route
     )
 }
 
 /// Hub score from the persisted analytics (same formula as `important`).
 fn damped(n: &Node) -> f64 {
-    codegraph_graph::hub_score(n.pagerank, meta_u64(n, "fan_in") as u32, meta_u64(n, "fan_out") as u32)
+    codegraph_graph::hub_score(
+        n.pagerank,
+        meta_u64(n, "fan_in") as u32,
+        meta_u64(n, "fan_out") as u32,
+    )
 }
 
 /// Most common `a/b` directory prefix of a set of nodes — the human name for a
@@ -94,18 +102,34 @@ pub fn report(root: &Path, db: &Path) -> Result<String> {
         *by_rel.entry(format!("{:?}", e.relation)).or_default() += 1;
     }
     w("## Overview".into());
-    w(format!("- **{} nodes**, **{} edges**", nodes.len(), edges.len()));
+    w(format!(
+        "- **{} nodes**, **{} edges**",
+        nodes.len(),
+        edges.len()
+    ));
     w(format!(
         "- nodes by kind: {}",
-        by_label.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(" · ")
+        by_label
+            .iter()
+            .map(|(k, v)| format!("{k} {v}"))
+            .collect::<Vec<_>>()
+            .join(" · ")
     ));
     w(format!(
         "- edges by relation: {}",
-        by_rel.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(" · ")
+        by_rel
+            .iter()
+            .map(|(k, v)| format!("{k} {v}"))
+            .collect::<Vec<_>>()
+            .join(" · ")
     ));
     w(format!(
         "- languages: {}",
-        by_lang.iter().map(|(k, v)| format!("{k} ({v})")).collect::<Vec<_>>().join(", ")
+        by_lang
+            .iter()
+            .map(|(k, v)| format!("{k} ({v})"))
+            .collect::<Vec<_>>()
+            .join(", ")
     ));
 
     // ---- resolution quality ----
@@ -116,7 +140,10 @@ pub fn report(root: &Path, db: &Path) -> Result<String> {
     // against a site denominator could exceed 100%.
     let resolved_calls = edges
         .iter()
-        .filter(|e| e.relation == EdgeRelation::Calls && e.confidence != codegraph_core::Confidence::Ambiguous)
+        .filter(|e| {
+            e.relation == EdgeRelation::Calls
+                && e.confidence != codegraph_core::Confidence::Ambiguous
+        })
         .count();
     w("\n## Call-resolution quality".into());
     if internal_calls > 0 {
@@ -154,7 +181,10 @@ pub fn report(root: &Path, db: &Path) -> Result<String> {
                     if langs.is_empty() { "?".into() } else { langs.join(", ") }
                 ));
             }
-            let audited_gen = audit.get("generation").and_then(|g| g.as_u64()).unwrap_or(0);
+            let audited_gen = audit
+                .get("generation")
+                .and_then(|g| g.as_u64())
+                .unwrap_or(0);
             let current_gen = codegraph_store::generation(db);
             if audited_gen < current_gen {
                 w(format!(
@@ -177,11 +207,17 @@ pub fn report(root: &Path, db: &Path) -> Result<String> {
                     ));
                 }
             }
-            if let Some(overall) = audit.get("overall").and_then(|o| o.get("precision")).and_then(|p| p.as_f64()) {
-                w(format!("- overall: **{:.1}%** (sampled {} edges, seed {})",
+            if let Some(overall) = audit
+                .get("overall")
+                .and_then(|o| o.get("precision"))
+                .and_then(|p| p.as_f64())
+            {
+                w(format!(
+                    "- overall: **{:.1}%** (sampled {} edges, seed {})",
                     overall * 100.0,
                     audit.get("sampled").and_then(|v| v.as_u64()).unwrap_or(0),
-                    audit.get("seed").and_then(|v| v.as_u64()).unwrap_or(0)));
+                    audit.get("seed").and_then(|v| v.as_u64()).unwrap_or(0)
+                ));
             }
         }
     }
@@ -195,11 +231,20 @@ pub fn report(root: &Path, db: &Path) -> Result<String> {
         .filter(|n| is_ranked_symbol(n))
         .map(|n| (n, damped(n)))
         .collect();
-    central.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.id.cmp(&b.0.id)));
+    central.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.id.cmp(&b.0.id))
+    });
     for (n, _) in central.iter().take(15) {
         w(format!(
             "| `{}` | {:?} | {}:{} | {} | {} |",
-            n.name, n.label, n.file_path, n.line_start, meta_u64(n, "fan_in"), meta_u64(n, "fan_out")
+            n.name,
+            n.label,
+            n.file_path,
+            n.line_start,
+            meta_u64(n, "fan_in"),
+            meta_u64(n, "fan_out")
         ));
     }
 
@@ -218,8 +263,11 @@ pub fn report(root: &Path, db: &Path) -> Result<String> {
         let tested = store.has_test_reference(&n.name).unwrap_or(false);
         w(format!(
             "| `{}` | {}:{} | {} | {} | {} |",
-            n.name, n.file_path, n.line_start,
-            meta_u64(n, "fan_in"), meta_u64(n, "complexity"),
+            n.name,
+            n.file_path,
+            n.line_start,
+            meta_u64(n, "fan_in"),
+            meta_u64(n, "complexity"),
             if tested { "yes" } else { "**NO**" }
         ));
     }
@@ -238,10 +286,21 @@ pub fn report(root: &Path, db: &Path) -> Result<String> {
         // Key symbols: real ranked symbols under the same sink damping as
         // `important` — a community keyed by its most-called leaf helper says
         // nothing about what the cluster does.
-        let mut top: Vec<(&&Node, f64)> =
-            members.iter().filter(|n| is_ranked_symbol(n)).map(|n| (n, damped(n))).collect();
-        top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.id.cmp(&b.0.id)));
-        let names: Vec<String> = top.iter().take(3).map(|(n, _)| format!("`{}`", n.name)).collect();
+        let mut top: Vec<(&&Node, f64)> = members
+            .iter()
+            .filter(|n| is_ranked_symbol(n))
+            .map(|n| (n, damped(n)))
+            .collect();
+        top.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.id.cmp(&b.0.id))
+        });
+        let names: Vec<String> = top
+            .iter()
+            .take(3)
+            .map(|(n, _)| format!("`{}`", n.name))
+            .collect();
         w(format!(
             "- **{}** — {} symbols (community {cid}); key: {}",
             dominant_prefix(members),
@@ -265,10 +324,19 @@ pub fn report(root: &Path, db: &Path) -> Result<String> {
                 .filter_map(|id| nodes.iter().find(|x| &x.id == id))
                 .map(|x| x.pagerank)
                 .sum();
-            Some((codegraph_core::display_label(n), *kind, body.len(), by_id * (1.0 + body.len() as f64).ln()))
+            Some((
+                codegraph_core::display_label(n),
+                *kind,
+                body.len(),
+                by_id * (1.0 + body.len() as f64).ln(),
+            ))
         })
         .collect();
-    flows.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+    flows.sort_by(|a, b| {
+        b.3.partial_cmp(&a.3)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
     if !flows.is_empty() {
         w("\n## Critical execution flows (entry points by reach × centrality)".into());
         for (label, kind, reach, _) in flows.iter().take(10) {
@@ -285,7 +353,10 @@ pub fn report(root: &Path, db: &Path) -> Result<String> {
             w(format!("- `{}` — {}:{}", r.name, r.file_path, r.line_start));
         }
         if routes.len() > 20 {
-            w(format!("- … and {} more (`codegraph routes`)", routes.len() - 20));
+            w(format!(
+                "- … and {} more (`codegraph routes`)",
+                routes.len() - 20
+            ));
         }
     }
 
@@ -340,7 +411,16 @@ struct BhCell {
 
 impl BhCell {
     fn empty(x: f32, y: f32, half: f32) -> Self {
-        BhCell { x, y, half, cx: 0.0, cy: 0.0, mass: 0.0, child: [-1; 4], point: -1 }
+        BhCell {
+            x,
+            y,
+            half,
+            cx: 0.0,
+            cy: 0.0,
+            mass: 0.0,
+            child: [-1; 4],
+            point: -1,
+        }
     }
     fn quadrant(&self, px: f32, py: f32) -> usize {
         (if px >= self.x { 1 } else { 0 }) | (if py >= self.y { 2 } else { 0 })
@@ -384,7 +464,14 @@ fn bh_place(arena: &mut Vec<BhCell>, cell: usize, p: usize, pos: &[(f32, f32)]) 
 
 /// Repulsion on point `p` from the tree, Barnes-Hut approximation (theta²=0.81).
 /// `strength` = k²·alpha (ideal-length² × cooling); force = strength·mass/d².
-fn bh_force(arena: &[BhCell], cell: usize, p: usize, pos: &[(f32, f32)], strength: f32, acc: &mut (f32, f32)) {
+fn bh_force(
+    arena: &[BhCell],
+    cell: usize,
+    p: usize,
+    pos: &[(f32, f32)],
+    strength: f32,
+    acc: &mut (f32, f32),
+) {
     let c = &arena[cell];
     if c.mass == 0.0 {
         return;
@@ -427,8 +514,8 @@ fn layout(n: usize, edges: &[[usize; 3]], comm: &[usize], n_slots: usize) -> Vec
         return Vec::new();
     }
     let _ = (comm, n_slots); // community drives COLOR, not position — layout is pure force
-    // Fruchterman-Reingold style: repulsion between all nodes (Barnes-Hut),
-    // attraction along edges, gentle centering to keep the drawing framed.
+                             // Fruchterman-Reingold style: repulsion between all nodes (Barnes-Hut),
+                             // attraction along edges, gentle centering to keep the drawing framed.
     let k = 90.0f32; // ideal edge length
     let mut pos: Vec<(f32, f32)> = (0..n)
         .map(|i| {
@@ -505,19 +592,33 @@ pub fn html(root: &Path, db: &Path, limit: usize) -> Result<String> {
     // `limit == 0` renders the WHOLE graph (grid-bucketed force sim handles it);
     // otherwise the top `limit` symbols by PageRank — a graph a human can read.
     let mut picked: Vec<&Node> = all.iter().filter(|n| is_symbol(n)).collect();
-    picked.sort_by(|a, b| b.pagerank.partial_cmp(&a.pagerank).unwrap_or(std::cmp::Ordering::Equal).then(a.id.cmp(&b.id)));
+    picked.sort_by(|a, b| {
+        b.pagerank
+            .partial_cmp(&a.pagerank)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.id.cmp(&b.id))
+    });
     if limit > 0 {
         picked.truncate(limit);
     }
-    let idx: HashMap<&str, usize> = picked.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
+    let idx: HashMap<&str, usize> = picked
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.id.as_str(), i))
+        .collect();
 
     const RELS: [EdgeRelation; 5] = [
-        EdgeRelation::Calls, EdgeRelation::Inherits, EdgeRelation::Implements,
-        EdgeRelation::HttpCalls, EdgeRelation::Tests,
+        EdgeRelation::Calls,
+        EdgeRelation::Inherits,
+        EdgeRelation::Implements,
+        EdgeRelation::HttpCalls,
+        EdgeRelation::Tests,
     ];
     let mut e_out: Vec<[usize; 3]> = Vec::new();
     for e in &edges {
-        let Some(r) = RELS.iter().position(|r| *r == e.relation) else { continue };
+        let Some(r) = RELS.iter().position(|r| *r == e.relation) else {
+            continue;
+        };
         if let (Some(&s), Some(&t)) = (idx.get(e.src.as_str()), idx.get(e.dst.as_str())) {
             e_out.push([s, t, r]);
         }
@@ -533,12 +634,19 @@ pub fn html(root: &Path, db: &Path, limit: usize) -> Result<String> {
     }
     let mut ranked: Vec<(u32, usize)> = sizes.into_iter().collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    let slot_of: HashMap<u32, usize> =
-        ranked.iter().take(8).enumerate().map(|(slot, (c, _))| (*c, slot)).collect();
+    let slot_of: HashMap<u32, usize> = ranked
+        .iter()
+        .take(8)
+        .enumerate()
+        .map(|(slot, (c, _))| (*c, slot))
+        .collect();
     let mut legend: Vec<String> = Vec::new();
     for (c, _) in ranked.iter().take(8) {
-        let members: Vec<&Node> =
-            picked.iter().filter(|n| n.community == Some(*c)).copied().collect();
+        let members: Vec<&Node> = picked
+            .iter()
+            .filter(|n| n.community == Some(*c))
+            .copied()
+            .collect();
         let mut label = dominant_prefix(&members);
         if legend.contains(&label) {
             // several clusters inside one directory — disambiguate by the
@@ -553,8 +661,14 @@ pub fn html(root: &Path, db: &Path, limit: usize) -> Result<String> {
 
     // Precompute the layout server-side (see `layout`): the browser draws static
     // coordinates instead of running a physics sim that would freeze on 40k nodes.
-    let comm: Vec<usize> =
-        picked.iter().map(|n| n.community.and_then(|c| slot_of.get(&c).copied()).unwrap_or(8)).collect();
+    let comm: Vec<usize> = picked
+        .iter()
+        .map(|n| {
+            n.community
+                .and_then(|c| slot_of.get(&c).copied())
+                .unwrap_or(8)
+        })
+        .collect();
     let pos = layout(picked.len(), &e_out, &comm, legend.len());
 
     let nodes_json: Vec<serde_json::Value> = picked
@@ -578,7 +692,10 @@ pub fn html(root: &Path, db: &Path, limit: usize) -> Result<String> {
     // Escape the interpolations: serde_json doesn't escape `<`, so a path/name
     // containing `</script>` would break out of the inline script block; the
     // title lands in <title>/<h1> and needs plain HTML escaping.
-    let title = project.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let title = project
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
     let json = serde_json::to_string(&data)?.replace('<', "\\u003c");
     Ok(HTML_TEMPLATE
         .replace("__CODEGRAPH_TITLE__", &title)
@@ -606,11 +723,20 @@ mod tests {
         assert!(md.contains("# CodeGraph report"));
         assert!(md.contains("Most central symbols"));
         assert!(md.contains("helper"));
-        assert!(md.contains("no invariant violations"), "healthy graph reports clean:\n{md}");
+        assert!(
+            md.contains("no invariant violations"),
+            "healthy graph reports clean:\n{md}"
+        );
 
         let page = html(&tmp, &db, 100).unwrap();
-        assert!(!page.contains("__CODEGRAPH_DATA__"), "data placeholder substituted");
-        assert!(!page.contains("__CODEGRAPH_TITLE__"), "title placeholder substituted");
+        assert!(
+            !page.contains("__CODEGRAPH_DATA__"),
+            "data placeholder substituted"
+        );
+        assert!(
+            !page.contains("__CODEGRAPH_TITLE__"),
+            "title placeholder substituted"
+        );
         assert!(page.contains("\"helper\""), "symbol embedded in data");
         assert!(page.contains("<canvas"), "canvas explorer present");
         let _ = std::fs::remove_dir_all(&tmp);

@@ -29,7 +29,10 @@ impl Loaded {
 
     pub fn fmt(&self, id: &str) -> String {
         match self.nodes.iter().find(|n| n.id == id) {
-            Some(n) => format!("{:<24} {:?}  {}:{}", n.name, n.label, n.file_path, n.line_start),
+            Some(n) => format!(
+                "{:<24} {:?}  {}:{}",
+                n.name, n.label, n.file_path, n.line_start
+            ),
             None => id.to_string(),
         }
     }
@@ -49,9 +52,13 @@ pub fn fts_query_from(q: &str) -> String {
         .join(" OR ")
 }
 
-
 /// Read up to ~12 source lines for a node, for richer `ask` context.
-pub fn read_snippet(root: &std::path::Path, file_path: &str, start: u32, end: u32) -> Option<String> {
+pub fn read_snippet(
+    root: &std::path::Path,
+    file_path: &str,
+    start: u32,
+    end: u32,
+) -> Option<String> {
     let content = std::fs::read_to_string(root.join(file_path)).ok()?;
     let lines: Vec<&str> = content.lines().collect();
     let s = start.saturating_sub(1) as usize;
@@ -61,4 +68,3 @@ pub fn read_snippet(root: &std::path::Path, file_path: &str, start: u32, end: u3
     let e = (end as usize).min(s + 12).min(lines.len()).max(s + 1);
     Some(lines[s..e].join("\n"))
 }
-

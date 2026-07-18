@@ -27,17 +27,47 @@ pub struct OpenAiCompatBackend {
 fn candidates() -> Vec<Candidate> {
     let env = |k: &str| std::env::var(k).ok();
     if let Some(base) = env("CODEGRAPH_LLM_BASE_URL") {
-        return vec![Candidate { id: "custom", base_url: base, api_key_env: None, default_model: "local-model" }];
+        return vec![Candidate {
+            id: "custom",
+            base_url: base,
+            api_key_env: None,
+            default_model: "local-model",
+        }];
     }
     // MLX first on request (best perf/RAM on Apple Silicon when running).
     let local = vec![
-        Candidate { id: "mlx", base_url: "http://localhost:8080/v1".into(), api_key_env: None, default_model: "local-model" },
-        Candidate { id: "lmstudio", base_url: "http://localhost:1234/v1".into(), api_key_env: None, default_model: "local-model" },
-        Candidate { id: "ollama", base_url: "http://localhost:11434/v1".into(), api_key_env: None, default_model: "qwen2.5-coder:1.5b" },
+        Candidate {
+            id: "mlx",
+            base_url: "http://localhost:8080/v1".into(),
+            api_key_env: None,
+            default_model: "local-model",
+        },
+        Candidate {
+            id: "lmstudio",
+            base_url: "http://localhost:1234/v1".into(),
+            api_key_env: None,
+            default_model: "local-model",
+        },
+        Candidate {
+            id: "ollama",
+            base_url: "http://localhost:11434/v1".into(),
+            api_key_env: None,
+            default_model: "qwen2.5-coder:1.5b",
+        },
     ];
     let cloud = vec![
-        Candidate { id: "openai", base_url: "https://api.openai.com/v1".into(), api_key_env: Some("OPENAI_API_KEY"), default_model: "gpt-4o-mini" },
-        Candidate { id: "gemini", base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(), api_key_env: Some("GEMINI_API_KEY"), default_model: "gemini-2.0-flash" },
+        Candidate {
+            id: "openai",
+            base_url: "https://api.openai.com/v1".into(),
+            api_key_env: Some("OPENAI_API_KEY"),
+            default_model: "gpt-4o-mini",
+        },
+        Candidate {
+            id: "gemini",
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+            api_key_env: Some("GEMINI_API_KEY"),
+            default_model: "gemini-2.0-flash",
+        },
     ];
     match env("CODEGRAPH_LLM_PROVIDER").as_deref() {
         Some("mlx") => local.into_iter().take(1).collect(),
@@ -81,11 +111,17 @@ impl OpenAiCompatBackend {
                 .or_else(|| models.iter().find(is_chat).cloned())
                 .or_else(|| models.first().cloned())
                 .unwrap_or_else(|| c.default_model.to_string());
-            let embed_model = std::env::var("CODEGRAPH_EMBED_MODEL")
-                .ok()
-                .or_else(|| models.iter().find(|m| m.to_lowercase().contains("embed")).cloned());
+            let embed_model = std::env::var("CODEGRAPH_EMBED_MODEL").ok().or_else(|| {
+                models
+                    .iter()
+                    .find(|m| m.to_lowercase().contains("embed"))
+                    .cloned()
+            });
             return Some(OpenAiCompatBackend {
-                client: reqwest::blocking::Client::builder().timeout(Duration::from_secs(60)).build().ok()?,
+                client: reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(60))
+                    .build()
+                    .ok()?,
                 base_url: c.base_url,
                 api_key: key,
                 model,
@@ -119,7 +155,9 @@ fn model_ids(resp: reqwest::blocking::Response) -> Vec<String> {
         .ok()
         .and_then(|v| {
             v["data"].as_array().map(|a| {
-                a.iter().filter_map(|m| m["id"].as_str().map(String::from)).collect()
+                a.iter()
+                    .filter_map(|m| m["id"].as_str().map(String::from))
+                    .collect()
             })
         })
         .unwrap_or_default()
@@ -139,7 +177,9 @@ impl LlmClient for OpenAiCompatBackend {
             req = req.bearer_auth(k);
         }
         let v: serde_json::Value = req.send().ok()?.json().ok()?;
-        v["choices"][0]["message"]["content"].as_str().map(|s| s.to_string())
+        v["choices"][0]["message"]["content"]
+            .as_str()
+            .map(|s| s.to_string())
     }
 }
 
@@ -160,7 +200,11 @@ impl OpenAiCompatBackend {
         }
         let v: serde_json::Value = req.send().ok()?.json().ok()?;
         let arr = v["data"][0]["embedding"].as_array()?;
-        Some(arr.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect())
+        Some(
+            arr.iter()
+                .filter_map(|x| x.as_f64().map(|f| f as f32))
+                .collect(),
+        )
     }
 }
 
@@ -177,7 +221,9 @@ pub fn embed_texts(texts: &[String]) -> Option<(Vec<Vec<f32>>, String)> {
         let v = v.iter().map(|x| codegraph_core::normalize(x)).collect();
         return Some((v, label));
     }
-    let backend = detected_backend().as_ref().filter(|b| b.embed_model().is_some())?;
+    let backend = detected_backend()
+        .as_ref()
+        .filter(|b| b.embed_model().is_some())?;
     let model = backend.embed_model().unwrap_or("?").to_string();
     let mut out = Vec::with_capacity(texts.len());
     for t in texts {
@@ -197,7 +243,9 @@ pub fn embedder_available() -> bool {
     if cfg!(feature = "local-embed") {
         return true;
     }
-    detected_backend().as_ref().is_some_and(|b| b.embed_model().is_some())
+    detected_backend()
+        .as_ref()
+        .is_some_and(|b| b.embed_model().is_some())
 }
 
 /// Local model choice: `CODEGRAPH_LOCAL_EMBED=code` selects the code-trained
@@ -214,12 +262,18 @@ fn local_embedder() -> &'static Option<(std::sync::Mutex<fastembed::TextEmbeddin
     static MODEL: OnceLock<Option<(Mutex<TextEmbedding>, String)>> = OnceLock::new();
     MODEL.get_or_init(|| {
         let (which, label) = match std::env::var("CODEGRAPH_LOCAL_EMBED").as_deref() {
-            Ok("code") => (EmbeddingModel::JinaEmbeddingsV2BaseCode, "jina-code-v2 (local)"),
+            Ok("code") => (
+                EmbeddingModel::JinaEmbeddingsV2BaseCode,
+                "jina-code-v2 (local)",
+            ),
             _ => (EmbeddingModel::BGESmallENV15, "bge-small-en-v1.5 (local)"),
         };
         let cache = std::env::var_os("CODEGRAPH_CACHE_DIR")
             .map(std::path::PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache/codegraph")))
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|h| std::path::PathBuf::from(h).join(".cache/codegraph"))
+            })
             .unwrap_or_else(|| std::path::PathBuf::from(".codegraph-cache"))
             .join("fastembed");
         let _ = std::fs::create_dir_all(&cache);
@@ -231,7 +285,9 @@ fn local_embedder() -> &'static Option<(std::sync::Mutex<fastembed::TextEmbeddin
             .with_cache_dir(cache)
             .with_show_download_progress(true)
             .with_max_length(256);
-        TextEmbedding::try_new(opts).ok().map(|m| (Mutex::new(m), label.to_string()))
+        TextEmbedding::try_new(opts)
+            .ok()
+            .map(|m| (Mutex::new(m), label.to_string()))
     })
 }
 
@@ -244,7 +300,6 @@ fn local_embed(texts: &[String]) -> Option<(Vec<Vec<f32>>, String)> {
     let out = model.lock().ok()?.embed(docs, Some(32)).ok()?;
     Some((out, label.clone()))
 }
-
 
 /// Generate text: a reachable OpenAI-compat server FIRST (MLX preferred — best
 /// perf/RAM on Apple Silicon when running), else the BUNDLED in-process engine
@@ -320,7 +375,12 @@ mod local_gen {
                 .add_message(TextMessageRole::User, prompt)
                 .set_sampler_max_len(max_tokens);
             let resp = model.send_chat_request(req).await.ok()?;
-            resp.choices.first()?.message.content.as_ref().map(|c| c.trim().to_string())
+            resp.choices
+                .first()?
+                .message
+                .content
+                .as_ref()
+                .map(|c| c.trim().to_string())
         })
     }
 }
@@ -341,7 +401,9 @@ pub fn rerank(query: &str, hits: Vec<codegraph_core::Node>) -> Vec<codegraph_cor
         "Rank these code symbols by relevance to the query \"{}\". Reply with ONLY the leading numbers, best first, comma-separated.\n\n{}",
         query, listing
     );
-    let Some(resp) = generate_text(&prompt, 200) else { return hits };
+    let Some(resp) = generate_text(&prompt, 200) else {
+        return hits;
+    };
     let order: Vec<usize> = resp
         .split(|c: char| !c.is_ascii_digit())
         .filter_map(|t| t.parse::<usize>().ok())

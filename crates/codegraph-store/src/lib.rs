@@ -5,8 +5,8 @@ pub mod cypher;
 use std::path::Path;
 
 use codegraph_core::{
-    Coverage, Edge, Hyperedge, HyperedgeMember, InheritKind, Metadata, Node, NodeLabel, RawCall, RawField,
-    RawImport, RawInherit, RawLocal,
+    Coverage, Edge, Hyperedge, HyperedgeMember, InheritKind, Metadata, Node, NodeLabel, RawCall,
+    RawField, RawImport, RawInherit, RawLocal,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
@@ -85,7 +85,9 @@ pub fn subwords(name: &str) -> String {
         if !cur.is_empty() {
             let prev = chars[i - 1];
             let boundary = (c.is_uppercase() && prev.is_lowercase())
-                || (c.is_uppercase() && prev.is_uppercase() && chars.get(i + 1).is_some_and(|n| n.is_lowercase()))
+                || (c.is_uppercase()
+                    && prev.is_uppercase()
+                    && chars.get(i + 1).is_some_and(|n| n.is_lowercase()))
                 || (c.is_ascii_digit() != prev.is_ascii_digit() && prev.is_alphanumeric());
             if boundary {
                 parts.push(std::mem::take(&mut cur));
@@ -184,7 +186,9 @@ impl Store {
         // and the ALTER TABLE probes.
         let current: Option<i64> = self
             .conn
-            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0))
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .optional()
             .unwrap_or(None); // missing table => full migrate below
         if current == Some(SCHEMA_VERSION) {
@@ -264,13 +268,17 @@ impl Store {
         }
         let current: Option<i64> = self
             .conn
-            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0))
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .optional()?;
         match current {
             None => {
                 self.conn.execute_batch(FTS_DDL)?;
-                self.conn
-                    .execute("INSERT INTO schema_version(version) VALUES(?1)", [SCHEMA_VERSION])?;
+                self.conn.execute(
+                    "INSERT INTO schema_version(version) VALUES(?1)",
+                    [SCHEMA_VERSION],
+                )?;
             }
             Some(v) if v < SCHEMA_VERSION => {
                 // v3: FTS gains `parts`. v4: node-id scheme changed (class-qualified
@@ -289,7 +297,8 @@ impl Store {
                 // Populate `parts` + `doc_text` BEFORE the triggers exist (no FTS churn).
                 // v6: Document CONTENT becomes searchable (localization keys,
                 // wiki text) — capped to bound the index.
-                self.conn.execute("UPDATE nodes SET parts = cg_subwords(name)", [])?;
+                self.conn
+                    .execute("UPDATE nodes SET parts = cg_subwords(name)", [])?;
                 self.conn.execute(
                     "UPDATE nodes SET doc_text = substr(json_extract(data,'$.metadata.text'),1,8000) WHERE label = 'Document'",
                     [],
@@ -297,7 +306,8 @@ impl Store {
                 self.conn.execute_batch(FTS_DDL)?;
                 self.rebuild_fts()?;
                 self.migrate_legacy_vectors()?;
-                self.conn.execute("UPDATE schema_version SET version = ?1", [SCHEMA_VERSION])?;
+                self.conn
+                    .execute("UPDATE schema_version SET version = ?1", [SCHEMA_VERSION])?;
             }
             Some(_) => {}
         }
@@ -313,15 +323,18 @@ impl Store {
         }
         let rows: Vec<(String, Vec<u8>)> = {
             let mut stmt = self.conn.prepare("SELECT node_id, vec FROM vectors")?;
-            let it = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+            let it = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })?;
             it.collect::<rusqlite::Result<_>>()?
         };
         if let Some((_, first)) = rows.first() {
             let dim = first.len() / 4;
             if dim > 0 {
                 self.ensure_vec_table(dim)?;
-                let mut stmt =
-                    self.conn.prepare("INSERT INTO vec_nodes(node_id, embedding) VALUES(?1, ?2)")?;
+                let mut stmt = self
+                    .conn
+                    .prepare("INSERT INTO vec_nodes(node_id, embedding) VALUES(?1, ?2)")?;
                 for (id, bytes) in &rows {
                     if bytes.len() == dim * 4 {
                         let _ = stmt.execute(params![id, bytes]);
@@ -349,7 +362,9 @@ impl Store {
     /// dimension is fixed per table, so switching embedding models rebuilds it —
     /// callers re-embed everything on model switch anyway (`semantic-index`).
     fn ensure_vec_table(&self, dim: usize) -> Result<()> {
-        let cur = self.meta_get("vec_dim")?.and_then(|s| s.parse::<usize>().ok());
+        let cur = self
+            .meta_get("vec_dim")?
+            .and_then(|s| s.parse::<usize>().ok());
         if cur == Some(dim) && self.table_exists("vec_nodes")? {
             return Ok(());
         }
@@ -364,7 +379,9 @@ impl Store {
     pub fn schema_version(&self) -> Result<i64> {
         Ok(self
             .conn
-            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0))?)
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+                r.get(0)
+            })?)
     }
 
     pub fn upsert_node(&self, n: &Node) -> Result<()> {
@@ -420,8 +437,10 @@ impl Store {
              ON CONFLICT(id) DO UPDATE SET relation=?2,label=?3,confidence=?4,tier=?5,data=?6",
             params![h.id, enum_str(&h.relation)?, h.label, enum_str(&h.confidence)?, enum_str(&h.tier)?, data],
         )?;
-        self.conn
-            .execute("DELETE FROM hyperedge_members WHERE hyperedge_id=?1", [&h.id])?;
+        self.conn.execute(
+            "DELETE FROM hyperedge_members WHERE hyperedge_id=?1",
+            [&h.id],
+        )?;
         for m in members {
             self.conn.execute(
                 "INSERT OR REPLACE INTO hyperedge_members(hyperedge_id,node_id,role) VALUES(?1,?2,?3)",
@@ -431,17 +450,22 @@ impl Store {
         Ok(())
     }
 
-    pub fn get_hyperedges_for_node(&self, node_id: &str) -> Result<Vec<(Hyperedge, Vec<HyperedgeMember>)>> {
+    pub fn get_hyperedges_for_node(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<(Hyperedge, Vec<HyperedgeMember>)>> {
         let mut stmt = self
             .conn
             .prepare("SELECT DISTINCT hyperedge_id FROM hyperedge_members WHERE node_id=?1")?;
         let ids: Vec<String> = stmt
             .query_map([node_id], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<_>>()?;
-        let mut hstmt = self.conn.prepare("SELECT data FROM hyperedges WHERE id=?1")?;
-        let mut mstmt = self
+        let mut hstmt = self
             .conn
-            .prepare("SELECT hyperedge_id,node_id,role FROM hyperedge_members WHERE hyperedge_id=?1")?;
+            .prepare("SELECT data FROM hyperedges WHERE id=?1")?;
+        let mut mstmt = self.conn.prepare(
+            "SELECT hyperedge_id,node_id,role FROM hyperedge_members WHERE hyperedge_id=?1",
+        )?;
         let mut out = Vec::new();
         for hid in ids {
             let data: String = hstmt.query_row([&hid], |r| r.get(0))?;
@@ -463,7 +487,8 @@ impl Store {
     /// Rebuild the external-content FTS index from `nodes`. Only needed after a
     /// schema migration — normal writes keep it in sync via triggers.
     pub fn rebuild_fts(&self) -> Result<()> {
-        self.conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", [])?;
+        self.conn
+            .execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", [])?;
         Ok(())
     }
 
@@ -492,7 +517,9 @@ impl Store {
         for r in rows {
             h.update(r?.as_bytes());
         }
-        let mut stmt = self.conn.prepare("SELECT data FROM edges ORDER BY src, dst, relation")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT data FROM edges ORDER BY src, dst, relation")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         for r in rows {
             h.update(r?.as_bytes());
@@ -501,7 +528,10 @@ impl Store {
     }
 
     pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
-        self.conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![key, value])?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+            params![key, value],
+        )?;
         Ok(())
     }
 
@@ -517,8 +547,9 @@ impl Store {
         // No own BEGIN/COMMIT: index_dir already runs inside a transaction
         // (nested BEGIN is an error); called nowhere else.
         self.conn.execute("DELETE FROM cochanges", [])?;
-        let mut stmt =
-            self.conn.prepare("INSERT OR REPLACE INTO cochanges(file_a,file_b,n) VALUES(?1,?2,?3)")?;
+        let mut stmt = self
+            .conn
+            .prepare("INSERT OR REPLACE INTO cochanges(file_a,file_b,n) VALUES(?1,?2,?3)")?;
         for (a, b, n) in pairs {
             stmt.execute(params![a, b, n])?;
         }
@@ -571,8 +602,11 @@ impl Store {
 
     /// Textual call sites naming `name` (fan-in signal — every call site, resolved or not).
     pub fn call_site_count(&self, name: &str) -> Result<usize> {
-        let n: i64 =
-            self.conn.query_row("SELECT COUNT(*) FROM calls WHERE callee_name = ?1", [name], |r| r.get(0))?;
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM calls WHERE callee_name = ?1",
+            [name],
+            |r| r.get(0),
+        )?;
         Ok(n as usize)
     }
 
@@ -623,7 +657,13 @@ impl Store {
             .query_row(
                 "SELECT file_path,sha256,mtime FROM manifest WHERE file_path=?1",
                 [file_path],
-                |r| Ok(ManifestEntry { file_path: r.get(0)?, sha256: r.get(1)?, mtime: r.get(2)? }),
+                |r| {
+                    Ok(ManifestEntry {
+                        file_path: r.get(0)?,
+                        sha256: r.get(1)?,
+                        mtime: r.get(2)?,
+                    })
+                },
             )
             .optional()?)
     }
@@ -638,11 +678,15 @@ impl Store {
 
     pub fn contexts_for(&self, path_prefix: &str) -> Result<Vec<ContextEntry>> {
         let pattern = format!("{}%", path_prefix);
-        let mut stmt = self
-            .conn
-            .prepare("SELECT path,summary,added_at FROM contexts WHERE path LIKE ?1 ORDER BY added_at")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT path,summary,added_at FROM contexts WHERE path LIKE ?1 ORDER BY added_at",
+        )?;
         let rows = stmt.query_map([pattern], |r| {
-            Ok(ContextEntry { path: r.get(0)?, summary: r.get(1)?, added_at: r.get(2)? })
+            Ok(ContextEntry {
+                path: r.get(0)?,
+                summary: r.get(1)?,
+                added_at: r.get(2)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -709,7 +753,11 @@ impl Store {
                 .split(|c: char| !c.is_alphanumeric() && c != '_')
                 .flat_map(|t| {
                     let sw = subwords(t);
-                    if sw.is_empty() { vec![t.to_string()] } else { sw.split(' ').map(str::to_string).collect() }
+                    if sw.is_empty() {
+                        vec![t.to_string()]
+                    } else {
+                        sw.split(' ').map(str::to_string).collect()
+                    }
                 })
                 .filter(|t| t.len() > 1)
                 .filter(|t| seen.insert(t.to_lowercase()))
@@ -718,9 +766,13 @@ impl Store {
             if terms.is_empty() {
                 return Ok(hits);
             }
-            hits = self.search_fts(&terms.join(" AND "), over).unwrap_or_default();
+            hits = self
+                .search_fts(&terms.join(" AND "), over)
+                .unwrap_or_default();
             if hits.is_empty() && terms.len() > 1 {
-                hits = self.search_fts(&terms.join(" OR "), over).unwrap_or_default();
+                hits = self
+                    .search_fts(&terms.join(" OR "), over)
+                    .unwrap_or_default();
             }
         }
         // Verbatim re-rank (stable): FTS relevance decided the pool; exactness
@@ -729,7 +781,10 @@ impl Store {
         let bonus = |n: &Node| -> i32 {
             let name = n.name.to_lowercase();
             let file_name = n.file_path.rsplit('/').next().unwrap_or("").to_lowercase();
-            let stem = file_name.rsplit_once('.').map(|(s, _)| s).unwrap_or(&file_name);
+            let stem = file_name
+                .rsplit_once('.')
+                .map(|(s, _)| s)
+                .unwrap_or(&file_name);
             if name == q {
                 return 4;
             }
@@ -742,20 +797,29 @@ impl Store {
             if !matches!(n.label, NodeLabel::Document) {
                 return 2;
             }
-            if n.metadata.get("text").and_then(|v| v.as_str()).is_some_and(|t| t.to_lowercase().contains(&q)) {
+            if n.metadata
+                .get("text")
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| t.to_lowercase().contains(&q))
+            {
                 return 1;
             }
             0
         };
-        let mut ranked: Vec<(i32, usize, Node)> =
-            hits.into_iter().enumerate().map(|(i, n)| (bonus(&n), i, n)).collect();
+        let mut ranked: Vec<(i32, usize, Node)> = hits
+            .into_iter()
+            .enumerate()
+            .map(|(i, n)| (bonus(&n), i, n))
+            .collect();
         ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         // One row per DOCUMENT FILE (chunks of the same .md collapse), and when
         // CODE answered the query, docs are capped to a footnote — a doc-heavy
         // repo (.claude/ rules, wikis) otherwise floods ranks 2..N with
         // mentions of the identifier (field-measured noise).
         const MAX_DOCS_WITH_CODE_HITS: usize = 5;
-        let has_code = ranked.iter().any(|(_, _, n)| n.label != NodeLabel::Document);
+        let has_code = ranked
+            .iter()
+            .any(|(_, _, n)| n.label != NodeLabel::Document);
         let mut doc_files = std::collections::HashSet::new();
         Ok(ranked
             .into_iter()
@@ -779,7 +843,11 @@ impl Store {
              LIMIT 25",
         )?;
         let rows = stmt.query_map([name], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -787,10 +855,13 @@ impl Store {
     /// Regex search over symbol names (anywhere in the name, not just a prefix) —
     /// for patterns FTS can't express (middle fragments, alternations, anchors).
     pub fn search_regex(&self, pattern: &str, limit: usize) -> Result<Vec<Node>> {
-        let re = regex::Regex::new(pattern).map_err(|e| StoreError::Msg(format!("bad regex: {e}")))?;
+        let re =
+            regex::Regex::new(pattern).map_err(|e| StoreError::Msg(format!("bad regex: {e}")))?;
         // Match on the name column first; deserialize the (potentially large)
         // data JSON only for the ≤limit hits — not for every node in the table.
-        let mut stmt = self.conn.prepare("SELECT id, name FROM nodes WHERE name <> ''")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name FROM nodes WHERE name <> ''")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         let mut ids = Vec::new();
         for r in rows {
@@ -811,7 +882,6 @@ impl Store {
         Ok(out)
     }
 
-
     /// All Function/Method definitions named `name`, each with its RESOLVED-caller
     /// count — the candidate list for disambiguating an ambiguous query. Rivals
     /// either silently union all same-name definitions or refuse; we ASK.
@@ -822,7 +892,9 @@ impl Store {
              FROM nodes n WHERE n.name = ?1 AND n.label IN ('Function','Method')
              ORDER BY nc DESC, n.file_path",
         )?;
-        let rows = stmt.query_map([name], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let rows = stmt.query_map([name], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
         let mut out = Vec::new();
         for r in rows {
             let (data, nc) = r?;
@@ -862,18 +934,25 @@ impl Store {
     /// rename must scan so an UNCAPTURED reference (a call form the parser missed)
     /// can't slip through a "0 captured calls = complete" gate and corrupt code.
     pub fn indexed_files(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT DISTINCT file_path FROM nodes WHERE file_path <> ''")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT file_path FROM nodes WHERE file_path <> ''")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Count of call sites naming `name`, grouped by file — the expected number
     /// of call-token occurrences per file, for the rename occurrence-completeness gate.
-    pub fn call_sites_by_file(&self, name: &str) -> Result<std::collections::HashMap<String, usize>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT file_path, COUNT(*) FROM calls WHERE callee_name = ?1 GROUP BY file_path")?;
-        let rows = stmt.query_map([name], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize)))?;
+    pub fn call_sites_by_file(
+        &self,
+        name: &str,
+    ) -> Result<std::collections::HashMap<String, usize>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT file_path, COUNT(*) FROM calls WHERE callee_name = ?1 GROUP BY file_path",
+        )?;
+        let rows = stmt.query_map([name], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -918,8 +997,16 @@ impl Store {
             "definition",
             &mut out,
         )?;
-        push_all("SELECT DISTINCT file_path FROM fields WHERE type_name = ?1", "field/DI type", &mut out)?;
-        push_all("SELECT DISTINCT file_path FROM locals WHERE type_name = ?1", "typed local", &mut out)?;
+        push_all(
+            "SELECT DISTINCT file_path FROM fields WHERE type_name = ?1",
+            "field/DI type",
+            &mut out,
+        )?;
+        push_all(
+            "SELECT DISTINCT file_path FROM locals WHERE type_name = ?1",
+            "typed local",
+            &mut out,
+        )?;
         // in-repo imports only — python modules are dotted (not './'-prefixed),
         // so exclude ONLY the TS/JS external-package shape, not python
         push_all(
@@ -930,7 +1017,11 @@ impl Store {
             "import",
             &mut out,
         )?;
-        push_all("SELECT DISTINCT file_path FROM inherits WHERE super_name = ?1", "subtype", &mut out)?;
+        push_all(
+            "SELECT DISTINCT file_path FROM inherits WHERE super_name = ?1",
+            "subtype",
+            &mut out,
+        )?;
         // singleton/static member access: `Foo.shared.bar()` records receiver
         // "Foo.shared" on the call site — evidence the type is used there
         push_all(
@@ -1001,7 +1092,10 @@ impl Store {
     /// real signal that the precise callers list may be incomplete.
     pub fn coverage_for_callers(&self, name: &str) -> Result<Coverage> {
         let total: i64 = self.conn.query_row(
-            &format!("SELECT COUNT(*) FROM calls c WHERE c.callee_name = ?1 AND NOT {}", Self::EXTERNAL_BOUND),
+            &format!(
+                "SELECT COUNT(*) FROM calls c WHERE c.callee_name = ?1 AND NOT {}",
+                Self::EXTERNAL_BOUND
+            ),
             [name],
             |r| r.get(0),
         )?;
@@ -1076,8 +1170,9 @@ impl Store {
         // ORDER BY id: graph construction order must be CANONICAL, not rowid
         // order — incremental reindexes re-insert changed nodes at new rowids,
         // and community re-labeling / float accumulation follow node order.
-        let mut stmt =
-            self.conn.prepare("SELECT json_remove(data, '$.metadata.text') FROM nodes ORDER BY id")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT json_remove(data, '$.metadata.text') FROM nodes ORDER BY id")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         let mut out = Vec::new();
         for r in rows {
@@ -1095,8 +1190,12 @@ impl Store {
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
-                r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?,
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
                 r.get::<_, i64>(6)?,
             ))
         })?;
@@ -1104,7 +1203,8 @@ impl Store {
         for r in rows {
             let (src, dst, rel, tier, conf, src_file, src_line) = r?;
             out.push(Edge {
-                src, dst,
+                src,
+                dst,
                 relation: enum_from(&rel)?,
                 tier: enum_from(&tier)?,
                 confidence: enum_from(&conf)?,
@@ -1146,7 +1246,9 @@ impl Store {
     }
 
     pub fn find_by_name(&self, name: &str) -> Result<Vec<Node>> {
-        let mut stmt = self.conn.prepare("SELECT data FROM nodes WHERE name = ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT data FROM nodes WHERE name = ?1")?;
         let rows = stmt.query_map([name], |r| r.get::<_, String>(0))?;
         let mut out = Vec::new();
         for r in rows {
@@ -1171,9 +1273,12 @@ impl Store {
         let txn = self.txn()?;
         {
             // vec0 has no upsert — delete-then-insert on the primary key.
-            let mut del = self.conn.prepare("DELETE FROM vec_nodes WHERE node_id = ?1")?;
-            let mut ins =
-                self.conn.prepare("INSERT INTO vec_nodes(node_id, embedding) VALUES(?1, ?2)")?;
+            let mut del = self
+                .conn
+                .prepare("DELETE FROM vec_nodes WHERE node_id = ?1")?;
+            let mut ins = self
+                .conn
+                .prepare("INSERT INTO vec_nodes(node_id, embedding) VALUES(?1, ?2)")?;
             for (id, v) in items {
                 if v.len() != dim {
                     continue; // mixed dims in one batch: skip, never corrupt the table
@@ -1194,8 +1299,12 @@ impl Store {
         if !self.table_exists("vec_nodes")? {
             return Ok(Vec::new());
         }
-        let mut stmt = self.conn.prepare("SELECT node_id, embedding FROM vec_nodes")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT node_id, embedding FROM vec_nodes")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
         let mut out = Vec::new();
         for r in rows {
             let (id, bytes) = r?;
@@ -1236,20 +1345,29 @@ impl Store {
     }
 
     pub fn save_calls(&self, file_path: &str, calls: &[RawCall]) -> Result<()> {
-        self.conn.execute("DELETE FROM calls WHERE file_path = ?1", [file_path])?;
+        self.conn
+            .execute("DELETE FROM calls WHERE file_path = ?1", [file_path])?;
         let mut stmt = self.conn.prepare(
             "INSERT INTO calls(caller_id, callee_name, line, file_path, receiver, enclosing_class) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
         for c in calls {
             let receiver = serde_json::to_string(&c.receiver)?;
-            stmt.execute(params![c.caller_id, c.callee_name, c.line, file_path, receiver, c.enclosing_class])?;
+            stmt.execute(params![
+                c.caller_id,
+                c.callee_name,
+                c.line,
+                file_path,
+                receiver,
+                c.enclosing_class
+            ])?;
         }
         Ok(())
     }
 
     pub fn all_calls(&self) -> Result<Vec<RawCall>> {
-        let mut stmt =
-            self.conn.prepare("SELECT caller_id, callee_name, line, receiver, enclosing_class FROM calls")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT caller_id, callee_name, line, receiver, enclosing_class FROM calls")?;
         let rows = stmt.query_map([], |r| {
             let receiver = r
                 .get::<_, Option<String>>(3)?
@@ -1273,31 +1391,48 @@ impl Store {
         // FTS rows need no manual pruning: the nodes_fts triggers handle it.
         if self.table_exists("vec_nodes")? {
             let ids: Vec<String> = {
-                let mut stmt = self.conn.prepare("SELECT id FROM nodes WHERE file_path = ?1")?;
+                let mut stmt = self
+                    .conn
+                    .prepare("SELECT id FROM nodes WHERE file_path = ?1")?;
                 let it = stmt.query_map([file_path], |r| r.get::<_, String>(0))?;
                 it.collect::<rusqlite::Result<_>>()?
             };
             // vec0 supports DELETE by primary-key equality only — loop, no subquery.
-            let mut del = self.conn.prepare("DELETE FROM vec_nodes WHERE node_id = ?1")?;
+            let mut del = self
+                .conn
+                .prepare("DELETE FROM vec_nodes WHERE node_id = ?1")?;
             for id in &ids {
                 del.execute([id])?;
             }
         }
-        self.conn.execute("DELETE FROM nodes WHERE file_path = ?1", [file_path])?;
-        self.conn.execute("DELETE FROM calls WHERE file_path = ?1", [file_path])?;
-        self.conn.execute("DELETE FROM inherits WHERE file_path = ?1", [file_path])?;
-        self.conn.execute("DELETE FROM fields WHERE file_path = ?1", [file_path])?;
-        self.conn.execute("DELETE FROM locals WHERE file_path = ?1", [file_path])?;
-        self.conn.execute("DELETE FROM type_refs WHERE file_path = ?1", [file_path])?;
-        self.conn.execute("DELETE FROM imports WHERE file_path = ?1", [file_path])?;
+        self.conn
+            .execute("DELETE FROM nodes WHERE file_path = ?1", [file_path])?;
+        self.conn
+            .execute("DELETE FROM calls WHERE file_path = ?1", [file_path])?;
+        self.conn
+            .execute("DELETE FROM inherits WHERE file_path = ?1", [file_path])?;
+        self.conn
+            .execute("DELETE FROM fields WHERE file_path = ?1", [file_path])?;
+        self.conn
+            .execute("DELETE FROM locals WHERE file_path = ?1", [file_path])?;
+        self.conn
+            .execute("DELETE FROM type_refs WHERE file_path = ?1", [file_path])?;
+        self.conn
+            .execute("DELETE FROM imports WHERE file_path = ?1", [file_path])?;
         Ok(())
     }
 
     /// All manifest rows — for the staleness probe and the phase-1 change scan.
     pub fn manifest_map(&self) -> Result<Vec<ManifestEntry>> {
-        let mut stmt = self.conn.prepare("SELECT file_path,sha256,mtime FROM manifest")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT file_path,sha256,mtime FROM manifest")?;
         let rows = stmt.query_map([], |r| {
-            Ok(ManifestEntry { file_path: r.get(0)?, sha256: r.get(1)?, mtime: r.get(2)? })
+            Ok(ManifestEntry {
+                file_path: r.get(0)?,
+                sha256: r.get(1)?,
+                mtime: r.get(2)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -1309,7 +1444,8 @@ impl Store {
     }
 
     pub fn delete_manifest(&self, file_path: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM manifest WHERE file_path = ?1", [file_path])?;
+        self.conn
+            .execute("DELETE FROM manifest WHERE file_path = ?1", [file_path])?;
         Ok(())
     }
 
@@ -1344,15 +1480,18 @@ impl Store {
     /// are deliberately spared — they supersede tree-sitter and are re-merged on
     /// their own cadence, not per file edit.
     pub fn delete_tree_sitter_edges_for_file(&self, file: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM edges WHERE src_file = ?1 AND tier = 'TreeSitter'", [file])?;
+        self.conn.execute(
+            "DELETE FROM edges WHERE src_file = ?1 AND tier = 'TreeSitter'",
+            [file],
+        )?;
         Ok(())
     }
 
     /// ALL edges originating in one file, every tier — for pruned (deleted)
     /// files, where even compiler-grade edges are stale by definition.
     pub fn delete_edges_for_file(&self, file: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM edges WHERE src_file = ?1", [file])?;
+        self.conn
+            .execute("DELETE FROM edges WHERE src_file = ?1", [file])?;
         Ok(())
     }
 
@@ -1363,21 +1502,32 @@ impl Store {
             .conn
             .prepare("SELECT id,name,label FROM nodes WHERE file_path = ?1 AND label <> 'File'")?;
         let rows = stmt.query_map([file], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
         })?;
         for r in rows {
             let (id, name, label) = r?;
             if label == "Function" || label == "Method" {
                 shape.fn_defs.insert(id, name);
             } else {
-                shape.other.push(format!("n\u{1}{id}\u{1}{name}\u{1}{label}"));
+                shape
+                    .other
+                    .push(format!("n\u{1}{id}\u{1}{name}\u{1}{label}"));
             }
         }
         let mut stmt = self
             .conn
             .prepare("SELECT impl_name,super_name,kind FROM inherits WHERE file_path = ?1")?;
         let rows = stmt.query_map([file], |r| {
-            Ok(format!("i\u{1}{}\u{1}{}\u{1}{}", r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            Ok(format!(
+                "i\u{1}{}\u{1}{}\u{1}{}",
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?
+            ))
         })?;
         for r in rows {
             shape.other.push(r?);
@@ -1386,7 +1536,12 @@ impl Store {
             .conn
             .prepare("SELECT class_id,field_name,type_name FROM fields WHERE file_path = ?1")?;
         let rows = stmt.query_map([file], |r| {
-            Ok(format!("f\u{1}{}\u{1}{}\u{1}{}", r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            Ok(format!(
+                "f\u{1}{}\u{1}{}\u{1}{}",
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?
+            ))
         })?;
         for r in rows {
             shape.other.push(r?);
@@ -1398,8 +1553,9 @@ impl Store {
     /// Files containing at least one call site naming `name` — the wave set a
     /// dirty definition name propagates to (uses idx_calls_callee).
     pub fn files_with_calls_naming(&self, name: &str) -> Result<Vec<String>> {
-        let mut stmt =
-            self.conn.prepare("SELECT DISTINCT file_path FROM calls WHERE callee_name = ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT file_path FROM calls WHERE callee_name = ?1")?;
         let rows = stmt.query_map([name], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -1415,7 +1571,11 @@ impl Store {
     /// file path) to keep only the sites whose NEAREST definition (longest
     /// shared path prefix) is that one — a vendored mirror's tests attach to
     /// the mirror, not to the primary source.
-    pub fn unresolved_call_site_files(&self, name: &str, attribute_to: Option<&str>) -> Result<Vec<String>> {
+    pub fn unresolved_call_site_files(
+        &self,
+        name: &str,
+        attribute_to: Option<&str>,
+    ) -> Result<Vec<String>> {
         let sql = format!(
             "SELECT DISTINCT c.file_path FROM calls c WHERE c.callee_name = ?1
              AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.name = ?1 AND n.file_path = c.file_path
@@ -1426,21 +1586,31 @@ impl Store {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([name], |r| r.get::<_, String>(0))?;
         let files: Vec<String> = rows.collect::<rusqlite::Result<_>>()?;
-        let Some(target) = attribute_to else { return Ok(files) };
+        let Some(target) = attribute_to else {
+            return Ok(files);
+        };
         let mut stmt =
             self.conn.prepare("SELECT DISTINCT file_path FROM nodes WHERE name = ?1 AND label IN ('Function','Method','Class')")?;
-        let def_files: Vec<String> =
-            stmt.query_map([name], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<_>>()?;
+        let def_files: Vec<String> = stmt
+            .query_map([name], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
         if def_files.len() <= 1 {
             return Ok(files); // one definition — everything attributes to it
         }
         fn shared_prefix(a: &str, b: &str) -> usize {
-            a.split('/').zip(b.split('/')).take_while(|(x, y)| x == y).count()
+            a.split('/')
+                .zip(b.split('/'))
+                .take_while(|(x, y)| x == y)
+                .count()
         }
         Ok(files
             .into_iter()
             .filter(|f| {
-                let best = def_files.iter().map(|d| shared_prefix(f, d)).max().unwrap_or(0);
+                let best = def_files
+                    .iter()
+                    .map(|d| shared_prefix(f, d))
+                    .max()
+                    .unwrap_or(0);
                 shared_prefix(f, target) == best
             })
             .collect())
@@ -1487,7 +1657,9 @@ impl Store {
         let rows = stmt.query_map([], |r| {
             Ok(format!(
                 "dangling edge: {} -{}-> {}",
-                r.get::<_, String>(0)?, r.get::<_, String>(2)?, r.get::<_, String>(1)?
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(1)?
             ))
         })?;
         for r in rows {
@@ -1510,7 +1682,8 @@ impl Store {
         let rows = stmt.query_map([], |r| {
             Ok(format!(
                 "CALLS edge without justification: {} -> {}",
-                r.get::<_, String>(0)?, r.get::<_, String>(1)?
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?
             ))
         })?;
         for r in rows {
@@ -1529,37 +1702,61 @@ impl Store {
         )?;
         for e in edges {
             let data = serde_json::to_string(e)?;
-            stmt.execute(params![e.src, e.dst, enum_str(&e.relation)?, enum_str(&e.tier)?, enum_str(&e.confidence)?, e.src_file, e.src_line, data])?;
+            stmt.execute(params![
+                e.src,
+                e.dst,
+                enum_str(&e.relation)?,
+                enum_str(&e.tier)?,
+                enum_str(&e.confidence)?,
+                e.src_file,
+                e.src_line,
+                data
+            ])?;
         }
         Ok(())
     }
 
     pub fn save_inherits(&self, file_path: &str, items: &[RawInherit]) -> Result<()> {
-        self.conn.execute("DELETE FROM inherits WHERE file_path = ?1", [file_path])?;
+        self.conn
+            .execute("DELETE FROM inherits WHERE file_path = ?1", [file_path])?;
         let mut stmt = self.conn.prepare(
             "INSERT INTO inherits(impl_name, super_name, kind, file_path) VALUES(?1, ?2, ?3, ?4)",
         )?;
         for it in items {
-            let kind = match it.kind { InheritKind::Extends => "Extends", InheritKind::Implements => "Implements" };
+            let kind = match it.kind {
+                InheritKind::Extends => "Extends",
+                InheritKind::Implements => "Implements",
+            };
             stmt.execute(params![it.impl_name, it.super_name, kind, file_path])?;
         }
         Ok(())
     }
 
     pub fn all_inherits(&self) -> Result<Vec<RawInherit>> {
-        let mut stmt = self.conn.prepare("SELECT impl_name, super_name, kind FROM inherits")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT impl_name, super_name, kind FROM inherits")?;
         let rows = stmt.query_map([], |r| {
-            let kind = if r.get::<_, String>(2)? == "Implements" { InheritKind::Implements } else { InheritKind::Extends };
-            Ok(RawInherit { impl_name: r.get(0)?, super_name: r.get(1)?, kind })
+            let kind = if r.get::<_, String>(2)? == "Implements" {
+                InheritKind::Implements
+            } else {
+                InheritKind::Extends
+            };
+            Ok(RawInherit {
+                impl_name: r.get(0)?,
+                super_name: r.get(1)?,
+                kind,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn save_fields(&self, file_path: &str, items: &[RawField]) -> Result<()> {
-        self.conn.execute("DELETE FROM fields WHERE file_path = ?1", [file_path])?;
-        let mut stmt = self
-            .conn
-            .prepare("INSERT INTO fields(class_id, field_name, type_name, file_path) VALUES(?1, ?2, ?3, ?4)")?;
+        self.conn
+            .execute("DELETE FROM fields WHERE file_path = ?1", [file_path])?;
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO fields(class_id, field_name, type_name, file_path) VALUES(?1, ?2, ?3, ?4)",
+        )?;
         for f in items {
             stmt.execute(params![f.class_id, f.field_name, f.type_name, file_path])?;
         }
@@ -1567,17 +1764,25 @@ impl Store {
     }
 
     pub fn all_fields(&self) -> Result<Vec<RawField>> {
-        let mut stmt = self.conn.prepare("SELECT class_id, field_name, type_name FROM fields")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT class_id, field_name, type_name FROM fields")?;
         let rows = stmt.query_map([], |r| {
-            Ok(RawField { class_id: r.get(0)?, field_name: r.get(1)?, type_name: r.get(2)? })
+            Ok(RawField {
+                class_id: r.get(0)?,
+                field_name: r.get(1)?,
+                type_name: r.get(2)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn save_imports(&self, file_path: &str, items: &[RawImport]) -> Result<()> {
-        self.conn.execute("DELETE FROM imports WHERE file_path = ?1", [file_path])?;
-        let mut stmt =
-            self.conn.prepare("INSERT INTO imports(file_path, name, module) VALUES(?1, ?2, ?3)")?;
+        self.conn
+            .execute("DELETE FROM imports WHERE file_path = ?1", [file_path])?;
+        let mut stmt = self
+            .conn
+            .prepare("INSERT INTO imports(file_path, name, module) VALUES(?1, ?2, ?3)")?;
         for i in items {
             stmt.execute(params![file_path, i.name, i.module])?;
         }
@@ -1585,18 +1790,25 @@ impl Store {
     }
 
     pub fn all_imports(&self) -> Result<Vec<RawImport>> {
-        let mut stmt = self.conn.prepare("SELECT file_path, name, module FROM imports")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT file_path, name, module FROM imports")?;
         let rows = stmt.query_map([], |r| {
-            Ok(RawImport { file_path: r.get(0)?, name: r.get(1)?, module: r.get(2)? })
+            Ok(RawImport {
+                file_path: r.get(0)?,
+                name: r.get(1)?,
+                module: r.get(2)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn save_locals(&self, file_path: &str, items: &[RawLocal]) -> Result<()> {
-        self.conn.execute("DELETE FROM locals WHERE file_path = ?1", [file_path])?;
-        let mut stmt = self
-            .conn
-            .prepare("INSERT INTO locals(caller_id, var_name, type_name, file_path) VALUES(?1, ?2, ?3, ?4)")?;
+        self.conn
+            .execute("DELETE FROM locals WHERE file_path = ?1", [file_path])?;
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO locals(caller_id, var_name, type_name, file_path) VALUES(?1, ?2, ?3, ?4)",
+        )?;
         for l in items {
             stmt.execute(params![l.caller_id, l.var_name, l.type_name, file_path])?;
         }
@@ -1604,8 +1816,11 @@ impl Store {
     }
 
     pub fn save_type_refs(&self, file_path: &str, names: &[String]) -> Result<()> {
-        self.conn.execute("DELETE FROM type_refs WHERE file_path = ?1", [file_path])?;
-        let mut stmt = self.conn.prepare("INSERT INTO type_refs(file_path, type_name) VALUES(?1, ?2)")?;
+        self.conn
+            .execute("DELETE FROM type_refs WHERE file_path = ?1", [file_path])?;
+        let mut stmt = self
+            .conn
+            .prepare("INSERT INTO type_refs(file_path, type_name) VALUES(?1, ?2)")?;
         for n in names {
             stmt.execute(params![file_path, n])?;
         }
@@ -1613,9 +1828,15 @@ impl Store {
     }
 
     pub fn all_locals(&self) -> Result<Vec<RawLocal>> {
-        let mut stmt = self.conn.prepare("SELECT caller_id, var_name, type_name FROM locals")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT caller_id, var_name, type_name FROM locals")?;
         let rows = stmt.query_map([], |r| {
-            Ok(RawLocal { caller_id: r.get(0)?, var_name: r.get(1)?, type_name: r.get(2)? })
+            Ok(RawLocal {
+                caller_id: r.get(0)?,
+                var_name: r.get(1)?,
+                type_name: r.get(2)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -1650,7 +1871,19 @@ impl Store {
         for n in nodes {
             let data = serde_json::to_string(n)?;
             let label = enum_str(&n.label)?;
-            stmt.execute(params![n.id, n.name, label, n.language, n.file_path, n.line_start, n.line_end, n.community, n.pagerank, n.betweenness, data])?;
+            stmt.execute(params![
+                n.id,
+                n.name,
+                label,
+                n.language,
+                n.file_path,
+                n.line_start,
+                n.line_end,
+                n.community,
+                n.pagerank,
+                n.betweenness,
+                data
+            ])?;
         }
         Ok(())
     }
@@ -1662,17 +1895,30 @@ impl Store {
         )?;
         for e in edges {
             let data = serde_json::to_string(e)?;
-            stmt.execute(params![e.src, e.dst, enum_str(&e.relation)?, enum_str(&e.tier)?, enum_str(&e.confidence)?, e.src_file, e.src_line, data])?;
+            stmt.execute(params![
+                e.src,
+                e.dst,
+                enum_str(&e.relation)?,
+                enum_str(&e.tier)?,
+                enum_str(&e.confidence)?,
+                e.src_file,
+                e.src_line,
+                data
+            ])?;
         }
         Ok(())
     }
 
     pub fn edge_count(&self) -> Result<i64> {
-        Ok(self.conn.query_row("SELECT count(*) FROM edges", [], |r| r.get(0))?)
+        Ok(self
+            .conn
+            .query_row("SELECT count(*) FROM edges", [], |r| r.get(0))?)
     }
 
     pub fn nodes_by_label(&self, label: &str) -> Result<Vec<Node>> {
-        let mut stmt = self.conn.prepare("SELECT data FROM nodes WHERE label = ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT data FROM nodes WHERE label = ?1")?;
         let rows = stmt.query_map([label], |r| r.get::<_, String>(0))?;
         let mut out = Vec::new();
         for r in rows {
@@ -1682,7 +1928,9 @@ impl Store {
     }
 
     pub fn node_count(&self) -> Result<i64> {
-        Ok(self.conn.query_row("SELECT count(*) FROM nodes", [], |r| r.get(0))?)
+        Ok(self
+            .conn
+            .query_row("SELECT count(*) FROM nodes", [], |r| r.get(0))?)
     }
 }
 
@@ -1695,7 +1943,9 @@ fn enum_str<T: serde::Serialize>(v: &T) -> Result<String> {
 
 /// Inverse of `enum_str`: parse a unit-variant enum from its stored column text.
 fn enum_from<T: serde::de::DeserializeOwned>(s: &str) -> Result<T> {
-    Ok(serde_json::from_value(serde_json::Value::String(s.to_string()))?)
+    Ok(serde_json::from_value(serde_json::Value::String(
+        s.to_string(),
+    ))?)
 }
 
 /// RAII transaction: rolls back on drop unless `commit()` was called, so an
@@ -1710,7 +1960,10 @@ pub struct Txn<'a> {
 impl Store {
     pub fn txn(&self) -> Result<Txn<'_>> {
         self.conn.execute_batch("BEGIN")?;
-        Ok(Txn { store: self, done: false })
+        Ok(Txn {
+            store: self,
+            done: false,
+        })
     }
 }
 
@@ -1738,8 +1991,10 @@ pub fn generation(db: &Path) -> u64 {
     Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .ok()
         .and_then(|c| {
-            c.query_row("SELECT value FROM meta WHERE key='generation'", [], |r| r.get::<_, String>(0))
-                .ok()
+            c.query_row("SELECT value FROM meta WHERE key='generation'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
         })
         .and_then(|s| s.parse().ok())
         .unwrap_or(0)
@@ -1748,7 +2003,11 @@ pub fn generation(db: &Path) -> u64 {
 /// Run an arbitrary READ-ONLY SQL query against the graph database. The
 /// connection is opened read-only, so writes (INSERT/UPDATE/DELETE/DROP) fail
 /// at the engine. Returns (column names, rows-as-strings), capped at `limit`.
-pub fn query_readonly(db: &Path, sql: &str, limit: usize) -> Result<(Vec<String>, Vec<Vec<String>>)> {
+pub fn query_readonly(
+    db: &Path,
+    sql: &str,
+    limit: usize,
+) -> Result<(Vec<String>, Vec<Vec<String>>)> {
     register_vec_extension();
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut stmt = conn.prepare(sql)?;
@@ -1789,9 +2048,17 @@ mod tests {
 
     fn node(id: &str) -> Node {
         Node {
-            id: id.into(), label: NodeLabel::Function, name: id.into(),
-            file_path: "f.rs".into(), line_start: 1, line_end: 2, language: "rust".into(),
-            metadata: Metadata::new(), community: None, pagerank: 0.0, betweenness: 0.0,
+            id: id.into(),
+            label: NodeLabel::Function,
+            name: id.into(),
+            file_path: "f.rs".into(),
+            line_start: 1,
+            line_end: 2,
+            language: "rust".into(),
+            metadata: Metadata::new(),
+            community: None,
+            pagerank: 0.0,
+            betweenness: 0.0,
         }
     }
 
@@ -1807,7 +2074,10 @@ mod tests {
     #[test]
     fn search_ranks_code_first_dedups_and_caps_docs() {
         let s = Store::open_in_memory().unwrap();
-        let mut nodes = vec![Node { name: "getProfile".into(), ..node("m.getprofile") }];
+        let mut nodes = vec![Node {
+            name: "getProfile".into(),
+            ..node("m.getprofile")
+        }];
         for i in 0..8 {
             // two chunks in file 0 (must collapse), one chunk in files 1..8
             for c in 0..if i == 0 { 2 } else { 1 } {
@@ -1827,10 +2097,20 @@ mod tests {
         }
         s.bulk_upsert_nodes(&nodes).unwrap();
         let hits = s.search_smart("getProfile", 20).unwrap();
-        assert_eq!(hits[0].name, "getProfile", "code symbol must outrank doc fragments");
+        assert_eq!(
+            hits[0].name, "getProfile",
+            "code symbol must outrank doc fragments"
+        );
         assert_eq!(hits[0].label, NodeLabel::Function);
-        let docs: Vec<&Node> = hits.iter().filter(|n| n.label == NodeLabel::Document).collect();
-        assert!(docs.len() <= 5, "docs must be capped to a footnote when code answered: {}", docs.len());
+        let docs: Vec<&Node> = hits
+            .iter()
+            .filter(|n| n.label == NodeLabel::Document)
+            .collect();
+        assert!(
+            docs.len() <= 5,
+            "docs must be capped to a footnote when code answered: {}",
+            docs.len()
+        );
         let mut files: Vec<&str> = docs.iter().map(|n| n.file_path.as_str()).collect();
         files.sort_unstable();
         files.dedup();
@@ -1843,9 +2123,14 @@ mod tests {
         s.upsert_node(&node("a")).unwrap();
         s.upsert_node(&node("b")).unwrap();
         s.upsert_edge(&Edge {
-            src: "a".into(), dst: "b".into(), relation: EdgeRelation::Calls,
-            tier: ResolutionTier::TreeSitter, confidence: Confidence::Extracted,
-            src_file: "f.rs".into(), src_line: 1, metadata: Metadata::new(),
+            src: "a".into(),
+            dst: "b".into(),
+            relation: EdgeRelation::Calls,
+            tier: ResolutionTier::TreeSitter,
+            confidence: Confidence::Extracted,
+            src_file: "f.rs".into(),
+            src_line: 1,
+            metadata: Metadata::new(),
         })
         .unwrap();
         assert_eq!(s.get_node("a").unwrap().unwrap().name, "a");
@@ -1861,12 +2146,20 @@ mod tests {
             s.upsert_node(&node(id)).unwrap();
         }
         let h = Hyperedge {
-            id: "h1".into(), relation: HyperedgeRelation::Implement, label: "impls".into(),
-            confidence: Confidence::Extracted, tier: ResolutionTier::TreeSitter, metadata: Metadata::new(),
+            id: "h1".into(),
+            relation: HyperedgeRelation::Implement,
+            label: "impls".into(),
+            confidence: Confidence::Extracted,
+            tier: ResolutionTier::TreeSitter,
+            metadata: Metadata::new(),
         };
         let members: Vec<HyperedgeMember> = ["a", "b", "c"]
             .iter()
-            .map(|n| HyperedgeMember { hyperedge_id: "h1".into(), node_id: (*n).into(), role: None })
+            .map(|n| HyperedgeMember {
+                hyperedge_id: "h1".into(),
+                node_id: (*n).into(),
+                role: None,
+            })
             .collect();
         s.upsert_hyperedge(&h, &members).unwrap();
         let got = s.get_hyperedges_for_node("b").unwrap();
@@ -1882,16 +2175,25 @@ mod tests {
         }
         // c1 resolves to foo; c2 and c3 call "foo" textually but never resolved.
         s.upsert_edge(&Edge {
-            src: "c1".into(), dst: "foo".into(), relation: EdgeRelation::Calls,
-            tier: ResolutionTier::TreeSitter, confidence: Confidence::Extracted,
-            src_file: "f.rs".into(), src_line: 1, metadata: Metadata::new(),
+            src: "c1".into(),
+            dst: "foo".into(),
+            relation: EdgeRelation::Calls,
+            tier: ResolutionTier::TreeSitter,
+            confidence: Confidence::Extracted,
+            src_file: "f.rs".into(),
+            src_line: 1,
+            metadata: Metadata::new(),
         })
         .unwrap();
         let raw = |caller: &str| codegraph_core::RawCall {
-            caller_id: caller.into(), callee_name: "foo".into(), line: 1,
-            receiver: codegraph_core::Receiver::Bare, enclosing_class: None,
+            caller_id: caller.into(),
+            callee_name: "foo".into(),
+            line: 1,
+            receiver: codegraph_core::Receiver::Bare,
+            enclosing_class: None,
         };
-        s.save_calls("f.rs", &[raw("c1"), raw("c2"), raw("c3")]).unwrap();
+        s.save_calls("f.rs", &[raw("c1"), raw("c2"), raw("c3")])
+            .unwrap();
 
         let cov = s.coverage_for_callers("foo").unwrap();
         assert_eq!(cov.total_call_sites, 3);
@@ -1939,7 +2241,11 @@ mod tests {
         s.upsert_vector("sym", &[0.1, 0.2, 0.3]).unwrap();
         assert_eq!(s.all_vectors().unwrap().len(), 1);
         s.delete_file_data("f.rs").unwrap();
-        assert_eq!(s.all_vectors().unwrap().len(), 0, "embeddings must be pruned with their file's nodes");
+        assert_eq!(
+            s.all_vectors().unwrap().len(),
+            0,
+            "embeddings must be pruned with their file's nodes"
+        );
     }
 
     #[test]
@@ -1971,10 +2277,16 @@ mod tests {
         s.upsert_node(&node("main")).unwrap();
         s.upsert_node(&node("helper")).unwrap();
         s.upsert_edge(&Edge {
-            src: "main".into(), dst: "helper".into(), relation: EdgeRelation::Calls,
-            tier: ResolutionTier::TreeSitter, confidence: Confidence::Inferred,
-            src_file: "f.rs".into(), src_line: 1, metadata: Metadata::new(),
-        }).unwrap();
+            src: "main".into(),
+            dst: "helper".into(),
+            relation: EdgeRelation::Calls,
+            tier: ResolutionTier::TreeSitter,
+            confidence: Confidence::Inferred,
+            src_file: "f.rs".into(),
+            src_line: 1,
+            metadata: Metadata::new(),
+        })
+        .unwrap();
         let callers = s.callers_of("helper").unwrap();
         assert_eq!(callers.len(), 1);
         assert_eq!(callers[0].name, "main");
@@ -1992,7 +2304,10 @@ mod tests {
         // Stored L2-normalized: unit magnitude, direction preserved (v[1]/v[0] == 2.0).
         let mag: f32 = all[0].1.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((mag - 1.0).abs() < 1e-5, "vector stored normalized");
-        assert!((all[0].1[1] / all[0].1[0] - 2.0).abs() < 1e-5, "direction preserved");
+        assert!(
+            (all[0].1[1] / all[0].1[0] - 2.0).abs() < 1e-5,
+            "direction preserved"
+        );
     }
 
     #[test]
@@ -2035,15 +2350,25 @@ mod tests {
     fn graph_nodes_strips_doc_text_only() {
         let s = Store::open_in_memory().unwrap();
         let mut doc = node("doc1");
-        doc.metadata.insert("text".into(), serde_json::json!("a huge chunk"));
-        doc.metadata.insert("content_type".into(), serde_json::json!("md"));
+        doc.metadata
+            .insert("text".into(), serde_json::json!("a huge chunk"));
+        doc.metadata
+            .insert("content_type".into(), serde_json::json!("md"));
         s.upsert_node(&doc).unwrap();
         let light = &s.graph_nodes().unwrap()[0];
         assert!(!light.metadata.contains_key("text"), "chunk text stripped");
-        assert_eq!(light.metadata.get("content_type"), Some(&serde_json::json!("md")));
+        assert_eq!(
+            light.metadata.get("content_type"),
+            Some(&serde_json::json!("md"))
+        );
         assert_eq!(light.id, "doc1");
         // the full row still has it
-        assert!(s.get_node("doc1").unwrap().unwrap().metadata.contains_key("text"));
+        assert!(s
+            .get_node("doc1")
+            .unwrap()
+            .unwrap()
+            .metadata
+            .contains_key("text"));
     }
 
     #[test]
@@ -2052,9 +2377,14 @@ mod tests {
         s.upsert_node(&node("a")).unwrap();
         s.upsert_node(&node("b")).unwrap();
         s.upsert_edge(&Edge {
-            src: "a".into(), dst: "b".into(), relation: EdgeRelation::Calls,
-            tier: ResolutionTier::Scip, confidence: Confidence::Inferred,
-            src_file: "f.rs".into(), src_line: 7, metadata: Metadata::new(),
+            src: "a".into(),
+            dst: "b".into(),
+            relation: EdgeRelation::Calls,
+            tier: ResolutionTier::Scip,
+            confidence: Confidence::Inferred,
+            src_file: "f.rs".into(),
+            src_line: 7,
+            metadata: Metadata::new(),
         })
         .unwrap();
         let (full, light) = (s.all_edges().unwrap(), s.graph_edges().unwrap());
@@ -2066,7 +2396,8 @@ mod tests {
     fn update_analytics_syncs_columns_and_json() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_node(&node("f")).unwrap();
-        s.update_analytics(&[("f".into(), 2, 0.5, 1.5, 3, 4)]).unwrap();
+        s.update_analytics(&[("f".into(), 2, 0.5, 1.5, 3, 4)])
+            .unwrap();
         let n = s.get_node("f").unwrap().unwrap();
         assert_eq!(n.community, Some(2));
         assert_eq!(n.pagerank, 0.5);
@@ -2094,7 +2425,10 @@ mod tests {
             s.upsert_node(&node("ghost")).unwrap();
             // dropped without commit → rollback
         }
-        assert!(s.get_node("ghost").unwrap().is_none(), "uncommitted txn must roll back");
+        assert!(
+            s.get_node("ghost").unwrap().is_none(),
+            "uncommitted txn must roll back"
+        );
         let t = s.txn().unwrap();
         s.upsert_node(&node("kept")).unwrap();
         t.commit().unwrap();
@@ -2105,7 +2439,17 @@ mod tests {
     fn calls_roundtrip_and_prune() {
         use codegraph_core::RawCall;
         let s = Store::open_in_memory().unwrap();
-        s.save_calls("a.rs", &[RawCall { caller_id: "a.main".into(), callee_name: "helper".into(), line: 2, receiver: Default::default(), enclosing_class: None }]).unwrap();
+        s.save_calls(
+            "a.rs",
+            &[RawCall {
+                caller_id: "a.main".into(),
+                callee_name: "helper".into(),
+                line: 2,
+                receiver: Default::default(),
+                enclosing_class: None,
+            }],
+        )
+        .unwrap();
         assert_eq!(s.all_calls().unwrap().len(), 1);
         s.delete_file_data("a.rs").unwrap();
         assert_eq!(s.all_calls().unwrap().len(), 0);
@@ -2116,7 +2460,10 @@ mod tests {
 mod subword_tests {
     #[test]
     fn subwords_splits_camel_snake_digits() {
-        assert_eq!(super::subwords("OrderCheckoutSession"), "order checkout session");
+        assert_eq!(
+            super::subwords("OrderCheckoutSession"),
+            "order checkout session"
+        );
         assert_eq!(super::subwords("HTTPServer2Go"), "http server 2 go");
         assert_eq!(super::subwords("snake_case_name"), "snake case name");
         assert_eq!(super::subwords("plain"), ""); // single token adds nothing

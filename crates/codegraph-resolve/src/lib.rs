@@ -27,7 +27,9 @@ pub fn import_scip(bytes: &[u8], nodes: &[Node]) -> anyhow::Result<Vec<Edge>> {
     // Pass 1: symbol -> defining node (first definition wins).
     let mut sym_def: HashMap<&str, &Node> = HashMap::new();
     for doc in &index.documents {
-        let Some(file_nodes) = by_file.get(doc.relative_path.as_str()) else { continue };
+        let Some(file_nodes) = by_file.get(doc.relative_path.as_str()) else {
+            continue;
+        };
         for occ in &doc.occurrences {
             if occ.symbol_roles & ROLE_DEFINITION == 0 || occ.range.is_empty() {
                 continue;
@@ -43,25 +45,36 @@ pub fn import_scip(bytes: &[u8], nodes: &[Node]) -> anyhow::Result<Vec<Edge>> {
     let mut edges = Vec::new();
     let mut seen: HashSet<(&str, &str, EdgeRelation)> = HashSet::new();
     for doc in &index.documents {
-        let Some(file_nodes) = by_file.get(doc.relative_path.as_str()) else { continue };
+        let Some(file_nodes) = by_file.get(doc.relative_path.as_str()) else {
+            continue;
+        };
         for occ in &doc.occurrences {
             if occ.symbol_roles & ROLE_DEFINITION != 0 || occ.range.is_empty() {
                 continue;
             }
-            let Some(&dst) = sym_def.get(occ.symbol.as_str()) else { continue };
+            let Some(&dst) = sym_def.get(occ.symbol.as_str()) else {
+                continue;
+            };
             let line = occ.range[0] as u32 + 1;
-            let Some(src) = enclosing_callable(file_nodes, line) else { continue };
+            let Some(src) = enclosing_callable(file_nodes, line) else {
+                continue;
+            };
             if src.id == dst.id {
                 continue;
             }
-            let Some(relation) = edge_relation(dst.label) else { continue };
+            let Some(relation) = edge_relation(dst.label) else {
+                continue;
+            };
             if !seen.insert((src.id.as_str(), dst.id.as_str(), relation)) {
                 continue;
             }
             // justification tags the merge SOURCE (vs "IndexStore") so reuse,
             // audit, and per-tier reporting can tell the compiler tiers apart.
             let mut metadata = Metadata::new();
-            metadata.insert("justification".into(), serde_json::Value::String("Scip".into()));
+            metadata.insert(
+                "justification".into(),
+                serde_json::Value::String("Scip".into()),
+            );
             edges.push(Edge {
                 src: src.id.clone(),
                 dst: dst.id.clone(),
@@ -104,7 +117,10 @@ fn best_def_node<'a>(file_nodes: &[&'a Node], line: u32) -> Option<&'a Node> {
         if n.line_start == line {
             return Some(n);
         }
-        if n.line_start <= line && line <= n.line_end && best.is_none_or(|b| n.line_start > b.line_start) {
+        if n.line_start <= line
+            && line <= n.line_end
+            && best.is_none_or(|b| n.line_start > b.line_start)
+        {
             best = Some(n);
         }
     }
@@ -118,7 +134,10 @@ fn enclosing_callable<'a>(file_nodes: &[&'a Node], line: u32) -> Option<&'a Node
         if !matches!(n.label, NodeLabel::Function | NodeLabel::Method) {
             continue;
         }
-        if n.line_start <= line && line <= n.line_end && best.is_none_or(|b| n.line_start > b.line_start) {
+        if n.line_start <= line
+            && line <= n.line_end
+            && best.is_none_or(|b| n.line_start > b.line_start)
+        {
             best = Some(n);
         }
     }

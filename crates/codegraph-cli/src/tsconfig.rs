@@ -43,25 +43,28 @@ impl AliasMap {
             .find(|s| s.dir.is_empty() || importer_rel.starts_with(&format!("{}/", s.dir)));
         if let Some(scope) = scope {
             for (pattern, targets) in &scope.rules {
-            let expanded: Vec<String> = match pattern.split_once('*') {
-                Some((pre, suf)) => {
-                    if !(spec.starts_with(pre) && spec.ends_with(suf) && spec.len() >= pre.len() + suf.len()) {
-                        continue;
+                let expanded: Vec<String> = match pattern.split_once('*') {
+                    Some((pre, suf)) => {
+                        if !(spec.starts_with(pre)
+                            && spec.ends_with(suf)
+                            && spec.len() >= pre.len() + suf.len())
+                        {
+                            continue;
+                        }
+                        let star = &spec[pre.len()..spec.len() - suf.len()];
+                        targets.iter().map(|t| t.replacen('*', star, 1)).collect()
                     }
-                    let star = &spec[pre.len()..spec.len() - suf.len()];
-                    targets.iter().map(|t| t.replacen('*', star, 1)).collect()
-                }
-                None => {
-                    if spec != pattern {
-                        continue;
+                    None => {
+                        if spec != pattern {
+                            continue;
+                        }
+                        targets.clone()
                     }
-                    targets.clone()
-                }
-            };
-            // tsc tries targets in declaration order and takes the first that
-            // exists — the FIRST target is the declared priority. Precision is
-            // still double-gated: the resolver only binds when the target file
-            // actually defines the callee (a dead first target just drops).
+                };
+                // tsc tries targets in declaration order and takes the first that
+                // exists — the FIRST target is the declared priority. Precision is
+                // still double-gated: the resolver only binds when the target file
+                // actually defines the callee (a dead first target just drops).
                 let target = expanded.first()?;
                 let joined = join_rel(&scope.base_url, target);
                 return Some(format!("/{joined}"));
@@ -75,7 +78,11 @@ impl AliasMap {
             // additionally require a '/' in the spec (bare package names skip).
             if spec.contains('/') {
                 let joined = join_rel(&scope.base_url, spec);
-                if joined.split('/').next().is_some_and(|first| self.top_dirs.contains(first)) {
+                if joined
+                    .split('/')
+                    .next()
+                    .is_some_and(|first| self.top_dirs.contains(first))
+                {
                     return Some(format!("/{joined}"));
                 }
             }
@@ -184,7 +191,11 @@ fn read_config(path: &Path, root: &Path, depth: u8) -> Option<ConfigParts> {
             dir.join(ext)
         } else {
             let p = root.join("node_modules").join(ext);
-            if p.extension().is_some() || p.is_file() { p } else { p.join("tsconfig.json") }
+            if p.extension().is_some() || p.is_file() {
+                p
+            } else {
+                p.join("tsconfig.json")
+            }
         };
         if parent.extension().is_none() {
             parent.set_extension("json");
@@ -197,7 +208,11 @@ fn read_config(path: &Path, root: &Path, depth: u8) -> Option<ConfigParts> {
     let co = json.get("compilerOptions");
     if let Some(b) = co.and_then(|c| c.get("baseUrl")).and_then(|v| v.as_str()) {
         // resolve relative to the DECLARING config's dir, repo-relative
-        let rel_dir = dir.strip_prefix(root).unwrap_or(Path::new("")).to_string_lossy().replace('\\', "/");
+        let rel_dir = dir
+            .strip_prefix(root)
+            .unwrap_or(Path::new(""))
+            .to_string_lossy()
+            .replace('\\', "/");
         base_url = Some(join_rel(&rel_dir, b));
     }
     if let Some(p) = co.and_then(|c| c.get("paths")).and_then(|v| v.as_object()) {
@@ -206,7 +221,11 @@ fn read_config(path: &Path, root: &Path, depth: u8) -> Option<ConfigParts> {
             .map(|(k, v)| {
                 let targets = v
                     .as_array()
-                    .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|t| t.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 (k.clone(), targets)
             })
@@ -255,12 +274,15 @@ pub fn load_alias_maps(root: &Path) -> (AliasMap, String) {
     // (Angular keeps paths in tsconfig.app.json). Deterministic: sorted names.
     // (is_plain, file name, baseUrl, rules)
     type ScopeCandidate = (bool, String, Option<String>, Vec<(String, Vec<String>)>);
-    let mut by_dir: std::collections::BTreeMap<String, Vec<ScopeCandidate>> = std::collections::BTreeMap::new();
+    let mut by_dir: std::collections::BTreeMap<String, Vec<ScopeCandidate>> =
+        std::collections::BTreeMap::new();
     for (rel, path) in &configs {
         let content = std::fs::read_to_string(path).unwrap_or_default();
         h.update(rel.as_bytes());
         h.update(Sha256::digest(content.as_bytes()));
-        let Some((base_url, rules)) = read_config(path, root, 0) else { continue };
+        let Some((base_url, rules)) = read_config(path, root, 0) else {
+            continue;
+        };
         let Some(rules) = rules else { continue };
         if rules.is_empty() {
             continue;
@@ -270,7 +292,10 @@ pub fn load_alias_maps(root: &Path) -> (AliasMap, String) {
             None => (String::new(), rel.clone()),
         };
         let is_plain = name == "tsconfig.json";
-        by_dir.entry(dir).or_default().push((is_plain, name, base_url, rules));
+        by_dir
+            .entry(dir)
+            .or_default()
+            .push((is_plain, name, base_url, rules));
     }
     let mut scopes = Vec::new();
     for (dir, mut cands) in by_dir {
@@ -278,7 +303,11 @@ pub fn load_alias_maps(root: &Path) -> (AliasMap, String) {
         let (_, _, base_url, rules) = cands.remove(0);
         // baseUrl defaults to the config's own dir when paths is present
         let base_url = base_url.unwrap_or_else(|| dir.clone());
-        scopes.push(TsConfigScope { dir, base_url, rules });
+        scopes.push(TsConfigScope {
+            dir,
+            base_url,
+            rules,
+        });
     }
     // nearest-ancestor wins: longest dir first, tie-break lexicographic
     scopes.sort_by(|a, b| b.dir.len().cmp(&a.dir.len()).then(a.dir.cmp(&b.dir)));
@@ -313,8 +342,16 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("cg_tsc_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        write(&tmp, "tsconfig.base.json", r#"{"compilerOptions":{"baseUrl":".","paths":{"@root/*":["lib/*"]}}}"#);
-        write(&tmp, "tsconfig.json", r#"{"extends":"./tsconfig.base.json"}"#);
+        write(
+            &tmp,
+            "tsconfig.base.json",
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@root/*":["lib/*"]}}}"#,
+        );
+        write(
+            &tmp,
+            "tsconfig.json",
+            r#"{"extends":"./tsconfig.base.json"}"#,
+        );
         write(
             &tmp,
             "web/tsconfig.json",
@@ -322,17 +359,33 @@ mod tests {
         );
         let (map, hash) = load_alias_maps(&tmp);
         // nearest scope for files under web/
-        assert_eq!(map.resolve("web/src/a.ts", "@app/services/user"), Some("/web/src/services/user".into()));
-        assert_eq!(map.resolve("web/src/a.ts", "exact"), Some("/web/src/exact-mod".into()));
+        assert_eq!(
+            map.resolve("web/src/a.ts", "@app/services/user"),
+            Some("/web/src/services/user".into())
+        );
+        assert_eq!(
+            map.resolve("web/src/a.ts", "exact"),
+            Some("/web/src/exact-mod".into())
+        );
         // root scope via extends chain
-        assert_eq!(map.resolve("cli/main.ts", "@root/util"), Some("/lib/util".into()));
+        assert_eq!(
+            map.resolve("cli/main.ts", "@root/util"),
+            Some("/lib/util".into())
+        );
         // external package → None
         assert_eq!(map.resolve("web/src/a.ts", "react"), None);
         // hash changes when a config changes
-        write(&tmp, "web/tsconfig.json", r#"{"compilerOptions":{"paths":{"@app/*":["other/*"]}}}"#);
+        write(
+            &tmp,
+            "web/tsconfig.json",
+            r#"{"compilerOptions":{"paths":{"@app/*":["other/*"]}}}"#,
+        );
         let (map2, hash2) = load_alias_maps(&tmp);
         assert_ne!(hash, hash2);
-        assert_eq!(map2.resolve("web/src/a.ts", "@app/x"), Some("/web/other/x".into()));
+        assert_eq!(
+            map2.resolve("web/src/a.ts", "@app/x"),
+            Some("/web/other/x".into())
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -341,7 +394,11 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("cg_tsc_multi_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        write(&tmp, "tsconfig.json", r#"{"compilerOptions":{"paths":{"@x/*":["a/*","b/*"]}}}"#);
+        write(
+            &tmp,
+            "tsconfig.json",
+            r#"{"compilerOptions":{"paths":{"@x/*":["a/*","b/*"]}}}"#,
+        );
         let (map, _) = load_alias_maps(&tmp);
         assert_eq!(
             map.resolve("src/f.ts", "@x/y").as_deref(),
@@ -358,9 +415,16 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         // Angular-style: paths live in tsconfig.app.json, plain config has none
         write(&tmp, "tsconfig.json", r#"{"compilerOptions":{}}"#);
-        write(&tmp, "tsconfig.app.json", r#"{"compilerOptions":{"baseUrl":".","paths":{"@app/*":["src/app/*"]}}}"#);
+        write(
+            &tmp,
+            "tsconfig.app.json",
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@app/*":["src/app/*"]}}}"#,
+        );
         let (map, _) = load_alias_maps(&tmp);
-        assert_eq!(map.resolve("src/main.ts", "@app/core"), Some("/src/app/core".into()));
+        assert_eq!(
+            map.resolve("src/main.ts", "@app/core"),
+            Some("/src/app/core".into())
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -378,7 +442,10 @@ mod tests {
         let (map, _) = load_alias_maps(&tmp);
         // rules inherited through the package base; baseUrl of the package dir
         // is inside node_modules (documented oddity), so just assert the rule fires
-        assert!(map.resolve("src/a.ts", "~/util").is_some(), "package extends chain must be followed");
+        assert!(
+            map.resolve("src/a.ts", "~/util").is_some(),
+            "package extends chain must be followed"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

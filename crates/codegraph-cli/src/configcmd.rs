@@ -24,10 +24,17 @@ const KEYS: &[(&str, &str)] = &[
 
 fn resolved(cfg: &Config, key: &str) -> Option<String> {
     Some(match key {
-        "cache_dir" => cfg.cache_dir.clone().unwrap_or_else(|| "~/.cache/codegraph (default)".into()),
+        "cache_dir" => cfg
+            .cache_dir
+            .clone()
+            .unwrap_or_else(|| "~/.cache/codegraph (default)".into()),
         "embed_model" => cfg.embed_model.clone().unwrap_or_else(|| "(none)".into()),
         "llm.provider" => cfg.llm.provider.clone(),
-        "llm.base_url" => cfg.llm.base_url.clone().unwrap_or_else(|| "(auto-detect)".into()),
+        "llm.base_url" => cfg
+            .llm
+            .base_url
+            .clone()
+            .unwrap_or_else(|| "(auto-detect)".into()),
         "llm.model" => cfg.llm.model.clone(),
         "llm.rerank" => cfg.llm.rerank.to_string(),
         "llm.hyde" => cfg.llm.hyde.to_string(),
@@ -60,7 +67,10 @@ pub fn path() -> Result<()> {
     }
     match project_config_path(&cwd) {
         Some(p) => println!("project: {}{}", p.display(), mark(&p)),
-        None => println!("project: {}  (none yet — `codegraph config set <k> <v> --local` creates it)", cwd.join(".codegraph.toml").display()),
+        None => println!(
+            "project: {}  (none yet — `codegraph config set <k> <v> --local` creates it)",
+            cwd.join(".codegraph.toml").display()
+        ),
     }
     Ok(())
 }
@@ -73,7 +83,13 @@ pub fn get(cwd: &Path, key: &str) -> Result<()> {
 }
 
 fn unknown(key: &str) -> anyhow::Error {
-    anyhow!("unknown key '{key}'. Known keys:\n  {}", KEYS.iter().map(|(k, _)| *k).collect::<Vec<_>>().join("\n  "))
+    anyhow!(
+        "unknown key '{key}'. Known keys:\n  {}",
+        KEYS.iter()
+            .map(|(k, _)| *k)
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    )
 }
 
 fn target(local: bool, cwd: &Path) -> PathBuf {
@@ -102,17 +118,27 @@ fn write_doc(path: &Path, doc: &toml_edit::DocumentMut) -> Result<()> {
 
 /// `codegraph config set <key> <value> [--local]`.
 pub fn set(cwd: &Path, key: &str, value: &str, local: bool) -> Result<()> {
-    let (_, ty) = KEYS.iter().find(|(k, _)| *k == key).ok_or_else(|| unknown(key))?;
+    let (_, ty) = KEYS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .ok_or_else(|| unknown(key))?;
     let path = target(local, cwd);
     let mut doc = load_doc(&path);
     let item = match *ty {
-        "bool" => toml_edit::value(matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")),
+        "bool" => toml_edit::value(matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )),
         _ => toml_edit::value(value),
     };
     let parts: Vec<&str> = key.split('.').collect();
     let mut tbl = doc.as_table_mut();
     for p in &parts[..parts.len() - 1] {
-        tbl = tbl.entry(p).or_insert(toml_edit::Item::Table(toml_edit::Table::new())).as_table_mut().ok_or_else(|| anyhow!("'{p}' is not a table"))?;
+        tbl = tbl
+            .entry(p)
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| anyhow!("'{p}' is not a table"))?;
     }
     tbl[parts[parts.len() - 1]] = item;
     write_doc(&path, &doc)?;
@@ -122,7 +148,9 @@ pub fn set(cwd: &Path, key: &str, value: &str, local: bool) -> Result<()> {
 
 /// `codegraph config unset <key> [--local]`.
 pub fn unset(cwd: &Path, key: &str, local: bool) -> Result<()> {
-    KEYS.iter().find(|(k, _)| *k == key).ok_or_else(|| unknown(key))?;
+    KEYS.iter()
+        .find(|(k, _)| *k == key)
+        .ok_or_else(|| unknown(key))?;
     let path = target(local, cwd);
     let mut doc = load_doc(&path);
     let parts: Vec<&str> = key.split('.').collect();
@@ -149,16 +177,22 @@ pub fn edit(cwd: &Path, local: bool) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&path, "# CodeGraph config — see `codegraph config` for keys.\n")?;
+        std::fs::write(
+            &path,
+            "# CodeGraph config — see `codegraph config` for keys.\n",
+        )?;
     }
-    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".into());
     let status = std::process::Command::new(&editor).arg(&path).status()?;
     if !status.success() {
         return Err(anyhow!("editor '{editor}' exited with an error"));
     }
     // Re-parse to surface syntax errors immediately.
     let s = std::fs::read_to_string(&path)?;
-    s.parse::<toml_edit::DocumentMut>().map_err(|e| anyhow!("{} has a TOML error: {e}", path.display()))?;
+    s.parse::<toml_edit::DocumentMut>()
+        .map_err(|e| anyhow!("{} has a TOML error: {e}", path.display()))?;
     println!("saved {}", path.display());
     Ok(())
 }

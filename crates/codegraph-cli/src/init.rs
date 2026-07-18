@@ -69,27 +69,33 @@ pub fn wire_mcp(_repo: &Path, print_only: bool) -> Result<()> {
     // repo moved, EVERY project got a confidently-empty graph (measured in the
     // field). cwd-following serves each project its own graph.
     let entry = serde_json::json!({"command": "codegraph", "args": ["mcp"]});
-    let snippet =
-        serde_json::to_string_pretty(&serde_json::json!({"mcpServers": {"codegraph": entry.clone()}}))?;
+    let snippet = serde_json::to_string_pretty(
+        &serde_json::json!({"mcpServers": {"codegraph": entry.clone()}}),
+    )?;
     let home = std::env::var("HOME").unwrap_or_default();
     let path = Path::new(&home).join(".claude.json");
     if print_only || !path.exists() {
         println!("Add this to your agent's MCP config:\n{snippet}");
         return Ok(());
     }
-    let mut root: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path)?).unwrap_or_else(|_| serde_json::json!({}));
+    let mut root: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)
+        .unwrap_or_else(|_| serde_json::json!({}));
     if !root.is_object() {
         root = serde_json::json!({});
     }
     let obj = root.as_object_mut().unwrap();
-    let servers = obj.entry("mcpServers").or_insert_with(|| serde_json::json!({}));
+    let servers = obj
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
     if let Some(sm) = servers.as_object_mut() {
         sm.insert("codegraph".to_string(), entry);
     }
     let _ = std::fs::copy(&path, path.with_extension("json.bak"));
     std::fs::write(&path, serde_json::to_string_pretty(&root)?)?;
-    println!("  → wired MCP into {} (backup .bak written)", path.display());
+    println!(
+        "  → wired MCP into {} (backup .bak written)",
+        path.display()
+    );
     Ok(())
 }
 
@@ -145,7 +151,11 @@ fn agent_nudge(repo: &Path, remove: bool) -> Result<()> {
     if !v.is_object() {
         v = serde_json::json!({});
     }
-    let hooks = v.as_object_mut().unwrap().entry("hooks").or_insert_with(|| serde_json::json!({}));
+    let hooks = v
+        .as_object_mut()
+        .unwrap()
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
     if let Some(h) = hooks.as_object_mut() {
         h.insert(
             "SessionStart".to_string(),
@@ -210,18 +220,31 @@ pub fn run_init(
     if !no_index && ask("Index this repo now?", true, interactive) {
         let db = index::db_path(repo);
         let stats = index::index_dir(repo, &db, false, None, false, None)?;
-        println!("  → indexed {} files → {} nodes, {} edges", stats.files, stats.nodes, stats.edges);
+        println!(
+            "  → indexed {} files → {} nodes, {} edges",
+            stats.files, stats.nodes, stats.edges
+        );
     }
 
     // Step 2: MCP wiring (global ~/.claude.json) + agent nudge (local repo files).
     // `--print` only affects the global wiring; the local nudge is always written.
-    if !no_mcp && ask("Wire CodeGraph into Claude Code (MCP) + add the agent nudge?", true, interactive) {
+    if !no_mcp
+        && ask(
+            "Wire CodeGraph into Claude Code (MCP) + add the agent nudge?",
+            true,
+            interactive,
+        )
+    {
         wire_mcp(repo, print)?;
         agent_nudge(repo, false)?;
     }
 
     // Step 3: optional AI features (report only — never install/block)
-    if ask("Enable optional AI features (semantic search / ask / rerank)?", false, interactive) {
+    if ask(
+        "Enable optional AI features (semantic search / ask / rerank)?",
+        false,
+        interactive,
+    ) {
         report_ai();
     } else {
         println!("  → AI features off. Core works fully offline; run `codegraph doctor` to check models later.");
@@ -244,12 +267,17 @@ fn report_ai() {
         Some(b) => {
             println!("  → provider: {} (chat model: {})", b.provider(), b.model());
             if b.embed_model().is_none() {
-                println!("  Semantic search needs a separate EMBEDDING model. To enable, run one of:");
+                println!(
+                    "  Semantic search needs a separate EMBEDDING model. To enable, run one of:"
+                );
                 println!("      ollama pull nomic-embed-text");
                 println!("      lms get nomic-embed-text-v1.5  (then `lms server start`)");
                 println!("  then:  codegraph semantic-index");
             } else {
-                println!("  → embedding model ready ({}). Run: codegraph semantic-index", b.embed_model().unwrap_or("?"));
+                println!(
+                    "  → embedding model ready ({}). Run: codegraph semantic-index",
+                    b.embed_model().unwrap_or("?")
+                );
             }
         }
         None => {

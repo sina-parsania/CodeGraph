@@ -12,31 +12,84 @@ pub type Metadata = BTreeMap<String, serde_json::Value>;
 /// least OCR/EXIF/filename text on the degraded path, per the N7 contract).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NodeLabel {
-    Project, Package, Folder, File, Module, Class, Function, Method, Interface,
-    Enum, Type, Route, Resource, Document, Image, Figure, Topic,
+    Project,
+    Package,
+    Folder,
+    File,
+    Module,
+    Class,
+    Function,
+    Method,
+    Interface,
+    Enum,
+    Type,
+    Route,
+    Resource,
+    Document,
+    Image,
+    Figure,
+    Topic,
     /// Emitted ONLY when an LLM is available. Never emitted on `--no-llm`.
     Concept,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeRelation {
-    Calls, AsyncCalls, UsesType, Implements, Inherits, Defines, MemberOf, Contains,
-    ContainsFile, ContainsFolder, ContainsPackage, Override, HttpCalls, Emits,
-    ListensOn, PublishesTo, SubscribesTo, Configures, Tests, FileChangesWith,
-    Similar, SemanticallySimilar, DataFlows, ConceptuallyRelated, RationaleFor,
-    ParticipateIn, Implement, Form, MemberOfFlow,
+    Calls,
+    AsyncCalls,
+    UsesType,
+    Implements,
+    Inherits,
+    Defines,
+    MemberOf,
+    Contains,
+    ContainsFile,
+    ContainsFolder,
+    ContainsPackage,
+    Override,
+    HttpCalls,
+    Emits,
+    ListensOn,
+    PublishesTo,
+    SubscribesTo,
+    Configures,
+    Tests,
+    FileChangesWith,
+    Similar,
+    SemanticallySimilar,
+    DataFlows,
+    ConceptuallyRelated,
+    RationaleFor,
+    ParticipateIn,
+    Implement,
+    Form,
+    MemberOfFlow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum HyperedgeRelation { ParticipateIn, Implement, Form, MemberOfFlow }
+pub enum HyperedgeRelation {
+    ParticipateIn,
+    Implement,
+    Form,
+    MemberOfFlow,
+}
 
 /// Which mechanism produced an edge, most-precise first. Tagged on every edge so
 /// a consumer can trust-rank (SCIP-verified vs name-matched vs LLM-guessed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ResolutionTier { Scip, TreeSitter, Llm, Ingest }
+pub enum ResolutionTier {
+    Scip,
+    TreeSitter,
+    Llm,
+    Ingest,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Confidence { Extracted, Inferred, Ambiguous }
+pub enum Confidence {
+    Extracted,
+    Inferred,
+    Ambiguous,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
@@ -99,7 +152,11 @@ impl QualifiedName {
         parts.push(normalize(project));
         parts.extend(path_parts.iter().map(|p| normalize(p)));
         parts.push(normalize(name));
-        parts.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(".")
+        parts
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(".")
     }
 }
 
@@ -124,7 +181,11 @@ fn normalize(s: &str) -> String {
 /// points must never render identically.
 pub fn display_label(n: &Node) -> String {
     let segs: Vec<&str> = n.id.split('.').collect();
-    let container = if segs.len() >= 2 { segs[segs.len() - 2] } else { "" };
+    let container = if segs.len() >= 2 {
+        segs[segs.len() - 2]
+    } else {
+        ""
+    };
     let file_name = n.file_path.rsplit('/').next().unwrap_or(&n.file_path);
     let file_stem = file_name.split('.').next().unwrap_or(file_name);
     let prefix = if !container.is_empty()
@@ -244,7 +305,13 @@ impl Coverage {
         } else {
             format!("Coverage: all {total} call sites naming '{name}' resolved — this callers list is complete.")
         };
-        Coverage { resolved, total_call_sites: total, dropped, may_be_incomplete: dropped > 0, note }
+        Coverage {
+            resolved,
+            total_call_sites: total,
+            dropped,
+            may_be_incomplete: dropped > 0,
+            note,
+        }
     }
 
     pub fn callees(resolved: usize, total: usize) -> Self {
@@ -259,7 +326,13 @@ impl Coverage {
         } else {
             format!("Coverage: all {total} outbound call sites resolved — this callees list is complete.")
         };
-        Coverage { resolved, total_call_sites: total, dropped, may_be_incomplete: dropped > 0, note }
+        Coverage {
+            resolved,
+            total_call_sites: total,
+            dropped,
+            may_be_incomplete: dropped > 0,
+            note,
+        }
     }
 }
 
@@ -269,8 +342,14 @@ mod tests {
 
     #[test]
     fn qualified_name_normalizes() {
-        assert_eq!(QualifiedName::build("MyApp", &["src", "auth"], "getProfile"), "myapp.src.auth.getprofile");
-        assert_eq!(QualifiedName::build("a", &["b/c", "d.e"], "F-G"), "a.b_c.d_e.f_g");
+        assert_eq!(
+            QualifiedName::build("MyApp", &["src", "auth"], "getProfile"),
+            "myapp.src.auth.getprofile"
+        );
+        assert_eq!(
+            QualifiedName::build("a", &["b/c", "d.e"], "F-G"),
+            "a.b_c.d_e.f_g"
+        );
         assert_eq!(QualifiedName::build("p", &[], "name"), "p.name");
         assert_eq!(QualifiedName::build("p", &["", "  "], "n"), "p.n");
     }
@@ -278,9 +357,17 @@ mod tests {
     #[test]
     fn enums_roundtrip() {
         let n = Node {
-            id: "p.f".into(), label: NodeLabel::Function, name: "f".into(),
-            file_path: "f.rs".into(), line_start: 1, line_end: 9, language: "rust".into(),
-            metadata: Metadata::new(), community: Some(3), pagerank: 0.5, betweenness: 0.1,
+            id: "p.f".into(),
+            label: NodeLabel::Function,
+            name: "f".into(),
+            file_path: "f.rs".into(),
+            line_start: 1,
+            line_end: 9,
+            language: "rust".into(),
+            metadata: Metadata::new(),
+            community: Some(3),
+            pagerank: 0.5,
+            betweenness: 0.1,
         };
         let j = serde_json::to_string(&n).unwrap();
         let back: Node = serde_json::from_str(&j).unwrap();

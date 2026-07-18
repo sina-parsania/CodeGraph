@@ -34,17 +34,28 @@ pub const ROLE_REL_CALLEDBY: u64 = 1 << 13;
 /// Map the index store's call occurrences onto the existing tree-sitter graph,
 /// producing compiler-grade CALL edges (tier=Lsp, justification=IndexStore).
 /// Mirrors `codegraph-resolve::import_scip`: USR→def-node, then call→edge.
-pub fn import_indexstore(store: &Path, nodes: &[Node], repo_root: &Path) -> anyhow::Result<Vec<Edge>> {
+pub fn import_indexstore(
+    store: &Path,
+    nodes: &[Node],
+    repo_root: &Path,
+) -> anyhow::Result<Vec<Edge>> {
     // Canonicalize: a relative root (`.`) never prefix-matches the store's
     // absolute file paths, which would silently filter every record out.
-    let canon = repo_root.canonicalize().unwrap_or_else(|_| repo_root.to_path_buf());
+    let canon = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
     let occs = read_occurrences(store, &canon)?;
     if std::env::var_os("CODEGRAPH_DEBUG").is_some() {
         eprintln!(
             "indexstore DEBUG: {} occurrences | sample occ file: {:?} | sample swift node: {:?}",
             occs.len(),
-            occs.iter().find(|o| o.file.ends_with(".swift")).map(|o| &o.file),
-            nodes.iter().find(|n| n.file_path.ends_with(".swift")).map(|n| &n.file_path),
+            occs.iter()
+                .find(|o| o.file.ends_with(".swift"))
+                .map(|o| &o.file),
+            nodes
+                .iter()
+                .find(|n| n.file_path.ends_with(".swift"))
+                .map(|n| &n.file_path),
         );
     }
     if occs.is_empty() {
@@ -73,8 +84,13 @@ pub fn import_indexstore(store: &Path, nodes: &[Node], repo_root: &Path) -> anyh
         if o.roles & ROLE_CALL == 0 {
             continue;
         }
-        let Some(caller_usr) = o.caller_usr.as_deref() else { continue };
-        let (Some(&src), Some(&dst)) = (sym_def.get(caller_usr), sym_def.get(o.usr.as_str())) else { continue };
+        let Some(caller_usr) = o.caller_usr.as_deref() else {
+            continue;
+        };
+        let (Some(&src), Some(&dst)) = (sym_def.get(caller_usr), sym_def.get(o.usr.as_str()))
+        else {
+            continue;
+        };
         if src.id == dst.id || !seen.insert((src.id.clone(), dst.id.clone())) {
             continue;
         }
@@ -99,8 +115,10 @@ fn best_def_node<'a>(file_nodes: &[&'a Node], line: u32) -> Option<&'a Node> {
     file_nodes
         .iter()
         .filter(|n| {
-            matches!(n.label, NodeLabel::Function | NodeLabel::Method | NodeLabel::Class | NodeLabel::Interface)
-                && n.line_start <= line
+            matches!(
+                n.label,
+                NodeLabel::Function | NodeLabel::Method | NodeLabel::Class | NodeLabel::Interface
+            ) && n.line_start <= line
                 && line <= n.line_end
         })
         .min_by_key(|n| n.line_end - n.line_start)

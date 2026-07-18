@@ -42,7 +42,8 @@ impl GraphSnapshot {
 /// index) plus the DB mtime as a fallback for pre-generation DBs — mtime alone
 /// has 1-second granularity on some filesystems.
 type SnapKey = (u64, Option<std::time::SystemTime>);
-type GraphCache = std::sync::Arc<std::sync::Mutex<Option<(SnapKey, std::sync::Arc<GraphSnapshot>)>>>;
+type GraphCache =
+    std::sync::Arc<std::sync::Mutex<Option<(SnapKey, std::sync::Arc<GraphSnapshot>)>>>;
 
 /// Identity of the DB file backing a pooled connection: (dev, inode) on unix.
 /// A replaced file (gc + reindex) gets a different inode → the pooled handle
@@ -273,16 +274,24 @@ impl CodeGraphServer {
         if let Ok(mut slot) = self.store_slot.lock() {
             if let Some((cached, store)) = slot.take() {
                 if id.is_some() && cached == id {
-                    return Ok(PooledStore { entry: Some((id, store)), slot: self.store_slot.clone() });
+                    return Ok(PooledStore {
+                        entry: Some((id, store)),
+                        slot: self.store_slot.clone(),
+                    });
                 }
             }
         }
         let store = codegraph_store::Store::open(&self.db_path)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(PooledStore { entry: Some((id, store)), slot: self.store_slot.clone() })
+        Ok(PooledStore {
+            entry: Some((id, store)),
+            slot: self.store_slot.clone(),
+        })
     }
 
-    #[tool(description = "Locate a symbol by NAME (exact/subword/regex). Use ONLY when you know (part of) the identifier. NOT for: conceptual or docs/wiki questions (use semantic_search), who-calls (callers), task context (context), API surface (routes). Returns exact file:line + node kind; beats grep (no comment/string hits).")]
+    #[tool(
+        description = "Locate a symbol by NAME (exact/subword/regex). Use ONLY when you know (part of) the identifier. NOT for: conceptual or docs/wiki questions (use semantic_search), who-calls (callers), task context (context), API surface (routes). Returns exact file:line + node kind; beats grep (no comment/string hits)."
+    )]
     async fn search(&self, args: Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let limit = args.0.limit.unwrap_or(20);
@@ -324,7 +333,11 @@ impl CodeGraphServer {
             .collect();
         let mut out = serde_json::json!({ "hits": hits });
         if !concise() {
-            out["_hints"] = serde_json::json!(["get_node(id, snippet=true) for source/full text", "callers(name) to trace usage", "context(query) to assemble task context"]);
+            out["_hints"] = serde_json::json!([
+                "get_node(id, snippet=true) for source/full text",
+                "callers(name) to trace usage",
+                "context(query) to assemble task context"
+            ]);
         }
         if !fields.is_empty() {
             let rows: Vec<serde_json::Value> = fields
@@ -336,7 +349,9 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(out)?]))
     }
 
-    #[tool(description = "Get full details of one symbol by its fully-qualified id (from a prior search/callers result): kind, file:line, language, metadata. Pass snippet=true to ALSO get its exact source code — cheaper than reading the whole file.")]
+    #[tool(
+        description = "Get full details of one symbol by its fully-qualified id (from a prior search/callers result): kind, file:line, language, metadata. Pass snippet=true to ALSO get its exact source code — cheaper than reading the whole file."
+    )]
     async fn get_node(&self, args: Parameters<IdArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let node = store
@@ -352,8 +367,7 @@ impl CodeGraphServer {
                     let e = (n.line_end as usize).min(s + 400).max(s + 1);
                     let lines: Vec<&str> = text.lines().collect();
                     if s < lines.len() {
-                        out["snippet"] =
-                            serde_json::json!(lines[s..e.min(lines.len())].join("\n"));
+                        out["snippet"] = serde_json::json!(lines[s..e.min(lines.len())].join("\n"));
                     }
                 }
                 return Ok(CallToolResult::success(vec![Content::json(out)?]));
@@ -362,13 +376,19 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(node)?]))
     }
 
-    #[tool(description = "Who calls X — ALWAYS use this (not search/grep) for usage/caller questions. Resolved call edges; ambiguous names return pinnable per-definition CANDIDATES (re-call with id=<id>). Includes `coverage`: if may_be_incomplete, the list is a precise LOWER BOUND — corroborate with text search before concluding nothing else calls it.")]
+    #[tool(
+        description = "Who calls X — ALWAYS use this (not search/grep) for usage/caller questions. Resolved call edges; ambiguous names return pinnable per-definition CANDIDATES (re-call with id=<id>). Includes `coverage`: if may_be_incomplete, the list is a precise LOWER BOUND — corroborate with text search before concluding nothing else calls it."
+    )]
     async fn callers(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let err = |e: codegraph_store::StoreError| McpError::internal_error(e.to_string(), None);
         if let Some(pin) = &args.0.id {
-            let callers: Vec<serde_json::Value> =
-                store.callers_of_id(pin).map_err(err)?.iter().map(lean).collect();
+            let callers: Vec<serde_json::Value> = store
+                .callers_of_id(pin)
+                .map_err(err)?
+                .iter()
+                .map(lean)
+                .collect();
             return Ok(CallToolResult::success(vec![Content::json(
                 serde_json::json!({"pinned": pin, "callers": callers}),
             )?]));
@@ -380,9 +400,14 @@ impl CodeGraphServer {
             // Rank: strongest resolved evidence first; cross-language ties
             // broken toward the language family the textual call-site evidence
             // lives in (ranking only — never changes which edges exist).
-            let ev_files = store.unresolved_call_site_files(&args.0.name, None).unwrap_or_default();
+            let ev_files = store
+                .unresolved_call_site_files(&args.0.name, None)
+                .unwrap_or_default();
             let fam_votes = |file: &str| {
-                ev_files.iter().filter(|f| lang_family(f) == lang_family(file)).count()
+                ev_files
+                    .iter()
+                    .filter(|f| lang_family(f) == lang_family(file))
+                    .count()
             };
             defs.sort_by(|(a, na), (b, nb)| {
                 nb.cmp(na)
@@ -396,12 +421,14 @@ impl CodeGraphServer {
                 }))
                 .collect();
             let coverage = store.coverage_for_callers(&args.0.name).map_err(err)?;
-            return Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-                "ambiguous": true,
-                "note": format!("'{}' has {} definitions; callers differ per definition. Re-call with id=<id> to pin one.", args.0.name, defs.len()),
-                "candidates": candidates,
-                "coverage": coverage,
-            }))?]));
+            return Ok(CallToolResult::success(vec![Content::json(
+                serde_json::json!({
+                    "ambiguous": true,
+                    "note": format!("'{}' has {} definitions; callers differ per definition. Re-call with id=<id> to pin one.", args.0.name, defs.len()),
+                    "candidates": candidates,
+                    "coverage": coverage,
+                }),
+            )?]));
         }
         let callers = store.callers_of(&args.0.name).map_err(err)?;
         let coverage = store.coverage_for_callers(&args.0.name).map_err(err)?;
@@ -431,7 +458,10 @@ impl CodeGraphServer {
             "coverage": coverage,
         });
         if !concise() {
-            out["_hints"] = serde_json::json!(["blast_radius(name) before changing it", "co_changes(file) for what usually changes too"]);
+            out["_hints"] = serde_json::json!([
+                "blast_radius(name) before changing it",
+                "co_changes(file) for what usually changes too"
+            ]);
         }
         if !referencing_files.is_empty() {
             out["unresolved_call_site_files"] = serde_json::json!(referencing_files);
@@ -470,7 +500,9 @@ impl CodeGraphServer {
         self.maybe_refresh();
         let key: SnapKey = (
             codegraph_store::generation(&self.db_path),
-            std::fs::metadata(&self.db_path).and_then(|m| m.modified()).ok(),
+            std::fs::metadata(&self.db_path)
+                .and_then(|m| m.modified())
+                .ok(),
         );
         if let Ok(cache) = self.graph_cache.lock() {
             if let Some((cached_key, snap)) = cache.as_ref() {
@@ -491,15 +523,25 @@ impl CodeGraphServer {
             by_id.insert(n.id.clone(), i);
             by_name.entry(n.name.clone()).or_insert(i);
         }
-        let snap = std::sync::Arc::new(GraphSnapshot { lg, nodes, by_id, by_name });
+        let snap = std::sync::Arc::new(GraphSnapshot {
+            lg,
+            nodes,
+            by_id,
+            by_name,
+        });
         if let Ok(mut cache) = self.graph_cache.lock() {
             *cache = Some((key, snap.clone()));
         }
         Ok(snap)
     }
 
-    #[tool(description = "Find code AND documentation by MEANING (vector search over all symbols + docs/wiki Document nodes). USE THIS for: conceptual questions ('code that retries with backoff'), docs/wiki lookups ('what does the wiki say about X' — do NOT grep/Read doc files first), and any query where you don't know the identifier. Bundled local embedder, no server. If empty, fall back to search.")]
-    async fn semantic_search(&self, args: Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Find code AND documentation by MEANING (vector search over all symbols + docs/wiki Document nodes). USE THIS for: conceptual questions ('code that retries with backoff'), docs/wiki lookups ('what does the wiki say about X' — do NOT grep/Read doc files first), and any query where you don't know the identifier. Bundled local embedder, no server. If empty, fall back to search."
+    )]
+    async fn semantic_search(
+        &self,
+        args: Parameters<SearchArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let snap = self.load_graph()?; // refreshes; nodes for hit hydration
         let store = self.open()?; // pooled connection, moved into the blocking task
         let q = args.0.query.clone();
@@ -511,20 +553,29 @@ impl CodeGraphServer {
         // async runtime panics ("runtime within a runtime") and wedges the
         // server (caught by the freshness regression suite).
         if !embedder_available_async().await? {
-            let hits: Vec<serde_json::Value> =
-                store.search_smart(&q, limit).unwrap_or_default().iter().map(lean).collect();
-            return Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-                "degraded": "lexical fallback — no embedder (rebuild with --features local-embed, or load an embedding model in LM Studio / Ollama)",
-                "hits": hits,
-            }))?]));
+            let hits: Vec<serde_json::Value> = store
+                .search_smart(&q, limit)
+                .unwrap_or_default()
+                .iter()
+                .map(lean)
+                .collect();
+            return Ok(CallToolResult::success(vec![Content::json(
+                serde_json::json!({
+                    "degraded": "lexical fallback — no embedder (rebuild with --features local-embed, or load an embedding model in LM Studio / Ollama)",
+                    "hits": hits,
+                }),
+            )?]));
         }
-        let results = tokio::task::spawn_blocking(move || semantic_blocking(&store, &snap, &q, limit))
-            .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let results =
+            tokio::task::spawn_blocking(move || semantic_blocking(&store, &snap, &q, limit))
+                .await
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::json(results)?]))
     }
 
-    #[tool(description = "Shortest dependency/call path between two symbols by name: how A reaches B through the call graph.")]
+    #[tool(
+        description = "Shortest dependency/call path between two symbols by name: how A reaches B through the call graph."
+    )]
     async fn trace_path(&self, args: Parameters<TwoNamesArgs>) -> Result<CallToolResult, McpError> {
         let g = self.load_graph()?;
         let find = |name: &str| g.node_by_name(name).map(|n| n.id.clone());
@@ -535,7 +586,9 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(path)?]))
     }
 
-    #[tool(description = "Impact / blast-radius: every symbol that (transitively) depends on the given one. Use BEFORE changing or renaming a symbol to see what could break. Includes a `coverage` object — if `may_be_incomplete` is true the radius may miss callers whose calls were dropped; corroborate with text search.")]
+    #[tool(
+        description = "Impact / blast-radius: every symbol that (transitively) depends on the given one. Use BEFORE changing or renaming a symbol to see what could break. Includes a `coverage` object — if `may_be_incomplete` is true the radius may miss callers whose calls were dropped; corroborate with text search."
+    )]
     async fn blast_radius(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let g = self.load_graph()?;
         let store = self.open()?;
@@ -546,7 +599,10 @@ impl CodeGraphServer {
                     .coverage_for_callers(&n.name)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?,
             ),
-            None => (Vec::new(), codegraph_core::Coverage::callers(&args.0.name, 0, 0)),
+            None => (
+                Vec::new(),
+                codegraph_core::Coverage::callers(&args.0.name, 0, 0),
+            ),
         };
         // compact rows, capped — a hub can reach hundreds of symbols and the
         // agent needs name/file:line, not full node JSON for each
@@ -555,7 +611,9 @@ impl CodeGraphServer {
             .iter()
             .take(200)
             .map(|id| match g.node_by_id(id) {
-                Some(n) => serde_json::json!({"name": n.name, "file": n.file_path, "line": n.line_start}),
+                Some(n) => {
+                    serde_json::json!({"name": n.name, "file": n.file_path, "line": n.line_start})
+                }
                 None => serde_json::json!({"id": id}),
             })
             .collect();
@@ -565,7 +623,8 @@ impl CodeGraphServer {
             "coverage": coverage,
         });
         if total > 200 {
-            out["_note"] = serde_json::json!("truncated to 200 rows — total_affected is the real count");
+            out["_note"] =
+                serde_json::json!("truncated to 200 rows — total_affected is the real count");
         }
         if let Some(fb) = fallback_hint(&coverage, &args.0.name) {
             out["_fallback"] = fb;
@@ -573,7 +632,9 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(out)?]))
     }
 
-    #[tool(description = "List the functions a given function CALLS (outgoing call edges). PREFER over reading the body to enumerate its calls. Layered: resolved callees + `unresolved_calls` (in-repo-plausible call names the resolver dropped). `coverage.dropped` counts what's absent.")]
+    #[tool(
+        description = "List the functions a given function CALLS (outgoing call edges). PREFER over reading the body to enumerate its calls. Layered: resolved callees + `unresolved_calls` (in-repo-plausible call names the resolver dropped). `coverage.dropped` counts what's absent."
+    )]
     async fn callees(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let g = self.load_graph()?;
         let store = self.open()?;
@@ -589,9 +650,17 @@ impl CodeGraphServer {
                     .collect();
                 let mut unresolved = store.unresolved_callee_names(&n.id).map_err(err)?;
                 unresolved.truncate(30);
-                (rows, store.coverage_for_callees(&n.id).map_err(err)?, unresolved)
+                (
+                    rows,
+                    store.coverage_for_callees(&n.id).map_err(err)?,
+                    unresolved,
+                )
             }
-            None => (Vec::new(), codegraph_core::Coverage::callees(0, 0), Vec::new()),
+            None => (
+                Vec::new(),
+                codegraph_core::Coverage::callees(0, 0),
+                Vec::new(),
+            ),
         };
         let mut body = serde_json::json!({
             "callees": rows,
@@ -609,7 +678,9 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(body)?]))
     }
 
-    #[tool(description = "START HERE when beginning a task/bug/feature: assembles the most relevant symbols (personalized PageRank over resolved call edges, token-budgeted) — the structural neighborhood a plain search misses. Cheaper and more complete than reading files to orient yourself.")]
+    #[tool(
+        description = "START HERE when beginning a task/bug/feature: assembles the most relevant symbols (personalized PageRank over resolved call edges, token-budgeted) — the structural neighborhood a plain search misses. Cheaper and more complete than reading files to orient yourself."
+    )]
     async fn context(&self, args: Parameters<ContextArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let budget = args.0.budget.unwrap_or(1000);
@@ -617,14 +688,26 @@ impl CodeGraphServer {
             .0
             .query
             .split_whitespace()
-            .map(|w| w.chars().filter(|c| c.is_alphanumeric()).collect::<String>())
+            .map(|w| {
+                w.chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect::<String>()
+            })
             .filter(|w| w.len() > 1)
             .map(|w| format!("{w}*"))
             .collect::<Vec<_>>()
             .join(" OR ");
-        let fts = if fts.is_empty() { args.0.query.clone() } else { fts };
-        let seeds: Vec<String> =
-            store.search_fts(&fts, 12).unwrap_or_default().into_iter().map(|n| n.id).collect();
+        let fts = if fts.is_empty() {
+            args.0.query.clone()
+        } else {
+            fts
+        };
+        let seeds: Vec<String> = store
+            .search_fts(&fts, 12)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
         let g = self.load_graph()?;
         let ranked = g.lg.personalized_pagerank_top(&seeds, 200);
         let mut used = 0usize;
@@ -660,12 +743,16 @@ impl CodeGraphServer {
                 "snippet": snippet,
             }));
         }
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "query": args.0.query, "context": out, "tokens": used,
-        }))?]))
+        Ok(CallToolResult::success(vec![Content::json(
+            serde_json::json!({
+                "query": args.0.query, "context": out, "tokens": used,
+            }),
+        )?]))
     }
 
-    #[tool(description = "The most central/important symbols by PageRank (real code symbols only, utility-sink damped): a fast way to map the core of an unfamiliar codebase.")]
+    #[tool(
+        description = "The most central/important symbols by PageRank (real code symbols only, utility-sink damped): a fast way to map the core of an unfamiliar codebase."
+    )]
     async fn important(&self, args: Parameters<LimitArgs>) -> Result<CallToolResult, McpError> {
         let g = self.load_graph()?;
         let top: Vec<serde_json::Value> = g
@@ -682,17 +769,23 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(top)?]))
     }
 
-    #[tool(description = "ARCHITECTURE MAP in one call: node/edge counts, languages, resolution quality, measured precision, top communities (dominant directory + key symbols by hub score), and route count. Use to orient in an unfamiliar repo before drilling down with important/flows/callers.")]
+    #[tool(
+        description = "ARCHITECTURE MAP in one call: node/edge counts, languages, resolution quality, measured precision, top communities (dominant directory + key symbols by hub score), and route count. Use to orient in an unfamiliar repo before drilling down with important/flows/callers."
+    )]
     async fn architecture(&self) -> Result<CallToolResult, McpError> {
         let g = self.load_graph()?;
         let store = self.open()?;
         let err = |e: codegraph_store::StoreError| McpError::internal_error(e.to_string(), None);
         let mut by_label: std::collections::BTreeMap<String, usize> = Default::default();
         let mut by_lang: std::collections::BTreeMap<String, usize> = Default::default();
-        let mut comms: std::collections::HashMap<u32, Vec<&codegraph_core::Node>> = Default::default();
+        let mut comms: std::collections::HashMap<u32, Vec<&codegraph_core::Node>> =
+            Default::default();
         for n in &g.nodes {
             *by_label.entry(format!("{:?}", n.label)).or_default() += 1;
-            if !matches!(n.label, codegraph_core::NodeLabel::File | codegraph_core::NodeLabel::Document) {
+            if !matches!(
+                n.label,
+                codegraph_core::NodeLabel::File | codegraph_core::NodeLabel::Document
+            ) {
                 *by_lang.entry(n.language.clone()).or_default() += 1;
                 if let Some(c) = n.community {
                     comms.entry(c).or_default().push(n);
@@ -700,8 +793,16 @@ impl CodeGraphServer {
             }
         }
         let hub = |n: &codegraph_core::Node| {
-            let fi = n.metadata.get("fan_in").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let fo = n.metadata.get("fan_out").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let fi = n
+                .metadata
+                .get("fan_in")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let fo = n
+                .metadata
+                .get("fan_out")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
             codegraph_graph::hub_score(n.pagerank, fi, fo)
         };
         let mut comms: Vec<(u32, Vec<&codegraph_core::Node>)> = comms.into_iter().collect();
@@ -718,21 +819,36 @@ impl CodeGraphServer {
                         *prefixes.entry(format!("{a}/{b}")).or_default() += 1;
                     }
                 }
-                let dir = prefixes.iter().max_by_key(|(_, c)| **c).map(|(p, _)| p.clone()).unwrap_or_default();
+                let dir = prefixes
+                    .iter()
+                    .max_by_key(|(_, c)| **c)
+                    .map(|(p, _)| p.clone())
+                    .unwrap_or_default();
                 // key symbols must be CONNECTED ones — a cluster of zero-degree
                 // DTOs would otherwise pick alphabetical noise via the tiebreak
                 let mut top: Vec<&&codegraph_core::Node> = members
                     .iter()
                     .filter(|n| {
-                        n.metadata.get("fan_in").and_then(|v| v.as_u64()).unwrap_or(0)
-                            + n.metadata.get("fan_out").and_then(|v| v.as_u64()).unwrap_or(0)
+                        n.metadata
+                            .get("fan_in")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0)
+                            + n.metadata
+                                .get("fan_out")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
                             > 0
                     })
                     .collect();
                 if top.is_empty() {
                     top = members.iter().collect();
                 }
-                top.sort_by(|a, b| hub(b).partial_cmp(&hub(a)).unwrap_or(std::cmp::Ordering::Equal).then(a.id.cmp(&b.id)));
+                top.sort_by(|a, b| {
+                    hub(b)
+                        .partial_cmp(&hub(a))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.id.cmp(&b.id))
+                });
                 let key: Vec<&str> = top.iter().take(3).map(|n| n.name.as_str()).collect();
                 serde_json::json!({"dir": dir, "symbols": members.len(), "key_symbols": key})
             })
@@ -756,7 +872,9 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(out)?]))
     }
 
-    #[tool(description = "Graph size + trust card: node count and, when `codegraph audit` has run, the MEASURED per-tier precision of this repo's resolved edges vs a compiler oracle.")]
+    #[tool(
+        description = "Graph size + trust card: node count and, when `codegraph audit` has run, the MEASURED per-tier precision of this repo's resolved edges vs a compiler oracle."
+    )]
     async fn stats(&self) -> Result<CallToolResult, McpError> {
         // open_any: stats is the DIAGNOSTIC tool — it must stay reachable on an
         // empty graph precisely so the emptiness itself can be reported loudly.
@@ -778,7 +896,10 @@ impl CodeGraphServer {
         if let Ok(Some(raw)) = store.meta_get("audit_result") {
             if let Ok(audit) = serde_json::from_str::<serde_json::Value>(&raw) {
                 let current = codegraph_store::generation(&self.db_path);
-                let audited = audit.get("generation").and_then(|g| g.as_u64()).unwrap_or(0);
+                let audited = audit
+                    .get("generation")
+                    .and_then(|g| g.as_u64())
+                    .unwrap_or(0);
                 if audited < current {
                     // STALE audit: never serve old precision numbers as if
                     // current — the stale payload moves under an explicit key.
@@ -794,7 +915,9 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(out)?]))
     }
 
-    #[tool(description = "Dead-code CANDIDATES: functions/methods that no call site in the repo even names (entry points, route handlers, and test files excluded). Static view — dynamic dispatch/exports/reflection are invisible, so treat as candidates to verify, not verdicts.")]
+    #[tool(
+        description = "Dead-code CANDIDATES: functions/methods that no call site in the repo even names (entry points, route handlers, and test files excluded). Static view — dynamic dispatch/exports/reflection are invisible, so treat as candidates to verify, not verdicts."
+    )]
     async fn dead_code(&self, args: Parameters<LimitArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let dead: Vec<serde_json::Value> = store
@@ -806,23 +929,35 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(dead)?]))
     }
 
-    #[tool(description = "Files that historically CHANGE TOGETHER with the given file (mined from git history). Use before a change to see what usually needs touching alongside it.")]
+    #[tool(
+        description = "Files that historically CHANGE TOGETHER with the given file (mined from git history). Use before a change to see what usually needs touching alongside it."
+    )]
     async fn co_changes(&self, args: Parameters<FileArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let pairs = store
             .cochanges_for(&args.0.file, args.0.limit.unwrap_or(10))
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let out: Vec<serde_json::Value> =
-            pairs.into_iter().map(|(f, n)| serde_json::json!({"file": f, "co_changed": n})).collect();
+        let out: Vec<serde_json::Value> = pairs
+            .into_iter()
+            .map(|(f, n)| serde_json::json!({"file": f, "co_changed": n}))
+            .collect();
         Ok(CallToolResult::success(vec![Content::json(out)?]))
     }
 
-    #[tool(description = "Change-aware review: map the git diff (vs a base ref, default HEAD = uncommitted) to affected symbols with fan-in, test-gap flags, a risk tier, and co-change hints (files that usually change with this diff but aren't in it). Use to review a change's blast radius before committing/merging.")]
+    #[tool(
+        description = "Change-aware review: map the git diff (vs a base ref, default HEAD = uncommitted) to affected symbols with fan-in, test-gap flags, a risk tier, and co-change hints (files that usually change with this diff but aren't in it). Use to review a change's blast radius before committing/merging."
+    )]
     async fn changes(&self, args: Parameters<ChangesArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let base = args.0.base.unwrap_or_else(|| "HEAD".to_string());
         let out = std::process::Command::new("git")
-            .args(["-C", &self.root.to_string_lossy(), "diff", "--name-only", &base])
+            .args([
+                "-C",
+                &self.root.to_string_lossy(),
+                "diff",
+                "--name-only",
+                &base,
+            ])
             .output()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let changed: Vec<String> = String::from_utf8_lossy(&out.stdout)
@@ -833,7 +968,10 @@ impl CodeGraphServer {
         let mut symbols = Vec::new();
         let mut hints: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
         for f in &changed {
-            for sym in store.symbols_in_file(f).map_err(|e| McpError::internal_error(e.to_string(), None))? {
+            for sym in store
+                .symbols_in_file(f)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            {
                 let fan_in = store.call_site_count(&sym.name).unwrap_or(0);
                 let tested = store.has_test_reference(&sym.name).unwrap_or(false);
                 let risk = match (fan_in, tested) {
@@ -856,31 +994,46 @@ impl CodeGraphServer {
         }
         symbols.sort_by_key(|s| {
             std::cmp::Reverse(
-                s["fan_in"].as_u64().unwrap_or(0) * if s["tested"].as_bool().unwrap_or(false) { 1 } else { 3 },
+                s["fan_in"].as_u64().unwrap_or(0)
+                    * if s["tested"].as_bool().unwrap_or(false) {
+                        1
+                    } else {
+                        3
+                    },
             )
         });
         symbols.truncate(40);
-        let co_change_hints: Vec<serde_json::Value> =
-            hints.into_iter().map(|(f, n)| serde_json::json!({"file": f, "co_changed": n})).collect();
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "base": base, "changed_files": changed, "affected_symbols": symbols,
-            "co_change_hints": co_change_hints,
-        }))?]))
+        let co_change_hints: Vec<serde_json::Value> = hints
+            .into_iter()
+            .map(|(f, n)| serde_json::json!({"file": f, "co_changed": n}))
+            .collect();
+        Ok(CallToolResult::success(vec![Content::json(
+            serde_json::json!({
+                "base": base, "changed_files": changed, "affected_symbols": symbols,
+                "co_change_hints": co_change_hints,
+            }),
+        )?]))
     }
 
-    #[tool(description = "Graph query in Cypher-lite (read-only openCypher subset): 1-2 hop patterns like MATCH (a:Method)-[:Calls]->(b) WHERE b.name = 'save' RETURN a.name, a.file LIMIT 10. Relations: Calls, Tests, Inherits, Implements, HttpCalls, Defines. Props: name/file/line/label/language/id/pagerank. ALSO the tool for EXHAUSTIVE listings (all files/symbols matching a filter): MATCH (n) WHERE n.file CONTAINS 'x' RETURN n.file LIMIT 1000 — a complete filter, unlike search's ranked top-N. Unsupported syntax errors clearly — never a wrong answer.")]
+    #[tool(
+        description = "Graph query in Cypher-lite (read-only openCypher subset): 1-2 hop patterns like MATCH (a:Method)-[:Calls]->(b) WHERE b.name = 'save' RETURN a.name, a.file LIMIT 10. Relations: Calls, Tests, Inherits, Implements, HttpCalls, Defines. Props: name/file/line/label/language/id/pagerank. ALSO the tool for EXHAUSTIVE listings (all files/symbols matching a filter): MATCH (n) WHERE n.file CONTAINS 'x' RETURN n.file LIMIT 1000 — a complete filter, unlike search's ranked top-N. Unsupported syntax errors clearly — never a wrong answer."
+    )]
     async fn graph_query(&self, args: Parameters<CypherArgs>) -> Result<CallToolResult, McpError> {
         self.maybe_refresh();
         let sql = codegraph_store::cypher::to_sql(&args.0.query)
             .map_err(|e| McpError::invalid_params(format!("cypher-lite: {e}"), None))?;
         let (cols, rows) = codegraph_store::query_readonly(&self.db_path, &sql, 500)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "columns": cols, "rows": rows,
-        }))?]))
+        Ok(CallToolResult::success(vec![Content::json(
+            serde_json::json!({
+                "columns": cols, "rows": rows,
+            }),
+        )?]))
     }
 
-    #[tool(description = "Execution FLOWS: call chains from entry points (route handlers, main, zero-fan-in tasks) ranked by criticality (reach × centrality). Use to map what a service actually DOES, find the most critical paths, or see which flows a change touches.")]
+    #[tool(
+        description = "Execution FLOWS: call chains from entry points (route handlers, main, zero-fan-in tasks) ranked by criticality (reach × centrality). Use to map what a service actually DOES, find the most critical paths, or see which flows a change touches."
+    )]
     async fn flows(&self, args: Parameters<LimitArgs>) -> Result<CallToolResult, McpError> {
         let g = self.load_graph()?;
         let entries = codegraph_graph::detect_entry_points(&g.nodes);
@@ -905,13 +1058,18 @@ impl CodeGraphServer {
             })
             .collect();
         flows.sort_by(|a, b| {
-            b["criticality"].as_f64().partial_cmp(&a["criticality"].as_f64()).unwrap_or(std::cmp::Ordering::Equal)
+            b["criticality"]
+                .as_f64()
+                .partial_cmp(&a["criticality"].as_f64())
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         flows.truncate(args.0.limit.unwrap_or(10));
         Ok(CallToolResult::success(vec![Content::json(flows)?]))
     }
 
-    #[tool(description = "List the types that IMPLEMENT or EXTEND a given interface/class/protocol (by name). Use to find every concrete implementation of an abstraction before changing it.")]
+    #[tool(
+        description = "List the types that IMPLEMENT or EXTEND a given interface/class/protocol (by name). Use to find every concrete implementation of an abstraction before changing it."
+    )]
     async fn implementers(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let impls: Vec<serde_json::Value> = store
@@ -923,7 +1081,9 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(impls)?]))
     }
 
-    #[tool(description = "List the HTTP routes/endpoints detected in the repo (NestJS/Express/Flask/Spring/etc.), each with method + path + handler. Filter with path_prefix/method, paginate with limit/offset. Use to map a backend's API surface.")]
+    #[tool(
+        description = "List the HTTP routes/endpoints detected in the repo (NestJS/Express/Flask/Spring/etc.), each with method + path + handler. Filter with path_prefix/method, paginate with limit/offset. Use to map a backend's API surface."
+    )]
     async fn routes(&self, args: Parameters<RoutesArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let mut routes = store
@@ -931,14 +1091,23 @@ impl CodeGraphServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         routes.sort_by(|a, b| a.name.cmp(&b.name));
         let meta = |n: &codegraph_core::Node, k: &str| {
-            n.metadata.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
+            n.metadata
+                .get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
         };
         let want_method = args.0.method.as_deref().map(str::to_ascii_uppercase);
         let filtered: Vec<&codegraph_core::Node> = routes
             .iter()
             .filter(|n| {
-                args.0.path_prefix.as_deref().is_none_or(|p| meta(n, "path").starts_with(p))
-                    && want_method.as_deref().is_none_or(|m| meta(n, "method") == m)
+                args.0
+                    .path_prefix
+                    .as_deref()
+                    .is_none_or(|p| meta(n, "path").starts_with(p))
+                    && want_method
+                        .as_deref()
+                        .is_none_or(|m| meta(n, "method") == m)
             })
             .collect();
         let total = filtered.len();
@@ -983,8 +1152,12 @@ fn semantic_blocking(
     q: &str,
     limit: usize,
 ) -> Vec<serde_json::Value> {
-    let Some((qvs, _)) = codegraph_llm::embed_texts(&[q.to_string()]) else { return Vec::new() };
-    let Some(qv) = qvs.into_iter().next() else { return Vec::new() };
+    let Some((qvs, _)) = codegraph_llm::embed_texts(&[q.to_string()]) else {
+        return Vec::new();
+    };
+    let Some(qv) = qvs.into_iter().next() else {
+        return Vec::new();
+    };
     // Indexed KNN via sqlite-vec — no full vector scan, no blob reload per query.
     store
         .knn(&qv, limit)
@@ -1059,11 +1232,25 @@ KNOWN UNKNOWNS: the graph is precise, NOT exhaustive. A missing edge is not evid
 /// The indexer's own walker excludes them too, so a missed filter here is only
 /// a wasted (cheap, stat-only) staleness probe — never a wrong graph.
 const WATCH_SKIP_DIRS: &[&str] = &[
-    ".git", "target", "node_modules", "build", "dist", "out", ".venv", "venv",
-    "__pycache__", "DerivedData", "Pods", ".gradle", ".next", ".cache", "vendor",
+    ".git",
+    "target",
+    "node_modules",
+    "build",
+    "dist",
+    "out",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "DerivedData",
+    "Pods",
+    ".gradle",
+    ".next",
+    ".cache",
+    "vendor",
     // Our own graph DB: when it falls back under the repo root (no HOME /
     // CODEGRAPH_CACHE_DIR), a reindex write must NOT retrigger the watcher.
-    ".codegraph", ".codegraph-cache",
+    ".codegraph",
+    ".codegraph-cache",
 ];
 
 /// Keep the index WARM: watch the repo and heal on quiet (debounced), so by the
@@ -1077,27 +1264,35 @@ fn spawn_fs_watcher(
 ) -> Option<notify::RecommendedWatcher> {
     use notify::Watcher;
     let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-        let Ok(ev) = res else { return };
-        if matches!(ev.kind, notify::EventKind::Access(_)) {
-            return;
-        }
-        let relevant = ev.paths.iter().any(|p| {
-            !p.components().any(|c| {
-                c.as_os_str().to_str().is_some_and(|s| WATCH_SKIP_DIRS.contains(&s))
-            })
-        });
-        if relevant {
-            let _ = tx.send(());
-        }
-    })
-    .ok()?;
-    watcher.watch(&root, notify::RecursiveMode::Recursive).ok()?;
+    let mut watcher =
+        notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            let Ok(ev) = res else { return };
+            if matches!(ev.kind, notify::EventKind::Access(_)) {
+                return;
+            }
+            let relevant = ev.paths.iter().any(|p| {
+                !p.components().any(|c| {
+                    c.as_os_str()
+                        .to_str()
+                        .is_some_and(|s| WATCH_SKIP_DIRS.contains(&s))
+                })
+            });
+            if relevant {
+                let _ = tx.send(());
+            }
+        })
+        .ok()?;
+    watcher
+        .watch(&root, notify::RecursiveMode::Recursive)
+        .ok()?;
     std::thread::spawn(move || {
         while rx.recv().is_ok() {
             // Debounce: drain events until 400ms of quiet (editors and git
             // checkouts write in bursts), then heal once.
-            while rx.recv_timeout(std::time::Duration::from_millis(400)).is_ok() {}
+            while rx
+                .recv_timeout(std::time::Duration::from_millis(400))
+                .is_ok()
+            {}
             if let Err(e) = refresh(&root) {
                 eprintln!("codegraph: watcher reindex failed ({e}); queries will self-heal");
             }
@@ -1116,7 +1311,9 @@ pub async fn serve_stdio(
     refresh: Option<fn(&Path) -> anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
     let _watcher = refresh.and_then(|f| spawn_fs_watcher(root.clone(), f));
-    let service = CodeGraphServer::with_refresh(root, db_path, refresh).serve(stdio()).await?;
+    let service = CodeGraphServer::with_refresh(root, db_path, refresh)
+        .serve(stdio())
+        .await?;
     service.waiting().await?;
     Ok(())
 }

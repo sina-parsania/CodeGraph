@@ -9,9 +9,9 @@ pub use config::{
 };
 pub use llm::{LlmClient, VisionLlmClient};
 pub use types::{
-    display_label, Confidence, Coverage, Edge, EdgeRelation, Hyperedge, HyperedgeMember, HyperedgeRelation,
-    InheritKind, Metadata, Node, NodeLabel, QualifiedName, RawCall, RawField, RawImport, RawInherit, RawLocal,
-    Receiver, ResolutionTier,
+    display_label, Confidence, Coverage, Edge, EdgeRelation, Hyperedge, HyperedgeMember,
+    HyperedgeRelation, InheritKind, Metadata, Node, NodeLabel, QualifiedName, RawCall, RawField,
+    RawImport, RawInherit, RawLocal, Receiver, ResolutionTier,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -106,16 +106,27 @@ mod test_path_tests {
     #[test]
     fn tokens_not_substrings() {
         for p in [
-            "src/foo_test.go", "Tests/AuthTests.swift", "src/__tests__/x.ts",
-            "spec/y_spec.rb", "tests/test_foo.py", "src/user.spec.ts", "FooTest.java",
+            "src/foo_test.go",
+            "Tests/AuthTests.swift",
+            "src/__tests__/x.ts",
+            "spec/y_spec.rb",
+            "tests/test_foo.py",
+            "src/user.spec.ts",
+            "FooTest.java",
             // acronym-adjacent: the T of Tests must not be swallowed by the run
-            "LoginUITests.swift", "APITests.java", "HTTPTests.kt",
+            "LoginUITests.swift",
+            "APITests.java",
+            "HTTPTests.kt",
         ] {
             assert!(is_test_path(p), "{p} IS a test path");
         }
         for p in [
-            "src/latest_prices.rs", "src/contest.py", "pkg/attestation.go",
-            "src/spectrum.ts", "app/protester.rb", "src/inspection.java",
+            "src/latest_prices.rs",
+            "src/contest.py",
+            "pkg/attestation.go",
+            "src/spectrum.ts",
+            "app/protester.rb",
+            "src/inspection.java",
         ] {
             assert!(!is_test_path(p), "{p} is NOT a test path");
         }
@@ -130,7 +141,10 @@ mod vec_tests {
         let a = [1.0f32, 2.0, 3.0, 0.5];
         let b = [0.2f32, -1.0, 4.0, 2.0];
         let (na, nb) = (normalize(&a), normalize(&b));
-        assert!((dot(&na, &nb) - cosine(&a, &b)).abs() < 1e-5, "normalized dot must equal cosine");
+        assert!(
+            (dot(&na, &nb) - cosine(&a, &b)).abs() < 1e-5,
+            "normalized dot must equal cosine"
+        );
         // normalize is idempotent in magnitude
         assert!((normalize(&na).iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-5);
     }

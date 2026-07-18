@@ -37,7 +37,11 @@ fn index_fixture(lang: &str) -> (Vec<Node>, Vec<Edge>) {
         .env("XDG_CONFIG_HOME", tmp.join("config"))
         .output()
         .expect("failed to run codegraph binary");
-    assert!(out.status.success(), "index failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "index failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     // one project in an isolated cache → exactly one graph.db
     let db = std::fs::read_dir(&cache)
         .unwrap()
@@ -54,13 +58,17 @@ fn index_fixture(lang: &str) -> (Vec<Node>, Vec<Edge>) {
 
 /// Resolve `file-suffix:name` (or `file:Class.method`) to node ids.
 fn resolve_ref<'a>(nodes: &'a [Node], r: &str) -> Vec<&'a str> {
-    let (file, sym) = r.split_once(':').unwrap_or_else(|| panic!("bad symbol ref: {r}"));
+    let (file, sym) = r
+        .split_once(':')
+        .unwrap_or_else(|| panic!("bad symbol ref: {r}"));
     nodes
         .iter()
         .filter(|n| n.file_path.ends_with(file))
         .filter(|n| match sym.split_once('.') {
             Some((cls, m)) => {
-                n.name == m && n.id.ends_with(&format!(".{}.{}", cls.to_lowercase(), m.to_lowercase()))
+                n.name == m
+                    && n.id
+                        .ends_with(&format!(".{}.{}", cls.to_lowercase(), m.to_lowercase()))
             }
             None => n.name == sym,
         })
@@ -84,17 +92,30 @@ fn run_fixture(lang: &str) {
         }
         if let Some(count) = line.strip_prefix("COUNT CALLS") {
             let want: usize = count.trim().parse().unwrap();
-            assert_eq!(by_key.len(), want, "{lang}: total CALLS mismatch — got {:?}", by_key.keys());
+            assert_eq!(
+                by_key.len(),
+                want,
+                "{lang}: total CALLS mismatch — got {:?}",
+                by_key.keys()
+            );
             continue;
         }
         let negated = line.starts_with('!');
-        let body = line.trim_start_matches('!').trim_start_matches("CALLS").trim();
+        let body = line
+            .trim_start_matches('!')
+            .trim_start_matches("CALLS")
+            .trim();
         let (pair, tier) = match body.split_once('@') {
             Some((p, t)) => (p.trim(), Some(t.trim())),
             None => (body, None),
         };
-        let (from, to) = pair.split_once("->").unwrap_or_else(|| panic!("bad line: {raw}"));
-        let (srcs, dsts) = (resolve_ref(&nodes, from.trim()), resolve_ref(&nodes, to.trim()));
+        let (from, to) = pair
+            .split_once("->")
+            .unwrap_or_else(|| panic!("bad line: {raw}"));
+        let (srcs, dsts) = (
+            resolve_ref(&nodes, from.trim()),
+            resolve_ref(&nodes, to.trim()),
+        );
         if negated {
             for s in &srcs {
                 for d in &dsts {
@@ -108,7 +129,9 @@ fn run_fixture(lang: &str) {
         }
         assert!(!srcs.is_empty(), "{lang}: no node matches {}", from.trim());
         assert!(!dsts.is_empty(), "{lang}: no node matches {}", to.trim());
-        let hit = srcs.iter().find_map(|s| dsts.iter().find_map(|d| by_key.get(&(*s, *d))));
+        let hit = srcs
+            .iter()
+            .find_map(|s| dsts.iter().find_map(|d| by_key.get(&(*s, *d))));
         let edge = hit.unwrap_or_else(|| {
             panic!(
                 "{lang}: expected edge {} -> {} missing; edges: {:?}",
@@ -118,8 +141,18 @@ fn run_fixture(lang: &str) {
             )
         });
         if let Some(t) = tier {
-            let j = edge.metadata.get("justification").and_then(|v| v.as_str()).unwrap_or("");
-            assert_eq!(j, t, "{lang}: {} -> {} resolved via {j}, expected {t}", from.trim(), to.trim());
+            let j = edge
+                .metadata
+                .get("justification")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            assert_eq!(
+                j,
+                t,
+                "{lang}: {} -> {} resolved via {j}, expected {t}",
+                from.trim(),
+                to.trim()
+            );
         }
     }
 }

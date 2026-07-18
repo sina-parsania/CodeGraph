@@ -44,10 +44,18 @@ pub struct LlmConfig {
     pub whisper_model: String,
 }
 
-fn default_provider() -> String { "auto".to_string() }
-fn default_model() -> String { "Qwen2.5-Coder-1.5B-Instruct".to_string() }
-fn default_vision_model() -> String { "SmolVLM2-500M-Instruct".to_string() }
-fn default_whisper() -> String { "base".to_string() }
+fn default_provider() -> String {
+    "auto".to_string()
+}
+fn default_model() -> String {
+    "Qwen2.5-Coder-1.5B-Instruct".to_string()
+}
+fn default_vision_model() -> String {
+    "SmolVLM2-500M-Instruct".to_string()
+}
+fn default_whisper() -> String {
+    "base".to_string()
+}
 
 impl Default for LlmConfig {
     fn default() -> Self {
@@ -81,9 +89,15 @@ pub struct MediaGate {
 }
 
 impl MediaGate {
-    pub fn images_enabled(&self) -> bool { self.media || self.images }
-    pub fn videos_enabled(&self) -> bool { self.media || self.videos }
-    pub fn media_enabled(&self) -> bool { self.media || self.images || self.videos }
+    pub fn images_enabled(&self) -> bool {
+        self.media || self.images
+    }
+    pub fn videos_enabled(&self) -> bool {
+        self.media || self.videos
+    }
+    pub fn media_enabled(&self) -> bool {
+        self.media || self.images || self.videos
+    }
 }
 
 /// Global per-user config: `$XDG_CONFIG_HOME/codegraph/config.toml`, else
@@ -115,8 +129,13 @@ impl Config {
     /// Resolve config with precedence (low→high): defaults < global < project < env.
     pub fn load(start: &Path) -> Result<Config, ConfigError> {
         let mut table = toml::Table::new();
-        for path in [global_config_path(), project_config_path(start)].into_iter().flatten() {
-            let Ok(s) = std::fs::read_to_string(&path) else { continue };
+        for path in [global_config_path(), project_config_path(start)]
+            .into_iter()
+            .flatten()
+        {
+            let Ok(s) = std::fs::read_to_string(&path) else {
+                continue;
+            };
             // A malformed config must not brick `index`/`search`: warn and ignore it.
             match toml::from_str::<toml::Table>(&s) {
                 Ok(t) => merge_tables(&mut table, t),
@@ -131,20 +150,48 @@ impl Config {
     /// Env-override layer, parameterized by a getter for testability (no process
     /// env mutation in tests).
     pub fn apply_env_from<F: Fn(&str) -> Option<String>>(&mut self, get: F) {
-        if let Some(v) = get("CODEGRAPH_CACHE_DIR") { self.cache_dir = Some(v); }
-        if let Some(v) = get("CODEGRAPH_EMBED_MODEL") { self.embed_model = Some(v); }
-        if let Some(v) = get("CODEGRAPH_LLM_PROVIDER") { self.llm.provider = v; }
-        if let Some(v) = get("CODEGRAPH_LLM_URL") { self.llm.base_url = Some(v); }
-        if let Some(v) = get("CODEGRAPH_LLM_MODEL") { self.llm.model = v; }
-        if let Some(v) = get("CODEGRAPH_LLM_VISION_MODEL") { self.llm.vision_model = v; }
-        if let Some(v) = get("CODEGRAPH_INGEST_WHISPER_MODEL") { self.llm.whisper_model = v; }
-        if let Some(v) = get("CODEGRAPH_LLM_LOCKFILE") { self.llm.lockfile = Some(v); }
-        if let Some(b) = parse_bool(get("CODEGRAPH_LLM_AUTO_INSTALL")) { self.llm.auto_install = b; }
-        if let Some(b) = parse_bool(get("CODEGRAPH_RERANK")) { self.llm.rerank = b; }
-        if let Some(b) = parse_bool(get("CODEGRAPH_HYDE")) { self.llm.hyde = b; }
-        if let Some(b) = parse_bool(get("CODEGRAPH_MEDIA")) { self.ingest.media = b; }
-        if let Some(b) = parse_bool(get("CODEGRAPH_IMAGES")) { self.ingest.images = b; }
-        if let Some(b) = parse_bool(get("CODEGRAPH_VIDEOS")) { self.ingest.videos = b; }
+        if let Some(v) = get("CODEGRAPH_CACHE_DIR") {
+            self.cache_dir = Some(v);
+        }
+        if let Some(v) = get("CODEGRAPH_EMBED_MODEL") {
+            self.embed_model = Some(v);
+        }
+        if let Some(v) = get("CODEGRAPH_LLM_PROVIDER") {
+            self.llm.provider = v;
+        }
+        if let Some(v) = get("CODEGRAPH_LLM_URL") {
+            self.llm.base_url = Some(v);
+        }
+        if let Some(v) = get("CODEGRAPH_LLM_MODEL") {
+            self.llm.model = v;
+        }
+        if let Some(v) = get("CODEGRAPH_LLM_VISION_MODEL") {
+            self.llm.vision_model = v;
+        }
+        if let Some(v) = get("CODEGRAPH_INGEST_WHISPER_MODEL") {
+            self.llm.whisper_model = v;
+        }
+        if let Some(v) = get("CODEGRAPH_LLM_LOCKFILE") {
+            self.llm.lockfile = Some(v);
+        }
+        if let Some(b) = parse_bool(get("CODEGRAPH_LLM_AUTO_INSTALL")) {
+            self.llm.auto_install = b;
+        }
+        if let Some(b) = parse_bool(get("CODEGRAPH_RERANK")) {
+            self.llm.rerank = b;
+        }
+        if let Some(b) = parse_bool(get("CODEGRAPH_HYDE")) {
+            self.llm.hyde = b;
+        }
+        if let Some(b) = parse_bool(get("CODEGRAPH_MEDIA")) {
+            self.ingest.media = b;
+        }
+        if let Some(b) = parse_bool(get("CODEGRAPH_IMAGES")) {
+            self.ingest.images = b;
+        }
+        if let Some(b) = parse_bool(get("CODEGRAPH_VIDEOS")) {
+            self.ingest.videos = b;
+        }
     }
 }
 
@@ -182,11 +229,19 @@ mod tests {
 
     #[test]
     fn media_gate_resolution() {
-        let g = MediaGate { media: false, images: true, videos: false, prompted: true };
+        let g = MediaGate {
+            media: false,
+            images: true,
+            videos: false,
+            prompted: true,
+        };
         assert!(g.images_enabled());
         assert!(!g.videos_enabled());
         assert!(g.media_enabled());
-        let all = MediaGate { media: true, ..Default::default() };
+        let all = MediaGate {
+            media: true,
+            ..Default::default()
+        };
         assert!(all.images_enabled() && all.videos_enabled());
     }
 
@@ -221,7 +276,8 @@ mod tests {
     }
 
     fn tempdir_with(name: &str, contents: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("cg_cfg_{}_{}", std::process::id(), name.len()));
+        let dir =
+            std::env::temp_dir().join(format!("cg_cfg_{}_{}", std::process::id(), name.len()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(name), contents).unwrap();
         dir
