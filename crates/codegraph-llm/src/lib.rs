@@ -325,6 +325,46 @@ mod local_gen {
     }
 }
 
+/// LLM rerank: ask the model to reorder hits by relevance to the query.
+/// Best-effort — falls back to the original order on any parse failure.
+pub fn rerank(query: &str, hits: Vec<codegraph_core::Node>) -> Vec<codegraph_core::Node> {
+    if hits.len() < 2 {
+        return hits;
+    }
+    let listing: String = hits
+        .iter()
+        .enumerate()
+        .map(|(i, n)| format!("{}. {} ({:?}) {}", i, n.name, n.label, n.file_path))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = format!(
+        "Rank these code symbols by relevance to the query \"{}\". Reply with ONLY the leading numbers, best first, comma-separated.\n\n{}",
+        query, listing
+    );
+    let Some(resp) = generate_text(&prompt, 200) else { return hits };
+    let order: Vec<usize> = resp
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|t| t.parse::<usize>().ok())
+        .filter(|&i| i < hits.len())
+        .collect();
+    if order.is_empty() {
+        return hits;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for &i in &order {
+        if seen.insert(i) {
+            out.push(hits[i].clone());
+        }
+    }
+    for (i, n) in hits.iter().enumerate() {
+        if !seen.contains(&i) {
+            out.push(n.clone());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

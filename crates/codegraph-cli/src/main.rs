@@ -530,7 +530,7 @@ fn main() -> anyhow::Result<()> {
             let mut hits =
                 if regex { store.search_regex(&term, limit)? } else { store.search_smart(&term, limit)? };
             if rerank || cfg.llm.rerank {
-                hits = query::rerank(&term, hits);
+                hits = codegraph_llm::rerank(&term, hits);
             }
             if hits.is_empty() {
                 println!("no matches for {:?}", term);

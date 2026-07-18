@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.37.1 — rerank reaches the MCP
+
+`search` (MCP) gains an optional `rerank` parameter — same local-LLM
+reordering the CLI's `--rerank` had (config `rerank = true` /
+`CODEGRAPH_RERANK=1` for the CLI default). The implementation moved to
+`codegraph-llm` so both surfaces share one function; the LLM call runs on
+`spawn_blocking` (the embedder-probe wedge class stays impossible), and it
+degrades to the original order when no local model answers.
+
 ## 1.37.0 — lean MCP payloads, semantic that can't dead-end, MCP↔CLI parity
 
 Driven by the third field report (v1.36 head-to-head vs ripgrep on a 5-project

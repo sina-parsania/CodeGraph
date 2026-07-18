@@ -113,6 +113,10 @@ pub struct SearchArgs {
     /// anchors) instead of full-text search.
     #[serde(default)]
     pub regex: Option<bool>,
+    /// Rerank hits with a local LLM by relevance to the query (slower; no-op
+    /// when no local model is reachable).
+    #[serde(default)]
+    pub rerank: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -282,12 +286,21 @@ impl CodeGraphServer {
     async fn search(&self, args: Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
         let limit = args.0.limit.unwrap_or(20);
-        let hits = if args.0.regex.unwrap_or(false) {
+        let mut hits = if args.0.regex.unwrap_or(false) {
             store.search_regex(&args.0.query, limit)
         } else {
             store.search_smart(&args.0.query, limit)
         }
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        if args.0.rerank.unwrap_or(false) {
+            // blocking LLM call — never on the async runtime (the embedder
+            // probe wedge taught this lesson); best-effort, degrades to the
+            // original order when no local model answers
+            let q = args.0.query.clone();
+            hits = tokio::task::spawn_blocking(move || codegraph_llm::rerank(&q, hits))
+                .await
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        }
         // variables/properties aren't nodes — surface their declarations too
         let fields = store.field_matches(&args.0.query).unwrap_or_default();
         // COMPACT rows: full node JSON dragged metadata (incl. a Document's
