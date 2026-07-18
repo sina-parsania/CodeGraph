@@ -1,6 +1,6 @@
 # CodeGraph
 
-**The code-intelligence engine for AI agents — one 5 MB binary, zero config, zero phantom edges.**
+**The code-intelligence engine for AI agents — one self-contained binary, zero config, zero phantom edges.**
 
 CodeGraph indexes any repository into a **resolved code knowledge graph** (SQLite) and serves it to AI agents over **MCP** (Claude Code, Cursor, Zed, …) and a full **CLI**. Agents stop grepping and reading whole files — they ask the graph and get exact `file:line` answers with resolved call edges.
 
@@ -22,7 +22,7 @@ codegraph init                              # index + wire MCP + done
 | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | **Answer trust**     | **Zero phantom edges** — ambiguous calls are _dropped, never guessed_; every edge carries a `justification` tag; results include a **coverage signal** (`may_be_incomplete`)                   | silently merge same-name symbols, or emit guessed edges with hidden confidence floors |
 | **Ambiguity**        | `callers create` → **44 pinnable candidates** grouped per definition                                                                                                                           | one merged (wrong) list, or a blocklist refusing the query                            |
-| **Speed** (measured) | cold index **1.5 s**, queries **~13 ms**, binary **~5 MB**; **incremental reindex is O(impact)** — an edit re-resolves only the files whose call sites name a changed definition, not the repo | 2.8 s–11 s cold, 269 MB binaries, pip/npm setup tax                                   |
+| **Speed** (measured) | cold index **1.5 s**, queries **~13 ms**, binary **~39 MB** lean / **~55 MB** with the bundled embedder (release artifacts ship all features); **incremental reindex is O(impact)** — an edit re-resolves only the files whose call sites name a changed definition, not the repo | 2.8 s–11 s cold, 269 MB binaries, pip/npm setup tax                                   |
 | **Determinism**      | same commit → **byte-identical graph** — safe to commit & share (`export`/`import`, 88 % smaller)                                                                                              | machine-dependent results                                                             |
 | **Reach**            | **cross-service route hubs**: a backend route and its frontend caller collapse onto one node — `blast_radius` crosses service boundaries                                                       | per-repo silos                                                                        |
 
@@ -121,7 +121,7 @@ crates/
   codegraph-indexstore Xcode IndexStore merge (Swift compiler-grade, optional)
   codegraph-store      SQLite: nodes/edges/calls/sqlite-vec KNN/FTS5(external-content)/cochanges/meta
   codegraph-llm        OpenAI-compat client + optional bundled embedder (fastembed) & chat engine (mistral.rs)
-  codegraph-mcp        MCP server (17 tools, generation-keyed graph cache, fs-watcher, coverage signals)
+  codegraph-mcp        MCP server (18 tools, generation-keyed graph cache, fs-watcher, coverage signals)
   codegraph-cli        the `codegraph` binary
 ```
 

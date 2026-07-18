@@ -1327,4 +1327,19 @@ mod tests {
         let s = CodeGraphServer::new(PathBuf::from("/tmp/none.db"));
         assert!(s.get_info().capabilities.tools.is_some());
     }
+
+    /// Single source of truth for the advertised tool count: the router itself.
+    /// README references "18 tools" in two places — when a tool is added or
+    /// removed, this test fails until the docs (and this number) are updated
+    /// together.
+    #[test]
+    fn tool_count_matches_documented_claim() {
+        let tools = CodeGraphServer::tool_router().list_all();
+        assert_eq!(
+            tools.len(),
+            18,
+            "tool count changed — update README (both mentions) and this test: {:?}",
+            tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
+        );
+    }
 }
