@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.38.0 — external-review hardening: gates that can't lie, config that can't be clobbered
+
+All seven findings of an external production-readiness review, verified and
+fixed in small commits:
+
+- **Clippy was failing on test targets** (`--all-targets`): an always-true
+  assertion (`is_stale(...) || true`) — now asserts what it meant (a fresh
+  `.scip` flags the probe stale) — and an explicit `truncate(false)` on the
+  lock-file probe (flock semantics: never truncate a possibly-held path).
+- **release-qa.sh**: every gate now fails on the tool's own exit code
+  (fmt --check, clippy --all-targets -D warnings, full tests) — no grep
+  pipelines or `|| true` deciding pass/fail; e2e smoke sets a local git
+  identity so the gate runs without global config.
+- **`codegraph init` can no longer clobber user JSON**: invalid JSON, null/
+  array roots, and non-object `mcpServers`/`hooks` fields error with
+  file+field+found-type instead of being silently replaced with `{}`;
+  success prints only after the written file is re-read and verified;
+  merges are idempotent. 7 regression tests.
+- **release.yml**: matrix jobs only build + upload artifacts; a single
+  publish job validates all 5 artifacts (name/count/non-empty), creates a
+  DRAFT, attaches, then publishes — a failed platform means no release,
+  never a partial one. Least-privilege permissions (contents:read; publish
+  escalates to write).
+- **ci.yml**: `cargo fmt --all -- --check` gate (repo reformatted in one
+  isolated commit) before clippy `--workspace --all-targets -D warnings`.
+- **`build_with` decomposed** into typed phases (ResolutionIndexes,
+  resolve_receiver/resolve_bare/resolve_call with a `Resolution` enum —
+  Resolved/Ambiguous/Dropped makes unique-or-drop structural, and gated
+  resolutions provably never fall through to the ambiguous tier),
+  emit_defines/calls/inheritance, materialize. Semantics proven identical:
+  pre/post binaries produce byte-identical canonical graphs on the pinned
+  zod corpus.
+- **Docs honesty**: binary size ~39 MB lean / ~55 MB with the bundled
+  embedder (the "5 MB" claim was several releases stale); tool count fixed
+  to 18 everywhere and pinned by a test against the live ToolRouter.
+
 ## 1.37.1 — rerank reaches the MCP
 
 `search` (MCP) gains an optional `rerank` parameter — same local-LLM
