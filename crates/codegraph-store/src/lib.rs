@@ -2,7 +2,7 @@
 
 pub mod cypher;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use codegraph_core::{
     Coverage, Edge, Hyperedge, HyperedgeMember, InheritKind, Metadata, Node, NodeLabel, RawCall,
@@ -24,7 +24,10 @@ pub enum StoreError {
 
 type Result<T> = std::result::Result<T, StoreError>;
 
-const SCHEMA_VERSION: i64 = 7;
+// v9: symbol_refs table (typed non-call references for dead-code evidence) —
+// created by the base DDL, which the fast path skips for already-current DBs,
+// so the version must gate it in.
+const SCHEMA_VERSION: i64 = 9;
 
 /// Register the sqlite-vec extension for EVERY connection this process opens
 /// (auto_extension is process-global). Powers the `vec_nodes` KNN virtual table.
@@ -104,6 +107,59 @@ pub fn subwords(name: &str) -> String {
     parts.join(" ")
 }
 
+/// Graph-derivable file coverage (the review service layers git-status and
+/// extension policy on top to produce the full typed coverage).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreFileCoverage {
+    IndexedWithSymbols,
+    IndexedWithoutSymbols,
+    NotIndexed,
+}
+
+/// Leaf of a qualified callee: `IndexLock::acquire` → `acquire`,
+/// `repo.save` → `save`. The persisted, indexed key textual evidence matches on.
+pub fn leaf_name(name: &str) -> &str {
+    let l = name.rsplit("::").next().unwrap_or(name);
+    l.rsplit('.').next().unwrap_or(l)
+}
+
+/// Why is this path unsafe as a repo-relative path, if it is? A
+/// PLATFORM-INDEPENDENT parser: `std::path::Component::Prefix` only exists
+/// when parsing ON Windows, so `C:/x` silently parses as a normal relative
+/// path on a unix validator — artifacts must validate identically on every
+/// host OS. Rejects absolute roots, parent-dir escapes, Windows drive
+/// prefixes (`C:\x`, `C:/x`, drive-relative `C:x`), UNC/device paths and
+/// backslash traversal (all backslash forms), NUL, and non-normalized
+/// segments. `foo..bar.rs`, dotted directories, unicode and spaces are fine.
+pub fn unsafe_path_reason(p: &str) -> Option<&'static str> {
+    if p.is_empty() {
+        return Some("empty path");
+    }
+    if p.contains('\0') {
+        return Some("NUL byte");
+    }
+    if p.contains('\\') {
+        return Some("backslash (Windows separator / UNC / device path)");
+    }
+    if p.starts_with('/') {
+        return Some("absolute path");
+    }
+    let first = p.split('/').next().unwrap_or("");
+    let fb = first.as_bytes();
+    if fb.len() >= 2 && fb[1] == b':' && fb[0].is_ascii_alphabetic() {
+        return Some("Windows drive prefix");
+    }
+    for seg in p.split('/') {
+        match seg {
+            "" => return Some("empty segment (non-normalized path)"),
+            "." => return Some("curdir segment (non-normalized path)"),
+            ".." => return Some("parent-dir escape"),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// SQL scalars: `cg_subwords(name)` so FTS rebuilds stay pure SQL, and
 /// `cg_is_test_path(path)` so SQL queries share the graph builder's token-aware
 /// test-file predicate (a `LIKE '%test%'` would wrongly match `latest_prices.rs`).
@@ -117,6 +173,10 @@ fn register_sql_fns(conn: &Connection) -> Result<()> {
     conn.create_scalar_function("cg_is_test_path", 1, flags, |ctx| {
         let path: String = ctx.get(0)?;
         Ok(codegraph_core::is_test_path(&path))
+    })?;
+    conn.create_scalar_function("cg_leaf_name", 1, flags, |ctx| {
+        let name: String = ctx.get(0)?;
+        Ok(leaf_name(&name).to_string())
     })?;
     Ok(())
 }
@@ -229,10 +289,14 @@ impl Store {
                path TEXT, summary TEXT, added_at INTEGER, PRIMARY KEY(path, summary));
              CREATE TABLE IF NOT EXISTS calls(
                caller_id TEXT, callee_name TEXT, line INTEGER, file_path TEXT,
-               receiver TEXT, enclosing_class TEXT);
+               receiver TEXT, enclosing_class TEXT, leaf_name TEXT);
              CREATE INDEX IF NOT EXISTS idx_calls_file ON calls(file_path);
              CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_name);
              CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller_id);
+             CREATE TABLE IF NOT EXISTS symbol_refs(
+               name TEXT, leaf_name TEXT, kind TEXT, file_path TEXT, line INTEGER);
+             CREATE INDEX IF NOT EXISTS idx_refs_leaf ON symbol_refs(leaf_name);
+             CREATE INDEX IF NOT EXISTS idx_refs_file ON symbol_refs(file_path);
              CREATE TABLE IF NOT EXISTS inherits(
                impl_name TEXT, super_name TEXT, kind TEXT, file_path TEXT);
              CREATE INDEX IF NOT EXISTS idx_inherits_file ON inherits(file_path);
@@ -306,11 +370,42 @@ impl Store {
                 self.conn.execute_batch(FTS_DDL)?;
                 self.rebuild_fts()?;
                 self.migrate_legacy_vectors()?;
+                // v8: persisted, indexed LEAF names for callees — qualified
+                // calls (`IndexLock::acquire`) become queryable without loading
+                // every distinct callee into memory per dead-code query.
+                if v < 8 {
+                    let _ = self
+                        .conn
+                        .execute("ALTER TABLE calls ADD COLUMN leaf_name TEXT", []);
+                    self.conn.execute(
+                        "UPDATE calls SET leaf_name = cg_leaf_name(callee_name) WHERE leaf_name IS NULL",
+                        [],
+                    )?;
+                    self.conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_calls_leaf ON calls(leaf_name)",
+                        [],
+                    )?;
+                }
                 self.conn
                     .execute("UPDATE schema_version SET version = ?1", [SCHEMA_VERSION])?;
             }
             Some(_) => {}
         }
+        // leaf_name exists on every path (fresh CREATE TABLE carries it; v<8
+        // migration ALTERs it in) — but a base-DDL index on it would run
+        // BEFORE the migration on old DBs (field-caught). Create it HERE,
+        // after the version switch, where the column is guaranteed.
+        let _ = self
+            .conn
+            .execute("ALTER TABLE calls ADD COLUMN leaf_name TEXT", []);
+        self.conn.execute(
+            "UPDATE calls SET leaf_name = cg_leaf_name(callee_name) WHERE leaf_name IS NULL",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_calls_leaf ON calls(leaf_name)",
+            [],
+        )?;
         Ok(())
     }
 
@@ -576,28 +671,48 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Dead-code CANDIDATES: functions/methods that no call site in the repo even
-    /// NAMES (the raw `calls` table holds every textual call site, so this is
-    /// stronger evidence than resolved-edges-only), excluding entry points, route
-    /// handlers, and test files. Candidates, not verdicts — dynamic dispatch,
-    /// exports, and reflection can't be seen statically.
-    pub fn dead_code_candidates(&self, limit: usize) -> Result<Vec<Node>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT n.data FROM nodes n
-             WHERE n.label IN ('Function','Method')
-               AND n.name NOT IN ('main','init','new','setup','run','constructor')
-               AND NOT cg_is_test_path(n.file_path)
-               AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.callee_name = n.name)
-               AND NOT EXISTS (SELECT 1 FROM nodes r WHERE r.label = 'Route'
-                               AND json_extract(r.data,'$.metadata.handler') = n.name)
-             ORDER BY n.file_path, n.line_start LIMIT ?1",
+    /// RESOLVED fan-in of one node ID: incoming CALLS edges. Same-name symbols
+    /// never inherit each other's fan-in (that's what name-keyed counting did).
+    pub fn fan_in_of_id(&self, id: &str) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM edges WHERE dst = ?1 AND relation = 'Calls'",
+            [id],
+            |r| r.get(0),
         )?;
-        let rows = stmt.query_map([limit as i64], |r| r.get::<_, String>(0))?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(serde_json::from_str(&r?)?);
+        Ok(n as usize)
+    }
+
+    /// Test-coverage evidence for one node ID, tri-state and evidence-separated:
+    /// 2 = a RESOLVED Tests edge targets THIS id; 1 = textual only (a
+    /// test-looking file has a call site naming it — name-level, may belong to
+    /// a same-name sibling); 0 = none.
+    pub fn test_evidence_of_id(
+        &self,
+        id: &str,
+        name: &str,
+    ) -> Result<codegraph_core::TestEvidence> {
+        let resolved: i64 = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM edges WHERE dst = ?1 AND relation = 'Tests')",
+            [id],
+            |r| r.get(0),
+        )?;
+        if resolved != 0 {
+            return Ok(codegraph_core::TestEvidence::Resolved);
         }
-        Ok(out)
+        // canonical token-aware test-path classifier (NOT '%test%' — that
+        // matched latest.py/contest.rs) + leaf-aware callee matching so
+        // `Type::method()` in a test still counts for `method`.
+        let textual: i64 = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM calls WHERE leaf_name = ?1
+                AND cg_is_test_path(file_path))",
+            [name],
+            |r| r.get(0),
+        )?;
+        Ok(if textual != 0 {
+            codegraph_core::TestEvidence::TextualOnly
+        } else {
+            codegraph_core::TestEvidence::None
+        })
     }
 
     /// Textual call sites naming `name` (fan-in signal — every call site, resolved or not).
@@ -631,6 +746,31 @@ impl Store {
     }
 
     /// Non-File symbols defined in a file (for diff → affected-symbol mapping).
+    /// What the GRAPH knows about a file — from manifest/index metadata,
+    /// never from `Path::exists()` (a file on disk that the indexer never
+    /// ingested is missing coverage, not "legitimately symbol-free").
+    pub fn file_graph_coverage(&self, file: &str) -> Result<StoreFileCoverage> {
+        let has_symbols: i64 = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM nodes WHERE file_path = ?1
+                AND label IN ('Function','Method','Class','Interface','Enum','Type'))",
+            [file],
+            |r| r.get(0),
+        )?;
+        if has_symbols != 0 {
+            return Ok(StoreFileCoverage::IndexedWithSymbols);
+        }
+        let in_manifest: i64 = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM manifest WHERE file_path = ?1)",
+            [file],
+            |r| r.get(0),
+        )?;
+        Ok(if in_manifest != 0 {
+            StoreFileCoverage::IndexedWithoutSymbols
+        } else {
+            StoreFileCoverage::NotIndexed
+        })
+    }
+
     pub fn symbols_in_file(&self, file: &str) -> Result<Vec<Node>> {
         let mut stmt = self.conn.prepare(
             "SELECT data FROM nodes WHERE file_path = ?1 AND label IN ('Function','Method','Class','Interface','Enum','Type') ORDER BY line_start",
@@ -641,6 +781,74 @@ impl Store {
             out.push(serde_json::from_str(&r?)?);
         }
         Ok(out)
+    }
+
+    /// Checkpoint the WAL fully into the main database file (TRUNCATE mode).
+    /// Import durability depends on this: after it succeeds, no required data
+    /// remains only in a `-wal` sidecar. A busy/partial checkpoint is an
+    /// ERROR — the caller must not activate a graph whose WAL still holds data.
+    pub fn checkpoint_truncate(&self) -> Result<()> {
+        let (busy, wal_pages, moved): (i64, i64, i64) =
+            self.conn
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?;
+        if busy != 0 {
+            return Err(StoreError::Msg(format!(
+                "wal_checkpoint(TRUNCATE) incomplete: busy={busy} wal_pages={wal_pages} checkpointed={moved}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// SQLite-level integrity: `PRAGMA integrity_check` must return exactly "ok".
+    pub fn integrity_check(&self) -> Result<()> {
+        let r: String = self
+            .conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+        if r != "ok" {
+            return Err(StoreError::Msg(format!("integrity_check: {r}")));
+        }
+        Ok(())
+    }
+
+    /// Imported graphs must only carry repo-relative paths — an absolute or
+    /// `..`-escaping file_path in a shared artifact could read outside the
+    /// repo when snippets are served.
+    pub fn assert_repo_relative_paths(&self) -> Result<()> {
+        // STRUCTURAL, platform-independent validation (see
+        // `unsafe_path_reason`) over EVERY path-bearing table. NULL/empty
+        // columns are legitimate for optional path columns (edges.src_file,
+        // contexts.path rows that aren't repo paths are still validated when
+        // present as text).
+        let check = |table: &str, column: &str| -> Result<()> {
+            let sql = format!(
+                "SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL AND {column} != ''"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for r in rows {
+                let p = r?;
+                if let Some(reason) = unsafe_path_reason(&p) {
+                    return Err(StoreError::Msg(format!(
+                        "non-repo-relative path in artifact {table}.{column} ({reason}): {p}"
+                    )));
+                }
+            }
+            Ok(())
+        };
+        check("nodes", "file_path")?;
+        check("manifest", "file_path")?;
+        check("calls", "file_path")?;
+        check("edges", "src_file")?;
+        check("inherits", "file_path")?;
+        check("fields", "file_path")?;
+        check("imports", "file_path")?;
+        check("locals", "file_path")?;
+        check("type_refs", "file_path")?;
+        check("symbol_refs", "file_path")?;
+        check("contexts", "path")?;
+        Ok(())
     }
 
     pub fn save_manifest(&self, file_path: &str, sha256: &str, mtime: i64) -> Result<()> {
@@ -704,10 +912,42 @@ impl Store {
         Ok(())
     }
 
+    /// DEPRECATED surface: the CLI import path additionally validates and
+    /// heals in staging — prefer it. This helper stays bounded (streaming
+    /// decompression, 2 GB cap) AND atomic: the destination is only ever
+    /// replaced by a fully-written, synced file via a same-directory rename —
+    /// never truncated in place.
     pub fn import_zst(zst: &Path, db_out: &Path) -> Result<Store> {
-        let compressed = std::fs::read(zst)?;
-        let bytes = zstd::decode_all(&compressed[..])?;
-        std::fs::write(db_out, bytes)?;
+        use std::io::{Read, Write};
+        const CAP: u64 = 2048 * 1024 * 1024;
+        let dir = db_out
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let staging = tempfile::Builder::new()
+            .prefix("graph.db.import-")
+            .suffix(".tmp")
+            .tempfile_in(&dir)
+            .map_err(|e| StoreError::Msg(format!("staging in {}: {e}", dir.display())))?;
+        let fin = std::fs::File::open(zst)?;
+        let mut dec = zstd::stream::read::Decoder::new(std::io::BufReader::new(fin))
+            .map_err(|e| StoreError::Msg(format!("zstd: {e}")))?;
+        {
+            let mut out = std::io::BufWriter::new(staging.as_file());
+            let copied = std::io::copy(&mut (&mut dec).take(CAP + 1), &mut out)?;
+            if copied > CAP {
+                return Err(StoreError::Msg(
+                    "artifact exceeds the 2 GB import cap".into(),
+                ));
+            }
+            out.flush()?;
+        }
+        staging.as_file().sync_all()?;
+        staging
+            .into_temp_path()
+            .persist(db_out)
+            .map_err(|e| StoreError::Msg(format!("activating {}: {e}", db_out.display())))?;
         Store::open(db_out)
     }
     /// FTS with RANKING (previously rowid-ordered + truncated — the actual
@@ -1348,7 +1588,8 @@ impl Store {
         self.conn
             .execute("DELETE FROM calls WHERE file_path = ?1", [file_path])?;
         let mut stmt = self.conn.prepare(
-            "INSERT INTO calls(caller_id, callee_name, line, file_path, receiver, enclosing_class) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO calls(caller_id, callee_name, line, file_path, receiver, enclosing_class, leaf_name)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, cg_leaf_name(?2))",
         )?;
         for c in calls {
             let receiver = serde_json::to_string(&c.receiver)?;
@@ -1362,6 +1603,78 @@ impl Store {
             ])?;
         }
         Ok(())
+    }
+
+    /// Persist a file's typed NON-CALL references (function values,
+    /// callbacks, FFI exports, macro/framework registration, public exports).
+    /// Name-level evidence, indexed by leaf — never resolution input.
+    pub fn save_refs(&self, file_path: &str, refs: &[codegraph_core::RawRef]) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM symbol_refs WHERE file_path = ?1", [file_path])?;
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO symbol_refs(name, leaf_name, kind, file_path, line)
+             VALUES(?1, cg_leaf_name(?1), ?2, ?3, ?4)",
+        )?;
+        for r in refs {
+            stmt.execute(params![r.name, enum_str(&r.kind)?, file_path, r.line])?;
+        }
+        Ok(())
+    }
+
+    /// All typed references whose LEAF matches `leaf` — (kind, file_path)
+    /// pairs, indexed lookup (never a full-table load per request).
+    pub fn refs_for_leaf(
+        &self,
+        leaf: &str,
+    ) -> Result<Vec<(codegraph_core::ReferenceKind, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT kind, file_path FROM symbol_refs WHERE leaf_name = ?1")?;
+        let rows = stmt.query_map([leaf], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (kind, file) = r?;
+            out.push((enum_from(&kind)?, file));
+        }
+        Ok(out)
+    }
+
+    /// Is `name` registered as a Route handler in the graph?
+    pub fn is_route_handler(&self, name: &str) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM nodes r WHERE r.label = 'Route'
+                AND json_extract(r.data,'$.metadata.handler') = ?1)",
+            [name],
+            |r| r.get(0),
+        )?;
+        Ok(n != 0)
+    }
+
+    /// One deterministic batch (file/line order, LIMIT/OFFSET) of symbols
+    /// with NO direct call evidence: no resolved incoming Calls/Tests edge to
+    /// the ID and no textual call site naming the leaf. Test-context nodes
+    /// are never included. Classification (candidate vs indirectly-referenced
+    /// vs excluded vs unknown) happens in the service layer against
+    /// `refs_for_leaf`/`is_route_handler`.
+    pub fn dead_code_batch(&self, limit: usize, offset: usize) -> Result<Vec<Node>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.data FROM nodes n
+             WHERE n.label IN ('Function','Method')
+               AND NOT cg_is_test_path(n.file_path)
+               AND json_extract(n.data,'$.metadata.is_test') IS NULL
+               AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.dst = n.id
+                               AND e.relation IN ('Calls','Tests'))
+               AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.leaf_name = n.name)
+             ORDER BY n.file_path, n.line_start LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt.query_map([limit as i64, offset as i64], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(serde_json::from_str(&r?)?);
+        }
+        Ok(out)
     }
 
     pub fn all_calls(&self) -> Result<Vec<RawCall>> {
@@ -1409,6 +1722,8 @@ impl Store {
             .execute("DELETE FROM nodes WHERE file_path = ?1", [file_path])?;
         self.conn
             .execute("DELETE FROM calls WHERE file_path = ?1", [file_path])?;
+        self.conn
+            .execute("DELETE FROM symbol_refs WHERE file_path = ?1", [file_path])?;
         self.conn
             .execute("DELETE FROM inherits WHERE file_path = ?1", [file_path])?;
         self.conn
@@ -2060,6 +2375,147 @@ mod tests {
             pagerank: 0.0,
             betweenness: 0.0,
         }
+    }
+
+    /// Table-driven, platform-independent path validation: Unix, Windows and
+    /// UNC forms must produce IDENTICAL verdicts on every host OS (the old
+    /// `Component::Prefix` check was host-dependent — `C:/x` passed on unix).
+    #[test]
+    fn unsafe_path_reason_is_platform_independent() {
+        let rejected: &[(&str, &str)] = &[
+            ("/etc/passwd", "absolute"),
+            ("../x", "parent-dir"),
+            ("a/../x", "parent-dir"),
+            ("..", "parent-dir"),
+            ("C:\\evil.rs", "backslash"),
+            ("C:/evil.rs", "drive"),
+            ("c:/evil.rs", "drive"),
+            ("C:evil.rs", "drive"),
+            ("a:b.txt/ok.rs", "drive"), // single letter + colon IS a drive on Windows
+            ("\\\\server\\share\\x", "backslash"),
+            ("\\\\?\\C:\\x", "backslash"),
+            ("a\\..\\b", "backslash"),
+            ("a\0b", "NUL"),
+            ("", "empty"),
+            ("a//b", "empty segment"),
+            ("./a", "curdir"),
+            ("a/./b", "curdir"),
+            ("a/", "empty segment"),
+        ];
+        for (p, needle) in rejected {
+            let reason = unsafe_path_reason(p)
+                .unwrap_or_else(|| panic!("{p:?} must be rejected on every host OS"));
+            assert!(
+                reason.contains(needle),
+                "{p:?}: expected reason containing {needle:?}, got {reason:?}"
+            );
+        }
+        let accepted = &[
+            "foo..bar.rs",
+            ".github/workflows/ci.yml",
+            "dir.with.dots/x.py",
+            "path with spaces/тест файл.rs",
+            "深い/構造/コード.swift",
+            "src/lib.rs",
+            "ab:c.txt/ok.rs", // colon beyond a single drive letter is a legal unix name
+        ];
+        for p in accepted {
+            assert_eq!(
+                unsafe_path_reason(p),
+                None,
+                "{p:?} is a legal repo-relative path"
+            );
+        }
+    }
+
+    /// Every path-bearing table is validated — a hostile path hidden in a
+    /// deep table (edges.src_file, type_refs, contexts) must fail the
+    /// artifact, not just nodes/manifest.
+    #[test]
+    fn artifact_path_validation_covers_every_table() {
+        let cases: &[(&str, &str)] = &[
+            ("INSERT INTO nodes(id,label,name,file_path,data) VALUES('x','Function','x',?1,'{}')", "nodes"),
+            ("INSERT INTO manifest(file_path,sha256,mtime) VALUES(?1,'s',0)", "manifest"),
+            ("INSERT INTO calls(caller_id,callee_name,line,file_path) VALUES('c','f',1,?1)", "calls"),
+            ("INSERT INTO edges(src,dst,relation,tier,confidence,src_file,src_line,data) VALUES('a','b','Calls','TreeSitter','Inferred',?1,1,'{}')", "edges"),
+            ("INSERT INTO inherits(impl_name,super_name,kind,file_path) VALUES('a','b','extends',?1)", "inherits"),
+            ("INSERT INTO fields(class_id,field_name,type_name,file_path) VALUES('c','f','T',?1)", "fields"),
+            ("INSERT INTO imports(file_path,name,module) VALUES(?1,'n','m')", "imports"),
+            ("INSERT INTO locals(caller_id,var_name,type_name,file_path) VALUES('c','v','T',?1)", "locals"),
+            ("INSERT INTO type_refs(file_path,type_name) VALUES(?1,'T')", "type_refs"),
+            ("INSERT INTO symbol_refs(name,leaf_name,kind,file_path,line) VALUES('n','n','callback',?1,1)", "symbol_refs"),
+            ("INSERT INTO contexts(path,summary,added_at) VALUES(?1,'s',0)", "contexts"),
+        ];
+        for (sql, table) in cases {
+            let s = Store::open_in_memory().unwrap();
+            s.assert_repo_relative_paths()
+                .expect("clean store must validate");
+            s.conn.execute(sql, ["../escape.rs"]).unwrap();
+            let err = s
+                .assert_repo_relative_paths()
+                .expect_err(&format!("hostile path in {table} must fail validation"));
+            assert!(
+                err.to_string().contains(table),
+                "error must name the offending table {table}: {err}"
+            );
+        }
+    }
+
+    /// A v8 DB (predating symbol_refs) must gain the table on open — the
+    /// fast path skips the DDL batch for already-current versions, so the
+    /// version gate must not be current for v8.
+    #[test]
+    fn v8_db_gains_symbol_refs_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("graph.db");
+        {
+            let s = Store::open(&db).unwrap();
+            s.conn
+                .execute_batch("DROP TABLE symbol_refs; UPDATE schema_version SET version = 8;")
+                .unwrap();
+        }
+        let s = Store::open(&db).expect("v8 DB must migrate");
+        s.save_refs(
+            "a.rs",
+            &[codegraph_core::RawRef {
+                name: "cb".into(),
+                line: 1,
+                kind: codegraph_core::ReferenceKind::Callback,
+            }],
+        )
+        .expect("symbol_refs must exist after migration");
+        assert_eq!(s.refs_for_leaf("cb").unwrap().len(), 1);
+    }
+
+    /// Field-caught migration bug: a pre-v8 DB (calls table without
+    /// leaf_name) must open cleanly — the leaf index must never be created
+    /// before the column exists.
+    #[test]
+    fn v7_calls_table_migrates_to_leaf_name() {
+        let dir = std::env::temp_dir().join(format!("cg_migr_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("graph.db");
+        {
+            // synthesize the v7 shape: calls WITHOUT leaf_name, version 7
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version(version INTEGER NOT NULL);
+                 INSERT INTO schema_version(version) VALUES(7);
+                 CREATE TABLE calls(
+                   caller_id TEXT, callee_name TEXT, line INTEGER, file_path TEXT,
+                   receiver TEXT, enclosing_class TEXT);
+                 INSERT INTO calls VALUES('c','IndexLock::acquire',1,'a.rs','\"Bare\"',NULL);",
+            )
+            .unwrap();
+        }
+        let s = Store::open(&db).expect("v7 DB must migrate, not fail on the leaf index");
+        let leaf: String = s
+            .conn
+            .query_row("SELECT leaf_name FROM calls LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(leaf, "acquire", "migration must backfill leaf names");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

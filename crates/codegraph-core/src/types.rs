@@ -383,3 +383,142 @@ mod tests {
         assert!(!Coverage::callees(0, 0).may_be_incomplete);
     }
 }
+
+/// Strongly-typed node identity. Semantic operations (fan-in, coverage,
+/// callers, dead-code evidence) key on THIS — never on a display name, which
+/// is a many-to-one union in any real repo. Serde-transparent so existing
+/// JSON/SQLite string columns keep their shape (additive migration).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct NodeId(String);
+
+impl NodeId {
+    /// Validated constructor: an id is a non-empty, whitespace-free string.
+    /// (Existing graphs only ever contain such ids; this guards NEW inputs.)
+    pub fn new(raw: impl Into<String>) -> Result<NodeId, String> {
+        let s = raw.into();
+        if s.is_empty() {
+            return Err("node id must not be empty".into());
+        }
+        if s.chars().any(char::is_whitespace) {
+            return Err(format!("node id must not contain whitespace: {s:?}"));
+        }
+        Ok(NodeId(s))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for NodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Monotonic index generation — bumped once per committed index. Cache keys
+/// and answer provenance carry this, so "which graph said that?" is always
+/// answerable.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct GraphGeneration(pub u64);
+
+/// HOW a symbol is referenced when it is not a direct call. Persisted
+/// separately from `calls` — name-level evidence that downgrades dead-code
+/// certainty without ever fabricating a resolved CALLS edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceKind {
+    /// A textual call site (kept in `calls`; listed here for completeness).
+    DirectCall,
+    /// Used as a value: `let h = process;`, `f as fn(_)`, struct field init.
+    FunctionValue,
+    /// Passed as an argument: `is_ok_and(attr_is_test)`, `register(cb)`.
+    Callback,
+    /// `extern`/`#[no_mangle]`/`#[export_name]` — callable from outside.
+    FfiExport,
+    /// Named inside a macro invocation's token tree.
+    MacroRegistration,
+    /// Registered by an attribute macro / framework (e.g. #[tool], routes).
+    FrameworkRegistration,
+    /// Public visibility — external callers are invisible to this repo.
+    PublicExport,
+    /// Referenced in a position the parser cannot classify.
+    UnknownIndirect,
+}
+
+/// One non-call symbol reference captured at parse time (name-level).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RawRef {
+    pub name: String,
+    pub line: u32,
+    pub kind: ReferenceKind,
+}
+
+/// Does the graph agree with the working tree RIGHT NOW? Orthogonal to
+/// evidence quality: a stale graph can still give an exact answer about the
+/// snapshot it holds, and a fresh graph can still be a lower bound.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GraphFreshness {
+    /// Refreshed (or verified current) before serving.
+    Fresh,
+    /// Served knowingly against a graph that may disagree with the tree.
+    Stale { reason: String },
+    /// Freshness could not be established (legacy graph, no probe possible).
+    Unknown { reason: String },
+}
+
+/// How trustworthy the COMPUTATION is, independent of graph freshness.
+/// A lower bound must never masquerade as exact; a skipped/failed computation
+/// must never read as zero.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EvidenceQuality {
+    /// Complete within the resolved graph's evidence rules.
+    Exact,
+    /// Precise but provably not exhaustive (e.g. unresolved call sites exist).
+    LowerBound { reason: String },
+    /// Derived by sampling/approximation, never presented as exact.
+    Approximate {
+        method: String,
+        sample_size: Option<usize>,
+    },
+    /// Could not be computed at all.
+    Unavailable { reason: String },
+}
+
+/// Answer provenance and trust, with every dimension INDEPENDENT:
+/// `freshness = Stale` + `evidence = LowerBound` is representable (and was
+/// not when a single enum carried both). `generation: None` means the graph
+/// carries no provenance stamp — never invented as generation 0.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct AnswerMetadata {
+    pub generation: Option<GraphGeneration>,
+    pub freshness: GraphFreshness,
+    pub evidence: EvidenceQuality,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<Coverage>,
+}
+
+/// The common envelope for analytical answers: data plus which graph
+/// produced it plus how much to trust it. Adapters (CLI/MCP) render this;
+/// they never invent their own quality semantics.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GraphAnswer<T> {
+    pub data: T,
+    pub meta: AnswerMetadata,
+}
+
+/// Test-coverage evidence, evidence-separated and typed (replaces magic u8
+/// states). `Resolved` keys on the node ID; `TextualOnly` is name-level and
+/// may belong to a same-name sibling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestEvidence {
+    Resolved,
+    TextualOnly,
+    None,
+}

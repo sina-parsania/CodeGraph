@@ -9,9 +9,10 @@ pub use config::{
 };
 pub use llm::{LlmClient, VisionLlmClient};
 pub use types::{
-    display_label, Confidence, Coverage, Edge, EdgeRelation, Hyperedge, HyperedgeMember,
-    HyperedgeRelation, InheritKind, Metadata, Node, NodeLabel, QualifiedName, RawCall, RawField,
-    RawImport, RawInherit, RawLocal, Receiver, ResolutionTier,
+    display_label, AnswerMetadata, Confidence, Coverage, Edge, EdgeRelation, EvidenceQuality,
+    GraphAnswer, GraphFreshness, GraphGeneration, Hyperedge, HyperedgeMember, HyperedgeRelation,
+    InheritKind, Metadata, Node, NodeId, NodeLabel, QualifiedName, RawCall, RawField, RawImport,
+    RawInherit, RawLocal, RawRef, Receiver, ReferenceKind, ResolutionTier, TestEvidence,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -148,4 +149,16 @@ mod vec_tests {
         // normalize is idempotent in magnitude
         assert!((normalize(&na).iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-5);
     }
+}
+
+/// The indexer's CODE extensions — the single source of truth shared by the
+/// CLI indexer, review services, and MCP adapters (no duplicated lists).
+pub const CODE_EXTS: &[&str] = &[
+    "rs", "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "mts", "cts", "tsx", "go", "swift", "java",
+    "c", "h", "cpp", "cc", "cxx", "hpp", "hh", "hxx", "rb", "cs", "sh", "bash", "kt", "kts",
+];
+
+/// Would this path be indexed as CODE? (extension policy only)
+pub fn is_code_path(rel: &str) -> bool {
+    CODE_EXTS.contains(&rel.rsplit('.').next().unwrap_or(""))
 }

@@ -30,6 +30,8 @@ rayon.workspace = true
 sha2.workspace = true
 zstd.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+tempfile.workspace = true
+codegraph-services = { version = "1.38.0", path = "../codegraph-services" }
 
 [features]
 media = ["codegraph-ingest/media"]

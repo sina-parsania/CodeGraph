@@ -19,6 +19,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
         run: cargo test --workspace
+      - name: Feature check (release-artifact features never wait for a tag)
+        run: cargo check -p codegraph-cli --features "indexstore,local-embed,local-llm"
       - name: Build release
         run: cargo build --release -p codegraph-cli
       - name: Determinism guarantee (golden check)

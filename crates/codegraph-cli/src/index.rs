@@ -13,10 +13,7 @@ use ignore::WalkBuilder;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
-const EXTS: &[&str] = &[
-    "rs", "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "mts", "cts", "tsx", "go", "swift", "java",
-    "c", "h", "cpp", "cc", "cxx", "hpp", "hh", "hxx", "rb", "cs", "sh", "bash", "kt", "kts",
-];
+const EXTS: &[&str] = codegraph_core::CODE_EXTS;
 
 /// Documentation/prose files auto-ingested as searchable Document nodes during
 /// `index` (READMEs, docs, changelogs). Data/log files (json, jsonl, log, csv, …)
@@ -150,33 +147,141 @@ fn engine_version() -> String {
 /// owner dies (kill -9 included) — no PID stamps, no staleness windows, no
 /// steal logic. The file is never deleted (deleting a flocked path
 /// reintroduces the very races flock removes).
-struct IndexLock {
+pub(crate) struct IndexLock {
     _file: std::fs::File, // closing the fd releases the lock
 }
 
+/// Why lock acquisition failed — contention and lock-file I/O demand
+/// different operator actions (wait / kill the holder vs fix the filesystem),
+/// so they are distinct variants, and neither may silently continue unlocked.
+#[derive(Debug)]
+pub(crate) enum LockError {
+    /// Another live process holds the flock and the wait budget ran out.
+    Contended {
+        path: std::path::PathBuf,
+        waited_secs: u64,
+    },
+    /// Creating/opening the lock file itself failed (permissions, EISDIR, …).
+    Io {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+}
+
+impl std::fmt::Display for LockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LockError::Contended { path, waited_secs } => write!(
+                f,
+                "graph lock {} is held by another process (waited {waited_secs}s)",
+                path.display()
+            ),
+            LockError::Io { path, source } => {
+                write!(
+                    f,
+                    "cannot open graph lock file {}: {source}",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for LockError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LockError::Io { source, .. } => Some(source),
+            LockError::Contended { .. } => None,
+        }
+    }
+}
+
+/// Wait budget for the graph lock. Overridable (CODEGRAPH_LOCK_WAIT_SECS) so
+/// tests and CI exercise contention without a 10-minute stall; malformed
+/// values are actionable errors, never silent defaults.
+fn lock_wait_secs() -> Result<u64> {
+    match std::env::var("CODEGRAPH_LOCK_WAIT_SECS") {
+        Err(std::env::VarError::NotPresent) => Ok(600),
+        Err(e) => anyhow::bail!("CODEGRAPH_LOCK_WAIT_SECS unreadable: {e}"),
+        Ok(v) => v.trim().parse::<u64>().map_err(|e| {
+            anyhow::anyhow!("CODEGRAPH_LOCK_WAIT_SECS={v:?} is not a whole number of seconds: {e}")
+        }),
+    }
+}
+
 impl IndexLock {
-    fn acquire(db: &Path) -> Option<IndexLock> {
-        const MAX_WAIT_SECS: u64 = 600;
+    fn acquire(db: &Path) -> std::result::Result<IndexLock, LockError> {
         let path = db.with_extension("lock");
-        std::fs::create_dir_all(path.parent()?).ok()?;
+        let io = |source: std::io::Error| LockError::Io {
+            path: path.clone(),
+            source,
+        };
+        let max_wait_secs = lock_wait_secs()
+            .map_err(|e| io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(io)?;
+        }
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(&path)
-            .ok()?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(MAX_WAIT_SECS);
+            .map_err(io)?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_wait_secs);
         loop {
-            if file.try_lock().is_ok() {
-                return Some(IndexLock { _file: file });
+            match file.try_lock() {
+                Ok(()) => return Ok(IndexLock { _file: file }),
+                Err(std::fs::TryLockError::WouldBlock) => {}
+                Err(std::fs::TryLockError::Error(e)) => return Err(io(e)),
             }
             if std::time::Instant::now() >= deadline {
-                // ponytail: a >10-min holder is hung — proceed UNLOCKED rather
-                // than brick; SQLite still serializes the writes, so the cost
-                // is duplicated work, never a wrong graph.
-                return None;
+                return Err(LockError::Contended {
+                    path,
+                    waited_secs: max_wait_secs,
+                });
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+}
+
+/// The graph writer lock for IMPORT (same exclusion domain as reindexers —
+/// one writer at a time per graph). Every failure is typed and fatal to the
+/// caller: an import must never proceed unlocked.
+pub(crate) fn acquire_graph_lock(db: &Path) -> std::result::Result<IndexLock, LockError> {
+    IndexLock::acquire(db)
+}
+
+/// Replace `dest` with `src` as atomically as the platform allows. Unix
+/// rename() replaces in one step. Windows can't rename over an open/existing
+/// file — move the old graph aside first and restore it if activation fails,
+/// so the previous graph survives every failure mode.
+pub(crate) fn replace_db_atomically(src: &Path, dest: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::rename(src, dest)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let backup = dest.with_extension(format!("db.replaced-{}.bak", std::process::id()));
+        let had_dest = dest.exists();
+        if had_dest {
+            std::fs::rename(dest, &backup)?;
+        }
+        match std::fs::rename(src, dest) {
+            Ok(()) => {
+                if had_dest {
+                    let _ = std::fs::remove_file(&backup);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                if had_dest {
+                    let _ = std::fs::rename(&backup, dest); // roll the old graph back
+                }
+                Err(e.into())
+            }
         }
     }
 }
@@ -318,6 +423,13 @@ fn git_ls_files(root: &Path) -> Option<Vec<PathBuf>> {
     Some(files)
 }
 
+/// Would this path be indexed as CODE if it existed? (Extension check only —
+/// used to label deleted/renamed files in `changes` as UNKNOWN rather than
+/// silently dropping them from the risk view.)
+pub fn is_indexable_code(rel: &str) -> bool {
+    codegraph_core::is_code_path(rel)
+}
+
 /// Some(is_doc) if a file is indexable, None to skip. Shared predicate.
 fn classify(path: &Path, meta: &std::fs::Metadata) -> Option<bool> {
     if !meta.is_file() {
@@ -452,6 +564,11 @@ pub fn check_identity(root: &Path, db: &Path) -> Result<()> {
 /// stat-only probe above. This is the guarantee that queries never serve stale
 /// results (no false positives after edits / add / delete / git checkout).
 pub fn ensure_fresh(root: &Path) -> Result<()> {
+    // Deterministic failure injection for the strict-freshness regression
+    // tests — no filesystem tricks, no effect outside tests.
+    if std::env::var("CODEGRAPH_TEST_FAIL_REFRESH").as_deref() == Ok("1") {
+        anyhow::bail!("injected refresh failure (CODEGRAPH_TEST_FAIL_REFRESH)");
+    }
     // Long-lived MCP sessions only stamp the registry at startup; a month-long
     // session would look idle to the TTL sweep of a command run in ANOTHER
     // repo, which could delete this graph out from under the server. Touching
@@ -499,7 +616,16 @@ pub fn index_dir(
     // Serialize concurrent indexers (MCP server / watcher / CLI). Whoever
     // waited here re-diffs against the manifest below and finds the work
     // already done — one rebuild, not N.
-    let _lock = IndexLock::acquire(db);
+    let _lock = match IndexLock::acquire(db) {
+        Ok(l) => Some(l),
+        // ponytail: a holder outliving the whole wait budget is hung — the
+        // REINDEXER proceeds unlocked rather than brick (SQLite still
+        // serializes writes; the cost is duplicated work, never a wrong
+        // graph). Import does NOT share this policy — it treats both
+        // failures as fatal.
+        Err(LockError::Contended { .. }) => None,
+        Err(e @ LockError::Io { .. }) => return Err(e.into()),
+    };
     let store = Store::open(db)?;
     // RAII: rolls back on early error/panic; committed explicitly below.
     let txn = store.txn()?;
@@ -605,6 +731,7 @@ pub fn index_dir(
                     locals: Vec::new(),
                     imports: Vec::new(),
                     type_refs: Vec::new(),
+                    refs: Vec::new(),
                 }
             } else if *is_doc {
                 let ctype = rel.rsplit('.').next().unwrap_or("text");
@@ -616,6 +743,7 @@ pub fn index_dir(
                     locals: Vec::new(),
                     imports: Vec::new(),
                     type_refs: Vec::new(),
+                    refs: Vec::new(),
                 }
             } else {
                 parse_file(&project, rel, source)
@@ -648,6 +776,7 @@ pub fn index_dir(
         }
         store.delete_file_data(&rel)?;
         store.save_calls(&rel, &pf.calls)?;
+        store.save_refs(&rel, &pf.refs)?;
         store.save_inherits(&rel, &pf.inherits)?;
         store.save_fields(&rel, &pf.fields)?;
         store.save_locals(&rel, &pf.locals)?;

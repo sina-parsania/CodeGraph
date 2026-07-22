@@ -361,11 +361,11 @@ pub fn report(root: &Path, db: &Path) -> Result<String> {
     }
 
     // ---- dead code ----
-    let dead = store.dead_code_candidates(10)?;
+    let dead = codegraph_services::DeadCodeService::candidates(&store, 10)?.data;
     if !dead.is_empty() {
         w("\n## Dead-code candidates (verify before deleting — static view)".into());
         for n in &dead {
-            w(format!("- `{}` — {}:{}", n.name, n.file_path, n.line_start));
+            w(format!("- `{}` — {}:{}", n.name, n.file, n.line));
         }
     }
 

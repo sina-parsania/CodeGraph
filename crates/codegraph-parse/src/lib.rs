@@ -4,14 +4,14 @@
 
 use codegraph_core::{
     InheritKind, Metadata, Node, NodeLabel, QualifiedName, RawCall, RawField, RawImport,
-    RawInherit, RawLocal, Receiver,
+    RawInherit, RawLocal, RawRef, Receiver, ReferenceKind,
 };
 use tree_sitter::{Language, Node as TsNode, Parser};
 
 /// Bump whenever parse OUTPUT changes shape (new node kinds, name filters,
 /// import handling). A stamped-version mismatch forces a full reparse so one
 /// graph never mixes two parser behaviors (incremental == full would break).
-pub const PARSER_VERSION: u32 = 9;
+pub const PARSER_VERSION: u32 = 12;
 
 pub struct ParsedFile {
     pub nodes: Vec<Node>,
@@ -24,6 +24,10 @@ pub struct ParsedFile {
     /// generic args, array/optional elements, return types, extends clauses).
     /// Pure usage EVIDENCE (feeds `type_usages`) — never resolution input.
     pub type_refs: Vec<String>,
+    /// NON-CALL symbol references (function values, callbacks, FFI exports,
+    /// macro/framework registration, public exports) — typed, name-level
+    /// evidence for dead-code assessment. Never resolution input.
+    pub refs: Vec<RawRef>,
 }
 
 impl ParsedFile {
@@ -36,6 +40,7 @@ impl ParsedFile {
             locals: Vec::new(),
             imports: Vec::new(),
             type_refs: Vec::new(),
+            refs: Vec::new(),
         }
     }
 }
@@ -626,6 +631,15 @@ fn parse_with(spec: &LangSpec, project: &str, rel_path: &str, source: &str) -> P
         &mut imports,
     );
     let type_refs = collect_type_refs(tree.root_node(), bytes, spec.name);
+    // Typed non-call references (Rust): function values, callbacks, FFI
+    // exports, macro/framework registration, public exports.
+    let refs = match spec.name {
+        "rust" => collect_rust_refs(tree.root_node(), bytes),
+        "typescript" | "javascript" | "tsx" | "python" => {
+            collect_value_refs(tree.root_node(), bytes, spec.name)
+        }
+        _ => Vec::new(),
+    };
     ParsedFile {
         nodes,
         calls,
@@ -634,8 +648,305 @@ fn parse_with(spec: &LangSpec, project: &str, rel_path: &str, source: &str) -> P
         locals,
         imports,
         type_refs,
+        refs,
     }
 }
+
+/// Rust-structural walk for NON-CALL references — the evidence classes that
+/// made live functions look dead: function values (`let h = process;`,
+/// `f as fn(_)`, struct-field init), callback arguments
+/// (`is_ok_and(attr_is_test)`), token-tree mentions inside macro invocations,
+/// FFI export surface (`extern`/`#[no_mangle]`/`#[export_name]`),
+/// attribute-macro registration (`#[tool]`-style), and `pub` visibility.
+/// All name-level, all typed — never resolved CALLS edges.
+fn collect_rust_refs(root: TsNode, src: &[u8]) -> Vec<RawRef> {
+    let mut refs = Vec::new();
+    let leaf = |n: TsNode| -> Option<(String, u32)> {
+        let text = std::str::from_utf8(&src[n.byte_range()]).ok()?;
+        let name = text.rsplit("::").next().unwrap_or(text).trim();
+        if name.is_empty() {
+            return None;
+        }
+        Some((name.to_string(), n.start_position().row as u32 + 1))
+    };
+    let push = |n: TsNode, kind: ReferenceKind, out: &mut Vec<RawRef>| {
+        if let Some((name, line)) = leaf(n) {
+            out.push(RawRef { name, line, kind });
+        }
+    };
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        for ch in node.children(&mut cursor) {
+            stack.push(ch);
+        }
+        match node.kind() {
+            // value positions where a bare fn name is a FUNCTION VALUE /
+            // CALLBACK, not a call
+            "identifier" | "scoped_identifier" => {
+                let Some(parent) = node.parent() else {
+                    continue;
+                };
+                match parent.kind() {
+                    // f(x, callback) — every bare identifier argument
+                    "arguments" => push(node, ReferenceKind::Callback, &mut refs),
+                    // let handler = process;   (VALUE side only, never the pattern)
+                    "let_declaration" => {
+                        if parent.child_by_field_name("value").map(|v| v.id()) == Some(node.id()) {
+                            push(node, ReferenceKind::FunctionValue, &mut refs);
+                        }
+                    }
+                    // Spec { label_for: rust_label }  /  f as fn(_)
+                    "field_initializer" | "type_cast_expression" => {
+                        if parent.child_by_field_name("value").map(|v| v.id()) == Some(node.id()) {
+                            push(node, ReferenceKind::FunctionValue, &mut refs);
+                        }
+                    }
+                    // (a, b) / [a, b] — position too generic to classify
+                    "tuple_expression" | "array_expression" => {
+                        push(node, ReferenceKind::UnknownIndirect, &mut refs)
+                    }
+                    _ => {}
+                }
+            }
+            // Macro bodies are token trees, not expressions — `ident (…)`
+            // shapes inside them are recorded as MACRO evidence (previously a
+            // sentinel-receiver textual call).
+            "macro_invocation" => {
+                let mut tts: Vec<TsNode> = (0..node.named_child_count())
+                    .filter_map(|i| node.named_child(i as u32))
+                    .filter(|c| c.kind() == "token_tree")
+                    .collect();
+                while let Some(tt) = tts.pop() {
+                    let mut c = tt.walk();
+                    for ch in tt.children(&mut c) {
+                        if ch.kind() == "token_tree" {
+                            tts.push(ch);
+                        } else if ch.kind() == "identifier"
+                            && ch
+                                .next_sibling()
+                                .map(|s| s.kind() == "token_tree")
+                                .unwrap_or(false)
+                        {
+                            push(ch, ReferenceKind::MacroRegistration, &mut refs);
+                        }
+                    }
+                }
+            }
+            // definition-site surface: FFI exports, attribute-macro
+            // registration, public visibility
+            "function_item" => {
+                let Some(name_node) = node.child_by_field_name("name") else {
+                    continue;
+                };
+                let mut cur = node.walk();
+                let is_extern = node.children(&mut cur).any(|c| {
+                    c.kind() == "function_modifiers"
+                        && std::str::from_utf8(&src[c.byte_range()])
+                            .is_ok_and(|t| t.contains("extern"))
+                });
+                let mut cur2 = node.walk();
+                let is_pub = node.children(&mut cur2).any(|c| {
+                    c.kind() == "visibility_modifier"
+                        && std::str::from_utf8(&src[c.byte_range()]).is_ok_and(|t| t == "pub")
+                });
+                let mut ffi_attr = false;
+                let mut framework_attr = false;
+                let mut sib = node.prev_named_sibling();
+                while let Some(a) = sib {
+                    match a.kind() {
+                        "attribute_item" => {
+                            if let Ok(text) = std::str::from_utf8(&src[a.byte_range()]) {
+                                match rust_attr_path(text) {
+                                    Some(p) if p == "no_mangle" || p == "export_name" => {
+                                        ffi_attr = true
+                                    }
+                                    Some(p) if !RUST_BENIGN_ATTRS.contains(&p.as_str()) => {
+                                        framework_attr = true
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        "line_comment" | "block_comment" => {}
+                        _ => break,
+                    }
+                    sib = a.prev_named_sibling();
+                }
+                if is_extern || ffi_attr {
+                    push(name_node, ReferenceKind::FfiExport, &mut refs);
+                }
+                if framework_attr {
+                    push(name_node, ReferenceKind::FrameworkRegistration, &mut refs);
+                }
+                if is_pub {
+                    push(name_node, ReferenceKind::PublicExport, &mut refs);
+                }
+                // trait-impl methods (`impl Deref for X { fn deref … }`) are
+                // invoked through the TRAIT — often by compiler machinery
+                // (Deref coercion, Drop, Display in format!) with no textual
+                // call site. Statically unclassifiable, never a certain
+                // candidate.
+                let in_trait_impl = node.parent().and_then(|p| p.parent()).is_some_and(|ip| {
+                    ip.kind() == "impl_item" && ip.child_by_field_name("trait").is_some()
+                });
+                if in_trait_impl {
+                    push(name_node, ReferenceKind::UnknownIndirect, &mut refs);
+                }
+            }
+            _ => {}
+        }
+    }
+    refs
+}
+
+/// TS/JS/Python structural walk for NON-CALL references — the same evidence
+/// classes as Rust, in the value positions these languages use for callbacks
+/// and handler registration: `{ before: enforceFilter }` (object property),
+/// `list(map(fn, xs))` / `takes(cb)` (argument), `const h = handler`
+/// (declarator/assignment), array/list/tuple elements, and Python decorated
+/// definitions (`@router.get(...)` registers the function below it).
+/// Name-level, typed — never resolved CALLS edges.
+fn collect_value_refs(root: TsNode, src: &[u8], lang: &str) -> Vec<RawRef> {
+    let mut refs = Vec::new();
+    let push = |n: TsNode, kind: ReferenceKind, out: &mut Vec<RawRef>| {
+        if let Ok(text) = std::str::from_utf8(&src[n.byte_range()]) {
+            let name = text.rsplit('.').next().unwrap_or(text).trim();
+            if !name.is_empty() {
+                out.push(RawRef {
+                    name: name.to_string(),
+                    line: n.start_position().row as u32 + 1,
+                    kind,
+                });
+            }
+        }
+    };
+    let is_value_of = |n: TsNode, parent: TsNode, field: &str| {
+        parent.child_by_field_name(field).map(|v| v.id()) == Some(n.id())
+    };
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        for ch in node.children(&mut cursor) {
+            stack.push(ch);
+        }
+        match (lang, node.kind()) {
+            (_, "identifier") => {
+                let Some(parent) = node.parent() else {
+                    continue;
+                };
+                match parent.kind() {
+                    // f(cb) — TS/JS "arguments", Python "argument_list"
+                    "arguments" | "argument_list" => push(node, ReferenceKind::Callback, &mut refs),
+                    // f(name=cb)
+                    "keyword_argument" if is_value_of(node, parent, "value") => {
+                        push(node, ReferenceKind::Callback, &mut refs)
+                    }
+                    // { before: handler } — object property value
+                    "pair" if is_value_of(node, parent, "value") => {
+                        push(node, ReferenceKind::FunctionValue, &mut refs)
+                    }
+                    // const h = handler / h = handler
+                    "variable_declarator" if is_value_of(node, parent, "value") => {
+                        push(node, ReferenceKind::FunctionValue, &mut refs)
+                    }
+                    "assignment" if is_value_of(node, parent, "right") => {
+                        push(node, ReferenceKind::FunctionValue, &mut refs)
+                    }
+                    // [a, b] / (a, b) / {a, b} — too generic to classify
+                    "array" | "list" | "tuple" | "set" => {
+                        push(node, ReferenceKind::UnknownIndirect, &mut refs)
+                    }
+                    _ => {}
+                }
+            }
+            // @router.get("/x") above a def registers that function with the
+            // framework; plain structural decorators (@staticmethod, …) are
+            // benign and excluded.
+            ("python", "decorated_definition") => {
+                let Some(def) = node.child_by_field_name("definition") else {
+                    continue;
+                };
+                let Some(name_node) = def.child_by_field_name("name") else {
+                    continue;
+                };
+                let mut c = node.walk();
+                let registering = node.children(&mut c).any(|d| {
+                    d.kind() == "decorator"
+                        && std::str::from_utf8(&src[d.byte_range()]).is_ok_and(|t| {
+                            let head = t
+                                .trim_start_matches('@')
+                                .split(['(', '.', '\n'])
+                                .next()
+                                .unwrap_or("")
+                                .trim();
+                            !PY_BENIGN_DECORATORS.contains(&head)
+                        })
+                });
+                if registering {
+                    push(name_node, ReferenceKind::FrameworkRegistration, &mut refs);
+                }
+            }
+            _ => {}
+        }
+    }
+    refs
+}
+
+/// Python decorators that never register a function anywhere — presence of
+/// any OTHER decorator is treated as possible framework registration.
+const PY_BENIGN_DECORATORS: &[&str] = &[
+    "staticmethod",
+    "classmethod",
+    "property",
+    "abstractmethod",
+    "override",
+    "overload",
+    "wraps",
+    "functools",
+    "typing",
+    "abc",
+    "dataclass",
+    "cached_property",
+];
+
+/// The attribute's path (`#[tokio::test(x)]` → `tokio::test`), or None if the
+/// text is not shaped like an attribute.
+fn rust_attr_path(text: &str) -> Option<String> {
+    let inner = text.trim().strip_prefix("#[")?.trim_end_matches(']').trim();
+    let end = inner
+        .find(|c: char| c == '(' || c == '=' || c.is_whitespace())
+        .unwrap_or(inner.len());
+    Some(inner[..end].trim().to_string())
+}
+
+/// Attributes that never register a function anywhere — presence of any OTHER
+/// attribute is treated as possible framework/macro registration.
+const RUST_BENIGN_ATTRS: &[&str] = &[
+    "inline",
+    "must_use",
+    "doc",
+    "cfg",
+    "cfg_attr",
+    "allow",
+    "expect",
+    "warn",
+    "deny",
+    "forbid",
+    "deprecated",
+    "derive",
+    "repr",
+    "non_exhaustive",
+    "track_caller",
+    "cold",
+    "ignore",
+    "should_panic",
+    "test",
+    "tokio::test",
+    "async_std::test",
+    "no_mangle",
+    "export_name",
+];
 
 /// Every distinct TYPE NAME the file references in a type position — generic
 /// args (`Response<Foo>`), array/optional elements (`[Foo]`, `Foo?`), return
@@ -795,6 +1106,12 @@ fn collect(
                         "complexity".into(),
                         serde_json::json!(cyclomatic(node, ctx.spec.label_for)),
                     );
+                    // Rust test code lives INSIDE source files (#[test] fns,
+                    // #[cfg(test)] mod tests) — path-based test detection
+                    // can't see it, and dead-code listed live tests as dead.
+                    if ctx.spec.name == "rust" && rust_is_test(node, src) {
+                        metadata.insert("is_test".into(), serde_json::json!(true));
+                    }
                 }
                 nodes.push(Node {
                     id,
@@ -823,6 +1140,10 @@ fn collect(
             _ => {}
         }
     }
+
+    // (Macro-token-tree call shapes are captured as TYPED MacroRegistration
+    // references in `collect_rust_refs` — evidence for dead-code, never a
+    // textual call with a sentinel receiver.)
 
     // Import bindings (T6 evidence): TS/JS relative imports + Python from-imports.
     match (ctx.spec.name, node.kind()) {
@@ -1796,6 +2117,119 @@ fn normalize_path(p: &str) -> String {
         .collect()
 }
 
+/// Rust test detection at PARSE time: `#[test]`-attributed fns (incl.
+/// `#[tokio::test]`) and anything under a `#[cfg(test)]` / `mod tests` —
+/// path-based heuristics can't see inline Rust tests.
+fn rust_is_test(node: TsNode, src: &[u8]) -> bool {
+    // STRUCTURAL attribute matching — never substring. `#[contest]`,
+    // `#[cfg(not(test))]` and `#[cfg(feature = "test-utils")]` are NOT tests;
+    // `#[test]`, `#[tokio::test]`, `#[async_std::test]`, `#[rstest]` and
+    // items under a `#[cfg(test)]`-style module are. Combined cfg predicates
+    // are parsed as expressions: `cfg(any(test, feature = "x"))` and
+    // `cfg(all(test, unix))` contain a POSITIVE test branch; `not(test)` (any
+    // odd negation depth) does not.
+    fn attr_is_test(text: &str) -> bool {
+        let Some(inner) = text.trim().strip_prefix("#[") else {
+            return false;
+        };
+        let inner = inner.strip_suffix(']').unwrap_or(inner).trim();
+        let (path, args) = match inner.find('(') {
+            Some(i) => {
+                let a = inner[i + 1..].trim();
+                // exactly ONE closing paren — a greedy trim would eat the
+                // closers of nested predicates like any(test, …)
+                (inner[..i].trim(), Some(a.strip_suffix(')').unwrap_or(a)))
+            }
+            None => (inner, None),
+        };
+        match path {
+            "test" | "tokio::test" | "async_std::test" | "rstest" | "rstest::rstest" => true,
+            "cfg" => args.is_some_and(|a| cfg_list_has_positive_test(a, false)),
+            _ => false,
+        }
+    }
+    fn attrs_mark(n: TsNode, src: &[u8]) -> bool {
+        let mut sib = n.prev_named_sibling();
+        while let Some(a) = sib {
+            match a.kind() {
+                "attribute_item" => {
+                    if std::str::from_utf8(&src[a.byte_range()]).is_ok_and(attr_is_test) {
+                        return true;
+                    }
+                }
+                // comments and doc comments between attributes and the item
+                // never break the attribute chain
+                "line_comment" | "block_comment" => {}
+                _ => break,
+            }
+            sib = a.prev_named_sibling();
+        }
+        false
+    }
+    if attrs_mark(node, src) {
+        return true;
+    }
+    let mut cur = node.parent();
+    while let Some(p) = cur {
+        if p.kind() == "mod_item" && attrs_mark(p, src) {
+            return true;
+        }
+        cur = p.parent();
+    }
+    false
+}
+
+/// Does a comma-separated cfg predicate LIST contain a positive `test`
+/// branch? A structural expression parse (tokens, nesting, strings) — never
+/// substring matching. `negated` tracks `not(...)` depth parity: `test` under
+/// an odd number of `not`s is a NEGATIVE branch (`cfg(not(test))` is
+/// prod-only code).
+fn cfg_list_has_positive_test(list: &str, negated: bool) -> bool {
+    split_top_level(list).into_iter().any(|pred| {
+        let pred = pred.trim();
+        match pred.find('(') {
+            Some(i) if pred.ends_with(')') => {
+                let head = pred[..i].trim();
+                let inner = &pred[i + 1..pred.len() - 1];
+                match head {
+                    "not" => cfg_list_has_positive_test(inner, !negated),
+                    "any" | "all" => cfg_list_has_positive_test(inner, negated),
+                    _ => false, // e.g. target_os("…")-style unknown predicates
+                }
+            }
+            // bare word or key = "value": only the bare `test`/`doctest`
+            // predicates count, and only in positive position
+            _ => !negated && !pred.contains('=') && matches!(pred, "test" | "doctest"),
+        }
+    })
+}
+
+/// Split a predicate list on top-level commas, respecting parenthesis
+/// nesting and double-quoted strings (a comma inside `feature = "a,b"` or
+/// inside `any(...)` is not a separator).
+fn split_top_level(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut depth, mut in_str, mut start) = (0usize, false, 0usize);
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' if !in_str => in_str = true,
+            b'"' if in_str && (i == 0 || bytes[i - 1] != b'\\') => in_str = false,
+            b'(' if !in_str => depth += 1,
+            b')' if !in_str => depth = depth.saturating_sub(1),
+            b',' if !in_str && depth == 0 => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out.push(&s[start..]);
+    out
+}
+
 /// Test/spec files register no API surface: `request(app).get('/x')` in an
 /// e2e spec is test traffic, and it polluted the routes answer in the field.
 fn is_test_file(rel: &str) -> bool {
@@ -2524,6 +2958,294 @@ mod tests {
                 "{f} is NOT a test file"
             );
         }
+    }
+
+    /// Inline Rust tests are flagged at parse time; macro-wrapped calls become
+    /// textual sites (sentinel receiver — never resolved, never lost).
+    #[test]
+    fn rust_test_flag_and_macro_call_evidence() {
+        let src = "fn live() {}\nfn only_in_macro() {}\n\nfn caller() { log_it!(only_in_macro(1)); }\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn checks_live() { super::live(); }\n}\n";
+        let pf = parse_file("p", "a.rs", src);
+        let test_fn = pf.nodes.iter().find(|n| n.name == "checks_live").unwrap();
+        assert_eq!(
+            test_fn.metadata.get("is_test"),
+            Some(&serde_json::Value::Bool(true)),
+            "#[test] fn inside mod tests must carry is_test"
+        );
+        let live = pf.nodes.iter().find(|n| n.name == "live").unwrap();
+        assert!(
+            !live.metadata.contains_key("is_test"),
+            "non-test fn must not be flagged"
+        );
+        assert!(
+            pf.refs
+                .iter()
+                .any(|r| r.name == "only_in_macro" && r.kind == ReferenceKind::MacroRegistration),
+            "macro-wrapped call must be recorded as typed MacroRegistration evidence: {:?}",
+            pf.refs
+        );
+        assert!(
+            !pf.calls.iter().any(|c| c.callee_name == "only_in_macro"),
+            "macro token mentions must NOT create textual call sites"
+        );
+    }
+
+    /// Typed non-call reference capture: function values, callbacks, FFI
+    /// exports, attribute-macro registration, public exports, and
+    /// unclassifiable positions — each with its own ReferenceKind.
+    #[test]
+    fn rust_refs_capture_every_kind() {
+        let src = r#"
+fn as_value() {}
+fn as_callback() {}
+fn as_cast() -> bool { true }
+fn in_tuple() {}
+pub fn exported_api() {}
+extern "C" fn ffi_cb() {}
+#[no_mangle]
+fn ffi_exported() {}
+#[tool(description = "x")]
+fn registered_handler() {}
+
+struct Spec { hook: fn() }
+
+fn wire() {
+    let handler = as_value;
+    Some(attr_probe).map(|_| ());
+    let _ = std::iter::once(1).all(|_| true) || Some(true).is_some_and(is_truthy);
+    takes(as_callback);
+    let _s = Spec { hook: as_value };
+    let _f = as_cast as fn() -> bool;
+    let _t = (in_tuple, 1);
+}
+"#;
+        let pf = parse_file("p", "refs.rs", src);
+        let has = |name: &str, kind: ReferenceKind| {
+            pf.refs.iter().any(|r| r.name == name && r.kind == kind)
+        };
+        assert!(
+            has("as_value", ReferenceKind::FunctionValue),
+            "{:?}",
+            pf.refs
+        );
+        assert!(has("as_callback", ReferenceKind::Callback), "{:?}", pf.refs);
+        assert!(has("is_truthy", ReferenceKind::Callback), "{:?}", pf.refs);
+        assert!(
+            has("as_cast", ReferenceKind::FunctionValue),
+            "cast: {:?}",
+            pf.refs
+        );
+        assert!(
+            has("in_tuple", ReferenceKind::UnknownIndirect),
+            "{:?}",
+            pf.refs
+        );
+        assert!(
+            has("exported_api", ReferenceKind::PublicExport),
+            "{:?}",
+            pf.refs
+        );
+        assert!(
+            has("ffi_cb", ReferenceKind::FfiExport),
+            "extern: {:?}",
+            pf.refs
+        );
+        assert!(
+            has("ffi_exported", ReferenceKind::FfiExport),
+            "{:?}",
+            pf.refs
+        );
+        assert!(
+            has("registered_handler", ReferenceKind::FrameworkRegistration),
+            "{:?}",
+            pf.refs
+        );
+        // benign attributes are NOT framework registration
+        assert!(
+            !has("ffi_exported", ReferenceKind::FrameworkRegistration),
+            "#[no_mangle] is not framework registration"
+        );
+    }
+
+    /// TS/JS + Python value-position references: object-property values,
+    /// callback arguments, assignments, list elements, and Python decorator
+    /// registration — the classes that made live handlers look dead in a
+    /// NestJS/AdminJS/FastAPI codebase.
+    #[test]
+    fn ts_and_python_value_refs_are_captured() {
+        let ts = concat!(
+            "const enforceFilter = async (r) => {};\n",
+            "function takesCb(cb) {}\n",
+            "function handler() {}\n",
+            "function inArray() {}\n",
+            "export const actions = { list: { before: enforceFilter } };\n",
+            "takesCb(handler);\n",
+            "const alias = handler;\n",
+            "const xs = [inArray];\n"
+        );
+        let pf = parse_file("p", "a.ts", ts);
+        let has = |name: &str, kind: ReferenceKind| {
+            pf.refs.iter().any(|r| r.name == name && r.kind == kind)
+        };
+        assert!(
+            has("enforceFilter", ReferenceKind::FunctionValue),
+            "object-property value: {:?}",
+            pf.refs
+        );
+        assert!(has("handler", ReferenceKind::Callback), "{:?}", pf.refs);
+        assert!(
+            has("handler", ReferenceKind::FunctionValue),
+            "declarator value: {:?}",
+            pf.refs
+        );
+        assert!(
+            has("inArray", ReferenceKind::UnknownIndirect),
+            "{:?}",
+            pf.refs
+        );
+
+        let py = concat!(
+            "def as_arg(): pass\n",
+            "def as_kw(): pass\n",
+            "def assigned(): pass\n",
+            "def in_list(): pass\n\n",
+            "@router.get(\"/x\")\n",
+            "def route_handler(): pass\n\n",
+            "@staticmethod\n",
+            "def not_registered(): pass\n\n",
+            "map(as_arg, [])\n",
+            "call(cb=as_kw)\n",
+            "h = assigned\n",
+            "hs = [in_list]\n"
+        );
+        let pf = parse_file("p", "a.py", py);
+        let has = |name: &str, kind: ReferenceKind| {
+            pf.refs.iter().any(|r| r.name == name && r.kind == kind)
+        };
+        assert!(has("as_arg", ReferenceKind::Callback), "{:?}", pf.refs);
+        assert!(
+            has("as_kw", ReferenceKind::Callback),
+            "kw arg: {:?}",
+            pf.refs
+        );
+        assert!(
+            has("assigned", ReferenceKind::FunctionValue),
+            "{:?}",
+            pf.refs
+        );
+        assert!(
+            has("in_list", ReferenceKind::UnknownIndirect),
+            "{:?}",
+            pf.refs
+        );
+        assert!(
+            has("route_handler", ReferenceKind::FrameworkRegistration),
+            "decorator registration: {:?}",
+            pf.refs
+        );
+        assert!(
+            !pf.refs.iter().any(|r| r.name == "not_registered"),
+            "@staticmethod is benign: {:?}",
+            pf.refs
+        );
+    }
+
+    /// Trait-impl methods are trait-dispatched (Deref coercion, Drop, Display
+    /// via format!) — captured as unclassifiable so they are never certain
+    /// dead-code candidates; inherent-impl methods are NOT.
+    #[test]
+    fn rust_trait_impl_methods_are_unknown_indirect() {
+        let src = "struct S;\nimpl std::ops::Deref for S {\n    type Target = u8;\n    fn deref(&self) -> &u8 { &0 }\n}\nimpl S {\n    fn inherent_only(&self) {}\n}\n";
+        let pf = parse_file("p", "t.rs", src);
+        assert!(
+            pf.refs
+                .iter()
+                .any(|r| r.name == "deref" && r.kind == ReferenceKind::UnknownIndirect),
+            "trait-impl method must carry UnknownIndirect: {:?}",
+            pf.refs
+        );
+        assert!(
+            !pf.refs.iter().any(|r| r.name == "inherent_only"),
+            "inherent-impl methods get no definition-site suppression: {:?}",
+            pf.refs
+        );
+    }
+
+    /// Structural (never substring) Rust test classification, including
+    /// comments between attributes, attribute stacks, rstest, and combined
+    /// cfg predicates parsed as expressions.
+    #[test]
+    fn rust_test_detection_is_structural() {
+        let src = concat!(
+            "#[test]\nfn plain() {}\n\n",
+            "#[tokio::test]\nasync fn tok() {}\n\n",
+            "#[contest]\nfn not_a_test_attr() {}\n\n",
+            "#[cfg(not(test))]\nfn prod_only() {}\n\n",
+            "#[cfg(feature = \"test-utils\")]\nfn util() {}\n\n",
+            "#[test]\n// an explanatory comment between attribute and item\nfn commented_gap() {}\n\n",
+            "#[allow(dead_code)]\n#[test]\n/// doc comment in the stack\nfn stacked_attrs() {}\n\n",
+            "#[rstest]\nfn rstest_case() {}\n\n",
+            "#[cfg(any(test, feature = \"slow-tests\"))]\nfn any_positive() {}\n\n",
+            "#[cfg(all(test, unix))]\nfn all_positive() {}\n\n",
+            "#[cfg(not(any(test, doctest)))]\nfn deeply_negated() {}\n\n",
+            "#[cfg(any(not(test), feature = \"x\"))]\nfn odd_negation() {}\n\n",
+            "#[cfg(feature = \"a,test\")]\nfn comma_in_string() {}\n\n",
+            "#[cfg(test)]\nmod inner {\n    fn helper_in_test_mod() {}\n    mod nested {\n        fn deep() {}\n    }\n}\n\n",
+            "#[cfg(test)]\n// module doc gap\nmod commented_mod {\n    fn in_commented_mod() {}\n}\n\n",
+            "mod testish_name {\n    fn not_flagged() {}\n}\n",
+            "fn mentions() { let _s = \"#[test]\"; }\n"
+        );
+        let pf = parse_file("p", "s.rs", src);
+        let flagged = |name: &str| {
+            pf.nodes
+                .iter()
+                .find(|n| n.name == name)
+                .unwrap_or_else(|| panic!("{name} missing"))
+                .metadata
+                .contains_key("is_test")
+        };
+        assert!(flagged("plain"), "#[test]");
+        assert!(flagged("tok"), "#[tokio::test]");
+        assert!(flagged("commented_gap"), "comment between attr and item");
+        assert!(
+            flagged("stacked_attrs"),
+            "multiple attributes + doc comment"
+        );
+        assert!(flagged("rstest_case"), "#[rstest] is a supported framework");
+        assert!(
+            flagged("any_positive"),
+            "cfg(any(test, …)) has a positive test branch"
+        );
+        assert!(
+            flagged("all_positive"),
+            "cfg(all(test, …)) has a positive test branch"
+        );
+        assert!(
+            flagged("helper_in_test_mod"),
+            "items under #[cfg(test)] mod"
+        );
+        assert!(flagged("deep"), "nested under #[cfg(test)]");
+        assert!(flagged("in_commented_mod"), "comment between cfg and mod");
+        assert!(!flagged("not_a_test_attr"), "#[contest] is not a test");
+        assert!(!flagged("prod_only"), "#[cfg(not(test))] is not a test");
+        assert!(!flagged("util"), "feature=test-utils is not a test");
+        assert!(
+            !flagged("deeply_negated"),
+            "cfg(not(any(test, …))) is prod-only"
+        );
+        assert!(
+            !flagged("odd_negation"),
+            "test under an odd negation depth is not a positive branch"
+        );
+        assert!(
+            !flagged("comma_in_string"),
+            "a `test` inside a feature STRING is not a predicate"
+        );
+        assert!(
+            !flagged("not_flagged"),
+            "module NAME alone never classifies"
+        );
+        assert!(!flagged("mentions"), "a string literal never classifies");
     }
 
     /// e2e/spec traffic is not API surface — measured noise in the field.

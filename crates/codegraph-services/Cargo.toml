@@ -1,0 +1,13 @@
+[package]
+name = "codegraph-services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+codegraph-core.workspace = true
+codegraph-store.workspace = true
+codegraph-parse.workspace = true
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

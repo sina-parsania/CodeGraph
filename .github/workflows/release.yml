@@ -78,6 +78,13 @@ jobs:
           ls -l artifacts
           [ "$missing" -eq 0 ] || exit 1
           [ "$count" -eq 5 ] || { echo "expected exactly 5 artifacts, found $count"; exit 1; }
+      - name: Checksums (consumed by action/action.yml verify step)
+        shell: bash
+        run: |
+          cd artifacts
+          # deterministic order + the two-space format `sha256sum -c` expects
+          sha256sum $(ls -1 | LC_ALL=C sort) > sha256sums.txt
+          cat sha256sums.txt
       - name: Create draft release, attach, publish
         env: { GH_TOKEN: "${{ github.token }}" }
         shell: bash

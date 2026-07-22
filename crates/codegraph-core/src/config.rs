@@ -8,6 +8,8 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("toml parse error: {0}")]
     Toml(#[from] toml::de::Error),
+    #[error("{0}")]
+    Msg(String),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -133,16 +135,34 @@ impl Config {
             .into_iter()
             .flatten()
         {
-            let Ok(s) = std::fs::read_to_string(&path) else {
-                continue;
+            // ONLY a missing file is skippable. PermissionDenied and every
+            // other read error must surface with the path — silently ignoring
+            // an unreadable config makes the user's settings vanish.
+            let s = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(ConfigError::Msg(format!(
+                        "cannot read config {}: {e}",
+                        path.display()
+                    )))
+                }
             };
-            // A malformed config must not brick `index`/`search`: warn and ignore it.
-            match toml::from_str::<toml::Table>(&s) {
-                Ok(t) => merge_tables(&mut table, t),
-                Err(e) => eprintln!("codegraph: ignoring {} — TOML error: {e}", path.display()),
-            }
+            // Each LAYER parses and type-checks separately so an error names
+            // the offending FILE and (via toml's key-path) the FIELD. A wrong
+            // type in one field previously silently defaulted the ENTIRE
+            // config (unwrap_or_default over the merged table).
+            let t = toml::from_str::<toml::Table>(&s).map_err(|e| {
+                ConfigError::Msg(format!("{}: TOML syntax error: {e}", path.display()))
+            })?;
+            t.clone().try_into::<Config>().map_err(|e| {
+                ConfigError::Msg(format!("{}: invalid config: {e}", path.display()))
+            })?;
+            merge_tables(&mut table, t);
         }
-        let mut cfg: Config = table.try_into().unwrap_or_default();
+        let mut cfg: Config = table
+            .try_into()
+            .map_err(|e| ConfigError::Msg(format!("merged config invalid: {e}")))?;
         cfg.apply_env_from(|k| std::env::var(k).ok());
         Ok(cfg)
     }
@@ -258,12 +278,51 @@ mod tests {
         assert!(c.llm.auto_install);
     }
 
+    /// Only NotFound is skippable — an unreadable config must error with its
+    /// path, never silently vanish from the resolution chain.
     #[test]
-    fn malformed_config_is_tolerated_not_bricking() {
-        // A bad config must NOT break index/search — it warns and falls back to defaults.
+    #[cfg(unix)]
+    fn permission_denied_config_propagates_with_path() {
+        use std::os::unix::fs::PermissionsExt;
+        // OWN directory — tempdir_with keys on name length and would collide
+        // with (and chmod-race) the malformed-config test's directory
+        let dir = std::env::temp_dir().join(format!("cg_cfg_denied_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".codegraph.toml");
+        std::fs::write(&path, "[llm]\nrerank = true\n").unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&path, perms).unwrap();
+        if std::fs::read(&path).is_ok() {
+            return; // running as root / permission-less fs — scenario can't exist here
+        }
+        let err = Config::load(&dir).unwrap_err().to_string();
+        let mut restore = std::fs::metadata(&path).unwrap().permissions();
+        restore.set_mode(0o644);
+        std::fs::set_permissions(&path, restore).unwrap();
+        assert!(
+            err.contains(".codegraph.toml"),
+            "read error must name the file: {err}"
+        );
+    }
+
+    #[test]
+    fn malformed_config_errors_with_file_context() {
+        // Contract flipped by external review: a malformed config must FAIL
+        // LOUD naming the file — silently falling back to defaults made the
+        // user's settings vanish without a trace.
         let dir = tempdir_with(".codegraph.toml", "this is = = not valid toml [[[");
-        let c = Config::load(&dir).expect("load never errors on a bad file");
-        assert_eq!(c.llm.model, Config::default().llm.model);
+        let err = Config::load(&dir).unwrap_err().to_string();
+        assert!(
+            err.contains(".codegraph.toml"),
+            "error must name the file: {err}"
+        );
+
+        // and a WRONG TYPE in one field errors with the field path, never
+        // silently defaulting the whole config
+        let dir2 = tempdir_with(".codegraph.toml", "[llm]\nrerank = \"yes\"\n");
+        let err2 = Config::load(&dir2).unwrap_err().to_string();
+        assert!(err2.contains("rerank"), "error must name the field: {err2}");
     }
 
     #[test]

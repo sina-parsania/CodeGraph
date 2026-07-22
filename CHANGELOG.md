@@ -1,5 +1,60 @@
 # Changelog
 
+## 1.39.0 — typed liveness evidence, ID-first semantics, a supply chain that verifies itself
+
+Dead-code answers stop guessing, review logic gets one home, and the GitHub
+Action can no longer install an unverified binary.
+
+- **New `codegraph-services` crate** — the single home for review/dead-code
+  business logic. CLI and MCP are thin adapters over it; the Store stays a
+  persistence layer. Every answer carries its generation, freshness, and
+  evidence quality.
+- **ID-first semantics**: fan-in counts resolved incoming CALLS edges to
+  *that node id* — same-name symbols no longer inherit each other's callers
+  (name-keyed counting did). Test evidence is tri-state and separated: a
+  resolved `Tests` edge, a textual site in a test-looking file, or none.
+- **Typed NON-CALL references** (new `symbol_refs` table, leaf-indexed): the
+  evidence classes that made live functions look dead — function values
+  (`let h = process`, `f as fn(_)`), callback arguments, object-property and
+  declarator positions in TS/JS, Python decorated definitions, token-tree
+  mentions inside macro invocations, FFI surface
+  (`extern`/`#[no_mangle]`/`#[export_name]`), attribute-macro registration,
+  and `pub` visibility. Structurally parsed, name-level, **never** resolution
+  input — resolved edges stay uncontaminated.
+- **`dead_code_v2` (MCP is now 19 tools)**: every symbol lacking direct call
+  evidence is classified `candidate` / `indirectly_referenced` / `unknown` /
+  `excluded`, with provenance. Candidates are a documented **lower bound on
+  liveness knowledge** — leads, not verdicts.
+- **Rust tests detected at parse time** — `#[test]`, `#[tokio::test]`, and
+  anything under `#[cfg(test)]`/`mod tests`, which path heuristics can't see.
+  The cfg predicate is parsed structurally (nesting, strings, `not(...)`
+  parity) rather than substring-matched, so `cfg(not(test))` is correctly
+  read as prod-only code.
+- **Import durability + artifact safety**: WAL is checkpointed in TRUNCATE
+  mode (a busy/partial checkpoint is an error, never a silently
+  half-imported graph), `PRAGMA integrity_check` must return exactly `ok`,
+  and the destination is only ever replaced by a fully-written, synced file
+  via same-directory rename. Path validation is **platform-independent** —
+  `Component::Prefix` only exists when parsing on Windows, so `C:/x` used to
+  pass on a unix validator; every path-bearing table (nodes, manifest,
+  `edges.src_file`, `type_refs`, `contexts`) is now checked, not just the
+  obvious two.
+- **Config resolution is lossless**: only `NotFound` is skippable — an
+  unreadable config errors with its path instead of silently vanishing from
+  the resolution chain.
+- **Supply chain**: the release workflow now publishes `sha256sums.txt`, and
+  `action.yml` installs a **pinned, checksum-verified** binary (default
+  `v1.39.0`) with per-runner asset mapping — replacing a
+  `releases/latest … || true` curl that could leave any binary, or none, on
+  PATH. A missing checksum entry is a failure, never a skip. CI gained a
+  feature-check gate so release-artifact features (`indexstore`,
+  `local-embed`, `local-llm`) can't break only at tag time.
+- Regression tests added: `config_lossless`, `import_atomicity`,
+  `import_freshness_config`, `release_consistency`, `review_correctness`,
+  and an expanded `mcp_payload`.
+- README eval receipts updated to the numbers the release gate actually
+  measures: recall 0.98 at 319 bytes/answer, precision 0.66.
+
 ## 1.38.0 — external-review hardening: gates that can't lie, config that can't be clobbered
 
 All seven findings of an external production-readiness review, verified and

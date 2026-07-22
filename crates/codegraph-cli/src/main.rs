@@ -28,6 +28,10 @@ struct Cli {
     /// Don't auto-reindex before a query (serve the current snapshot as-is).
     #[arg(long, global = true)]
     no_autoheal: bool,
+    /// If auto-reindex FAILS, serve the last snapshot anyway instead of
+    /// erroring (best-effort mode; also CODEGRAPH_ALLOW_STALE=1).
+    #[arg(long, global = true)]
+    allow_stale: bool,
 }
 
 #[derive(Subcommand)]
@@ -488,14 +492,27 @@ fn needs_fresh(cmd: &Command) -> bool {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let cmd = cli.command;
-    // Resolve config (defaults < global < project < env) and promote it to the
-    // env vars downstream readers use, so config edits actually take effect.
-    let cfg = codegraph_core::Config::load(&std::env::current_dir().unwrap_or_default())
-        .unwrap_or_default();
-    apply_config_env(&cfg);
+    let root = project_path(&cmd);
+    // Resolve config (defaults < global < project < env) FROM THE COMMAND'S
+    // --path — running `codegraph search x --path /repo` from anywhere must
+    // read /repo/.codegraph.toml, not whatever the shell's cwd holds. A
+    // malformed layer errors loudly with file + field (never silently
+    // defaults the whole config).
+    let cfg_root = root
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    // RECOVERY commands must work on a malformed config — `config path/edit/
+    // unset` exist precisely to FIX the file, and eager typed parsing would
+    // lock the user out. Everything else fails loudly and actionably.
+    let cfg = if matches!(cmd, Command::Config { .. }) {
+        codegraph_core::Config::default() // recovery commands never require a parseable file
+    } else {
+        let cfg = codegraph_core::Config::load(&cfg_root)?;
+        apply_config_env(&cfg);
+        cfg
+    };
     // Opportunistic TTL housekeeping: stamp this project as used + reclaim graphs
     // of projects untouched within CODEGRAPH_TTL_DAYS. Best-effort, never blocks.
-    let root = project_path(&cmd);
     let db = root.as_ref().map(|p| index::db_path(p));
     registry::housekeeping(
         root.as_deref()
@@ -515,10 +532,24 @@ fn main() -> anyhow::Result<()> {
 
     // Freshness gate: reindex before serving so a query never returns a result
     // that disagrees with the working tree (edits / add / delete / git checkout).
+    // STRICT by default: a FAILED reindex means the snapshot may disagree with
+    // the tree — serving it as a clean answer is a stale-graph lie. Opt back
+    // into best-effort with --allow-stale (or CODEGRAPH_ALLOW_STALE=1).
     if !cli.no_autoheal && needs_fresh(&cmd) {
         if let Some(r) = &root {
             if let Err(e) = index::ensure_fresh(r) {
-                eprintln!("warning: auto-reindex failed ({e}); serving last snapshot");
+                let allow_stale =
+                    cli.allow_stale || std::env::var("CODEGRAPH_ALLOW_STALE").as_deref() == Ok("1");
+                if allow_stale {
+                    eprintln!(
+                        "warning: auto-reindex failed ({e}); serving last snapshot (--allow-stale)"
+                    );
+                } else {
+                    anyhow::bail!(
+                        "auto-reindex failed ({e}) — refusing to serve a possibly-stale snapshot. \
+                         Fix the failure, or pass --allow-stale / CODEGRAPH_ALLOW_STALE=1 to serve the last snapshot anyway"
+                    );
+                }
             }
         }
     }
@@ -1032,115 +1063,129 @@ fn main() -> anyhow::Result<()> {
         }
         Command::DeadCode { path, limit } => {
             let store = codegraph_store::Store::open(&index::db_path(&path))?;
-            let dead = store.dead_code_candidates(limit)?;
-            if dead.is_empty() {
+            // Shared DeadCodeService — identical semantics to the MCP tool.
+            // Typed assessments: candidates listed, indirect/unknown/excluded
+            // summarized so a callback or export never reads as certainly dead.
+            use codegraph_services::DeadCodeAssessment as A;
+            let ans = codegraph_services::DeadCodeService::assess(&store, limit)?;
+            let mut candidates = Vec::new();
+            let (mut indirect, mut unknown, mut excluded) = (0usize, 0usize, 0usize);
+            for a in &ans.data {
+                match a {
+                    A::Candidate { node } => candidates.push(node),
+                    A::IndirectlyReferenced { .. } => indirect += 1,
+                    A::Unknown { .. } => unknown += 1,
+                    A::Excluded { .. } => excluded += 1,
+                }
+            }
+            if candidates.is_empty() {
                 println!("no dead-code candidates found");
             } else {
-                println!("# {} candidate(s) — no call site in the repo even NAMES these (static view; dynamic dispatch/exports/reflection excluded):", dead.len());
-                for n in dead {
-                    println!(
-                        "{:<28} {:?}  {}:{}",
-                        n.name, n.label, n.file_path, n.line_start
-                    );
+                println!("# {} candidate(s) — no RESOLVED caller, no textual call site, and no typed reference (callback/function-value/macro/FFI/export) names them. Static lower bound — treat as leads, not verdicts:", candidates.len());
+                for n in &candidates {
+                    println!("{:<28} {:?}  {}:{}", n.name, n.kind, n.file, n.line);
                 }
+            }
+            if indirect + unknown + excluded > 0 {
+                println!(
+                    "\n# suppressed from candidates: {indirect} indirectly referenced (callback/function-value/macro/FFI/framework), {unknown} unknowable (public exports/unclassifiable refs), {excluded} excluded (entrypoint names) — `dead_code_v2` via MCP for the typed list"
+                );
             }
         }
         Command::Changes { path, base, md } => {
             let store = codegraph_store::Store::open(&index::db_path(&path))?;
-            let out = std::process::Command::new("git")
-                .args(["-C", &path.to_string_lossy(), "diff", "--name-only", &base])
-                .output()?;
-            let changed: Vec<String> = String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .map(str::to_string)
-                .filter(|f| !f.is_empty())
-                .collect();
-            if changed.is_empty() {
+            // Shared application service — CLI and MCP render the SAME review
+            // (identical metrics, identical risk semantics, identical git
+            // failure behavior). This arm only renders.
+            let ans = codegraph_services::ReviewService::review(
+                &store,
+                &path,
+                &base,
+                index::is_indexable_code,
+            )?;
+            let review = &ans.data;
+            if review.changed_files.is_empty() {
                 println!("no changes vs {base}");
                 return Ok(());
             }
-            let mut rows: Vec<(f64, usize, u64, bool, codegraph_core::Node)> = Vec::new();
-            for f in &changed {
-                for sym in store.symbols_in_file(f)? {
-                    let fan_in = store.call_site_count(&sym.name)?;
-                    let tested = store.has_test_reference(&sym.name)?;
-                    let cx = sym
-                        .metadata
-                        .get("complexity")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(1);
-                    // Multiplicative risk (no crg-style flat keyword bumps): reach ×
-                    // intrinsic complexity × untested penalty. Resolved-data only.
-                    let risk = (1.0 + fan_in as f64).ln()
-                        * (1.0 + cx as f64 / 10.0)
-                        * if tested { 1.0 } else { 2.0 };
-                    rows.push((risk, fan_in, cx, tested, sym));
-                }
-            }
-            rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            let tier = |r: f64| {
-                if r >= 6.0 {
-                    "HIGH"
-                } else if r >= 2.5 {
-                    "MED "
-                } else {
-                    "low "
-                }
+            use codegraph_services::{RiskTier, TestEvidence};
+            let tier_str = |t: RiskTier| match t {
+                RiskTier::High => "HIGH",
+                RiskTier::Med => "MED ",
+                RiskTier::Low => "low ",
             };
             if md {
                 println!("<!-- codegraph-review -->");
                 println!(
                     "## CodeGraph review — {} file(s) vs `{base}`\n",
-                    changed.len()
+                    review.changed_files.len()
                 );
-                println!("| risk | symbol | fan-in | cx | tests | location |");
-                println!("|------|--------|-------:|---:|-------|----------|");
-                for (risk, fan_in, cx, tested, sym) in rows.iter().take(30) {
+                println!("| risk | symbol | fan-in (resolved) | sites (textual) | cx | tests | location |");
+                println!("|------|--------|------------------:|----------------:|---:|-------|----------|");
+                for r in review.rows.iter().take(30) {
                     println!(
-                        "| {} {:.1} | `{}` | {} | {} | {} | `{}:{}` |",
-                        tier(*risk).trim(),
-                        risk,
-                        sym.name,
-                        fan_in,
-                        cx,
-                        if *tested { "✓" } else { "**none**" },
-                        sym.file_path,
-                        sym.line_start
+                        "| {} {:.1} | `{}` | {} | {} | {} | {} | `{}:{}` |",
+                        tier_str(r.tier).trim(),
+                        r.risk,
+                        r.name,
+                        r.fan_in_resolved,
+                        r.textual_sites,
+                        r.complexity,
+                        match r.tested {
+                            TestEvidence::Resolved => "✓",
+                            TestEvidence::TextualOnly => "~name-only",
+                            TestEvidence::None => "**none**",
+                        },
+                        r.file,
+                        r.line
                     );
+                }
+                for s in &review.base_only {
+                    println!(
+                        "| UNKNOWN (removed) | `{}` | — | — | — | — | `{}:{}` {:?} — base-side symbol, current-graph evidence unavailable |",
+                        s.name, s.file, s.line, s.disposition
+                    );
+                }
+                for f in &review.unknown_files {
+                    println!("| UNKNOWN | `{f}` | — | — | — | — | no graph coverage |");
                 }
             } else {
-                println!("# changes vs {base}: {} file(s)\n", changed.len());
-                for (risk, fan_in, cx, tested, sym) in rows.iter().take(40) {
+                println!(
+                    "# changes vs {base}: {} file(s)\n",
+                    review.changed_files.len()
+                );
+                for r in review.rows.iter().take(40) {
                     println!(
-                        "{} {:>5.1}  {:<26} fan-in={:<4} cx={:<3} {}  {}:{}",
-                        tier(*risk),
-                        risk,
-                        sym.name,
-                        fan_in,
-                        cx,
-                        if *tested { "tested" } else { "NO-TESTS" },
-                        sym.file_path,
-                        sym.line_start
+                        "{} {:>5.1}  {:<26} fan-in={:<4} sites={:<4} cx={:<3} {}  {}:{}",
+                        tier_str(r.tier),
+                        r.risk,
+                        r.name,
+                        r.fan_in_resolved,
+                        r.textual_sites,
+                        r.complexity,
+                        match r.tested {
+                            TestEvidence::Resolved => "tested",
+                            TestEvidence::TextualOnly => "~name-only",
+                            TestEvidence::None => "NO-TESTS",
+                        },
+                        r.file,
+                        r.line
                     );
                 }
-            }
-            // co-change hints: files that usually change with these but aren't in the diff
-            let mut hints: std::collections::BTreeMap<String, u32> =
-                std::collections::BTreeMap::new();
-            for f in &changed {
-                for (other, n) in store.cochanges_for(f, 5)? {
-                    if n >= 3 && !changed.contains(&other) {
-                        let e = hints.entry(other).or_insert(0);
-                        *e = (*e).max(n);
-                    }
+                for s in &review.base_only {
+                    println!(
+                        "UNKNOWN      {:<26} removed ({:?})  {}:{}  — base-side symbol, current-graph evidence unavailable",
+                        s.name, s.disposition, s.file, s.line
+                    );
+                }
+                for f in &review.unknown_files {
+                    println!("UNKNOWN      {f}  (no graph coverage)");
                 }
             }
-            if !hints.is_empty() {
-                println!("\n# usually change together with this diff (not in it):");
-                let mut hv: Vec<_> = hints.into_iter().collect();
-                hv.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-                for (f, n) in hv.into_iter().take(8) {
-                    println!("  {f}  (co-changed {n}×)");
+            if !review.co_change_hints.is_empty() {
+                println!("\nco-change hints (usually change together, absent from this diff):");
+                for (f, n) in review.co_change_hints.iter().take(8) {
+                    println!("  {f}  (co-changed {n}x)");
                 }
             }
         }
@@ -1231,24 +1276,196 @@ fn main() -> anyhow::Result<()> {
                 other => (path, other),
             };
             let src = file.unwrap_or_else(|| path.join(".codegraph/graph.db.zst"));
-            let compressed = std::fs::read(&src)?;
-            let bytes = zstd::decode_all(&compressed[..])?;
             let db = index::db_path(&path);
             if let Some(parent) = db.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&db, &bytes)?;
-            // Sanity-open (runs migrations), ADOPT the graph (the artifact
-            // carries the EXPORTER's repo_root — restamp to ours or every
-            // subsequent command fails the identity gate), then heal drift.
+            // STREAMED decompression with a size cap — `decode_all` held the
+            // whole artifact in memory and a zstd bomb (or an oversized graph)
+            // could OOM the host. Everything lands in a TEMPFILE first; the
+            // live DB is replaced atomically only after full validation, so a
+            // failed import leaves the previous graph byte-untouched.
+            // STRICT size-cap parsing: malformed/zero/overflowing values are
+            // actionable errors, never a silent default.
+            let max_mb: u64 = match std::env::var("CODEGRAPH_IMPORT_MAX_MB") {
+                Err(std::env::VarError::NotPresent) => 2048,
+                Err(e) => anyhow::bail!("CODEGRAPH_IMPORT_MAX_MB unreadable: {e}"),
+                Ok(v) => match v.trim().parse::<u64>() {
+                    Ok(0) => anyhow::bail!(
+                        "CODEGRAPH_IMPORT_MAX_MB=0 forbids every import — set a positive cap or unset it"
+                    ),
+                    Ok(n) => n,
+                    Err(e) => anyhow::bail!("CODEGRAPH_IMPORT_MAX_MB={v:?} is not a valid size in MB: {e}"),
+                },
+            };
+            let max_bytes = max_mb.checked_mul(1024 * 1024).ok_or_else(|| {
+                anyhow::anyhow!("CODEGRAPH_IMPORT_MAX_MB={max_mb} overflows the byte cap")
+            })?;
+            // Concurrent-writer guard: import shares the writer lock with
+            // reindexers and NEVER proceeds unlocked — contention timeout and
+            // lock-file I/O failure are distinct, typed, and both fatal.
+            let _lock = index::acquire_graph_lock(&db)
+                .map_err(|e| anyhow::anyhow!(e).context("cannot import without the writer lock"))?;
+            // UNIQUE staging file in the destination directory (randomized by
+            // tempfile): concurrent imports can never reuse or delete each
+            // other's staging, and RAII removes ours on every failure path.
+            let dir = db
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("{}: graph path has no parent", db.display()))?
+                .to_path_buf();
+            let staging = tempfile::Builder::new()
+                .prefix("graph.db.import-")
+                .suffix(".tmp")
+                .tempfile_in(&dir)
+                .map_err(|e| {
+                    anyhow::anyhow!("cannot create staging file in {}: {e}", dir.display())
+                })?;
             {
-                let store = codegraph_store::Store::open(&db)?;
-                let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
-                store.meta_set("repo_root", &canon.to_string_lossy())?;
+                use std::io::{Read, Write};
+                let fin = std::fs::File::open(&src)
+                    .map_err(|e| anyhow::anyhow!("{}: {e}", src.display()))?;
+                let mut dec = zstd::stream::read::Decoder::new(std::io::BufReader::new(fin))?;
+                let mut out = std::io::BufWriter::new(staging.as_file());
+                let mut limited = (&mut dec).take(max_bytes + 1);
+                let copied = std::io::copy(&mut limited, &mut out).map_err(|e| {
+                    anyhow::anyhow!("{}: corrupt zstd artifact ({e})", src.display())
+                })?;
+                if copied > max_bytes {
+                    anyhow::bail!(
+                        "{}: decompresses past the {max_mb} MB cap — refusing (raise CODEGRAPH_IMPORT_MAX_MB if intended)",
+                        src.display()
+                    );
+                }
+                out.flush()?;
             }
-            index::ensure_fresh(&path)?;
+            let tmp = staging.into_temp_path(); // RAII: deleted on any failure below
+                                                // Side files our staging work creates next to the RANDOM staging
+                                                // name (SQLite sidecars + the heal's index lock file). Random
+                                                // names mean these are exclusively OURS — removing them can never
+                                                // touch another import's staging.
+            let staging_sides = [
+                std::path::PathBuf::from(format!("{}-wal", tmp.display())),
+                std::path::PathBuf::from(format!("{}-shm", tmp.display())),
+                tmp.with_extension("lock"),
+            ];
+            let remove_if_present = |p: &std::path::Path| -> std::io::Result<()> {
+                match std::fs::remove_file(p) {
+                    Ok(()) => Ok(()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(e) => Err(e),
+                }
+            };
+            // Validation + schema migration + drift-heal, ALL on staging: the
+            // active graph is untouched until every precondition has passed.
+            let staged = (|| -> anyhow::Result<()> {
+                {
+                    let store = codegraph_store::Store::open(&tmp)?; // schema gate/migrations
+                    store.integrity_check()?;
+                    let violations = store.validate_graph()?;
+                    anyhow::ensure!(
+                        violations.is_empty(),
+                        "graph validation failed: {}",
+                        violations.join("; ")
+                    );
+                    store.assert_repo_relative_paths()?;
+                    let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+                    store.meta_set("repo_root", &canon.to_string_lossy())?;
+                }
+                // heal drift into the staged graph pre-activation
+                index::index_dir(&path, &tmp, false, None, false, None)?;
+                // Durability AFTER the last staging mutation: checkpoint the
+                // WAL into the main file (no required data may remain only in
+                // a sidecar), close, then flush the final bytes to disk.
+                {
+                    let store = codegraph_store::Store::open(&tmp)?;
+                    store.checkpoint_truncate()?;
+                }
+                if let Ok(meta) = std::fs::metadata(&staging_sides[0]) {
+                    anyhow::ensure!(
+                        meta.len() == 0,
+                        "staged graph still holds {} bytes in its WAL sidecar after checkpoint",
+                        meta.len()
+                    );
+                }
+                for p in &staging_sides {
+                    remove_if_present(p)
+                        .map_err(|e| anyhow::anyhow!("cannot remove {}: {e}", p.display()))?;
+                }
+                std::fs::File::open(&tmp)?.sync_all()?;
+                Ok(())
+            })();
+            if let Err(e) = staged {
+                // our side files (RAII covers only the staging db itself)
+                for p in &staging_sides {
+                    if let Err(clean_err) = remove_if_present(p) {
+                        eprintln!("warning: could not clean {}: {clean_err}", p.display());
+                    }
+                }
+                return Err(e.context(format!(
+                    "import of {} rejected — existing graph left untouched",
+                    src.display()
+                )));
+            }
+            // The OLD graph's WAL/SHM sidecars must not survive activation: a
+            // stale `-wal` next to the freshly renamed file would be replayed
+            // by SQLite into the NEW database on next open (silent
+            // corruption). Healthy old graph → checkpoint it (its data moves
+            // into the file we're about to replace, nothing is lost if
+            // activation then fails); unopenable old graph → the sidecars are
+            // part of the broken state import exists to replace.
+            let old_sides = [
+                std::path::PathBuf::from(format!("{}-wal", db.display())),
+                std::path::PathBuf::from(format!("{}-shm", db.display())),
+            ];
+            if old_sides.iter().any(|p| p.exists()) {
+                match codegraph_store::Store::open(&db) {
+                    Ok(old) => {
+                        old.checkpoint_truncate().map_err(|e| {
+                            anyhow::anyhow!(
+                                "cannot checkpoint the previous graph before activation ({e}) — import aborted, previous graph unchanged"
+                            )
+                        })?;
+                    }
+                    Err(e) => eprintln!(
+                        "warning: previous graph is unopenable ({e}); discarding its stale WAL sidecars as part of the replacement"
+                    ),
+                }
+                for p in &old_sides {
+                    remove_if_present(p)
+                        .map_err(|e| anyhow::anyhow!("cannot remove stale {}: {e}", p.display()))?;
+                }
+            }
+            // Exactly ONE activation operation (platform-aware, atomic on
+            // unix, backup+restore on Windows). On failure the RAII staging
+            // path is removed and the previous graph remains active.
+            index::replace_db_atomically(&tmp, &db).map_err(|e| {
+                e.context(format!(
+                    "activation of {} failed — previous graph remains active",
+                    db.display()
+                ))
+            })?;
+            // The staged file was consumed by the rename; disarm RAII so drop
+            // doesn't try to unlink the now-activated graph's old path.
+            if let Err(e) = tmp.keep() {
+                // cleanup bookkeeping only — the activated graph is live and
+                // must not be reported as a failure
+                eprintln!("warning: staging cleanup bookkeeping failed: {e}");
+            }
+            // Persist the rename itself where the platform supports it.
+            #[cfg(unix)]
+            {
+                match std::fs::File::open(&dir).and_then(|d| d.sync_all()) {
+                    Ok(()) => {}
+                    // the graph is ACTIVATED and valid; a directory-sync
+                    // failure is reported, never converted into a failure exit
+                    Err(e) => eprintln!(
+                        "warning: could not sync {} (activation is complete; crash-durability of the rename is not guaranteed): {e}",
+                        dir.display()
+                    ),
+                }
+            }
             println!(
-                "imported {} -> {} (graph live; drift healed incrementally)",
+                "imported {} -> {} (validated + healed in staging, atomically activated)",
                 src.display(),
                 db.display()
             );

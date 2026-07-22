@@ -48,7 +48,16 @@ fn resolved(cfg: &Config, key: &str) -> Option<String> {
 
 /// `codegraph config` — print the resolved config.
 pub fn view(cwd: &Path) -> Result<()> {
-    let cfg = Config::load(cwd)?;
+    // RECOVERY-friendly: a malformed file must not lock the user out of the
+    // very command that shows where the file is — report the parse error and
+    // the resolved defaults instead of failing.
+    let cfg = match Config::load(cwd) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("warning: config is malformed and being ignored for this view — fix it (see `codegraph config path` / `config edit`):\n  {e}");
+            Config::default()
+        }
+    };
     let w = KEYS.iter().map(|(k, _)| k.len()).max().unwrap_or(12);
     for (key, _) in KEYS {
         println!("{:<w$} = {}", key, resolved(&cfg, key).unwrap_or_default());
@@ -100,19 +109,55 @@ fn target(local: bool, cwd: &Path) -> PathBuf {
     }
 }
 
-fn load_doc(path: &Path) -> toml_edit::DocumentMut {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_default()
+/// Parse the target for a MUTATION. A missing file starts empty; a read error
+/// or malformed TOML is fatal WITH context — `set`/`unset` must never
+/// clobber a file they could not faithfully parse (that would silently
+/// destroy the user's comments and unparsed keys).
+fn load_doc(path: &Path) -> Result<toml_edit::DocumentMut> {
+    let s = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(toml_edit::DocumentMut::default())
+        }
+        Err(e) => return Err(anyhow!("cannot read {}: {e}", path.display())),
+    };
+    s.parse().map_err(|e| {
+        anyhow!(
+            "{} is not valid TOML ({e}) — refusing to modify it. The file is unchanged; repair it with `codegraph config edit`",
+            path.display()
+        )
+    })
 }
 
 fn write_doc(path: &Path, doc: &toml_edit::DocumentMut) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let _ = std::fs::copy(path, path.with_extension("toml.bak"));
-    std::fs::write(path, doc.to_string())?;
+    // Backup is part of the destructive-write contract: if it cannot be
+    // taken, the write does not happen.
+    if path.exists() {
+        let bak = path.with_extension("toml.bak");
+        std::fs::copy(path, &bak).map_err(|e| {
+            anyhow!(
+                "cannot back up {} to {}: {e}",
+                path.display(),
+                bak.display()
+            )
+        })?;
+    }
+    // Same-directory tempfile + atomic replace: a failed/interrupted write
+    // can never leave a truncated config behind.
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let staging = tempfile::Builder::new()
+        .prefix(".codegraph.toml.")
+        .suffix(".tmp")
+        .tempfile_in(dir.unwrap_or_else(|| Path::new(".")))
+        .map_err(|e| anyhow!("cannot stage config write next to {}: {e}", path.display()))?;
+    std::fs::write(staging.path(), doc.to_string())
+        .map_err(|e| anyhow!("cannot write staged config: {e}"))?;
+    staging
+        .persist(path)
+        .map_err(|e| anyhow!("cannot replace {}: {e}", path.display()))?;
     Ok(())
 }
 
@@ -123,7 +168,7 @@ pub fn set(cwd: &Path, key: &str, value: &str, local: bool) -> Result<()> {
         .find(|(k, _)| *k == key)
         .ok_or_else(|| unknown(key))?;
     let path = target(local, cwd);
-    let mut doc = load_doc(&path);
+    let mut doc = load_doc(&path)?;
     let item = match *ty {
         "bool" => toml_edit::value(matches!(
             value.to_ascii_lowercase().as_str(),
@@ -152,7 +197,7 @@ pub fn unset(cwd: &Path, key: &str, local: bool) -> Result<()> {
         .find(|(k, _)| *k == key)
         .ok_or_else(|| unknown(key))?;
     let path = target(local, cwd);
-    let mut doc = load_doc(&path);
+    let mut doc = load_doc(&path)?;
     let parts: Vec<&str> = key.split('.').collect();
     let mut tbl = doc.as_table_mut();
     for p in &parts[..parts.len() - 1] {

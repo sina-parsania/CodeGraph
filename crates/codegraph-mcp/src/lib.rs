@@ -233,28 +233,106 @@ impl CodeGraphServer {
         }
     }
 
-    /// Reindex-before-serve, debounced to once per second. Best-effort — a failed
-    /// refresh logs and serves the last snapshot rather than failing the query.
-    fn maybe_refresh(&self) {
-        let Some(f) = self.refresh else { return };
-        if let Ok(mut last) = self.last_fresh.lock() {
-            let due = last.map(|t| t.elapsed().as_millis() > 1000).unwrap_or(true);
-            if due {
-                if let Err(e) = f(&self.root) {
-                    eprintln!("codegraph: auto-reindex failed ({e}); serving last snapshot");
+    /// Reindex-before-serve, debounced to once per second, with a TYPED
+    /// outcome: `Fresh` when the graph was refreshed (or verified <1s ago),
+    /// `Stale{reason}` when a failed refresh was explicitly tolerated
+    /// (CODEGRAPH_ALLOW_STALE=1). STRICT by default: a failed refresh fails
+    /// the query. The debounce stamp advances ONLY on success — a failing
+    /// refresh is retried on the very next call, never masked for a second.
+    fn maybe_refresh(&self) -> Result<codegraph_core::GraphFreshness, McpError> {
+        use codegraph_core::GraphFreshness;
+        let Some(f) = self.refresh else {
+            // server started with --no-autoheal: freshness is deliberately
+            // not established, and answers must say so
+            return Ok(GraphFreshness::Unknown {
+                reason: "auto-refresh disabled (--no-autoheal)".into(),
+            });
+        };
+        // Poisoned freshness state is an ERROR — never a silent bypass of the
+        // freshness contract.
+        let mut last = self.last_fresh.lock().map_err(|_| {
+            McpError::internal_error(
+                "freshness state poisoned (a refresh thread panicked) — restart the server; refusing to serve without a freshness guarantee".to_string(),
+                None,
+            )
+        })?;
+        let due = last.map(|t| t.elapsed().as_millis() > 1000).unwrap_or(true);
+        if due {
+            // block_in_place: the refresh is a full filesystem walk + SQLite
+            // write burst that can run for seconds — it must not pin an async
+            // Tokio worker (the runtime is multi-threaded; see serve_stdio).
+            match tokio::task::block_in_place(|| f(&self.root)) {
+                // debounce advances ONLY on success — a failing refresh (in
+                // BOTH modes) is retried on the very next call, never masked
+                // for a second.
+                Ok(()) => *last = Some(std::time::Instant::now()),
+                Err(e) => {
+                    if std::env::var("CODEGRAPH_ALLOW_STALE").as_deref() == Ok("1") {
+                        eprintln!(
+                            "codegraph: auto-reindex failed ({e}); serving last snapshot (CODEGRAPH_ALLOW_STALE)"
+                        );
+                        return Ok(GraphFreshness::Stale {
+                            reason: format!(
+                                "auto-reindex failed ({e}); serving the last snapshot (CODEGRAPH_ALLOW_STALE=1)"
+                            ),
+                        });
+                    }
+                    return Err(McpError::internal_error(
+                        format!(
+                            "FRESHNESS FAILURE: auto-reindex failed ({e}) — refusing to serve a possibly-stale graph. \
+                             Fix the failure (or set CODEGRAPH_ALLOW_STALE=1 for best-effort). \
+                             Do NOT treat previous answers as current until a query succeeds."
+                        ),
+                        None,
+                    ));
                 }
-                *last = Some(std::time::Instant::now());
             }
         }
+        Ok(GraphFreshness::Fresh)
+    }
+
+    /// Merge the ADAPTER's freshness verdict (did we refresh before serving?)
+    /// into service-computed metadata. A stale serve always overrides — no
+    /// stale response may present itself as simply fresh/exact.
+    fn stamp_freshness(
+        meta: codegraph_core::AnswerMetadata,
+        adapter: codegraph_core::GraphFreshness,
+    ) -> codegraph_core::AnswerMetadata {
+        use codegraph_core::GraphFreshness;
+        let freshness = match (adapter, meta.freshness) {
+            (GraphFreshness::Fresh, provenance) => provenance,
+            (stale_or_unknown, _) => stale_or_unknown,
+        };
+        codegraph_core::AnswerMetadata { freshness, ..meta }
     }
 
     fn open(&self) -> Result<PooledStore, McpError> {
-        let store = self.open_any()?;
+        let (store, _freshness) = self.open_with_freshness()?;
+        Ok(store)
+    }
+
+    /// Open + the TYPED freshness verdict of the pre-serve refresh — for
+    /// tools that carry answer metadata (a stale serve must be stamped, never
+    /// implied fresh).
+    fn open_with_freshness(
+        &self,
+    ) -> Result<(PooledStore, codegraph_core::GraphFreshness), McpError> {
+        let freshness = self.maybe_refresh()?;
+        let store = self.open_unrefreshed()?;
         // ZERO-FALSE-NEGATIVE GUARD: an empty graph must never produce clean
         // empty answers ("no callers" from 0 nodes is a confident lie). The
         // classic cause is a server pointed at a moved repo / stale --path.
         // `stats` uses open_any() so the emptiness itself stays diagnosable.
-        if store.node_count().unwrap_or(0) == 0 {
+        // A DATABASE ERROR is a database error — it must never read as
+        // "empty graph" (that would convert an I/O failure into a confident
+        // wrong answer).
+        let n = store.node_count().map_err(|e| {
+            McpError::internal_error(
+                format!("cannot read the graph (database error, NOT an empty graph): {e}"),
+                None,
+            )
+        })?;
+        if n == 0 {
             return Err(McpError::internal_error(
                 format!(
                     "graph is EMPTY for root {} — likely a stale/wrong server root (moved repo? stale --path in the MCP registration?). \
@@ -265,11 +343,17 @@ impl CodeGraphServer {
                 None,
             ));
         }
-        Ok(store)
+        Ok((store, freshness))
     }
 
     fn open_any(&self) -> Result<PooledStore, McpError> {
-        self.maybe_refresh();
+        self.maybe_refresh()?;
+        self.open_unrefreshed()
+    }
+
+    /// Pool checkout / Store::open WITHOUT the freshness gate — only reachable
+    /// through the refreshing wrappers above.
+    fn open_unrefreshed(&self) -> Result<PooledStore, McpError> {
         let id = db_file_id(&self.db_path);
         if let Ok(mut slot) = self.store_slot.lock() {
             if let Some((cached, store)) = slot.take() {
@@ -497,7 +581,7 @@ impl CodeGraphServer {
     /// a burst of graph queries in one agent turn builds the snapshot once; a
     /// reindex bumps the generation and invalidates it. Cheap to clone (Arc).
     fn load_graph(&self) -> Result<std::sync::Arc<GraphSnapshot>, McpError> {
-        self.maybe_refresh();
+        self.maybe_refresh()?;
         let key: SnapKey = (
             codegraph_store::generation(&self.db_path),
             std::fs::metadata(&self.db_path)
@@ -920,13 +1004,43 @@ impl CodeGraphServer {
     )]
     async fn dead_code(&self, args: Parameters<LimitArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
-        let dead: Vec<serde_json::Value> = store
-            .dead_code_candidates(args.0.limit.unwrap_or(50))
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+        // Shared DeadCodeService; the response stays the v1.37 CONTRACT — an
+        // ARRAY of {name, kind, file, line} rows (clients depend on it).
+        // Provenance/quality metadata is served by `dead_code_v2`.
+        let ans = tokio::task::block_in_place(|| {
+            codegraph_services::DeadCodeService::candidates(&store, args.0.limit.unwrap_or(50))
+        })
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let rows: Vec<serde_json::Value> = ans
+            .data
             .iter()
-            .map(lean)
+            .map(|n| serde_json::json!({"name": n.name, "kind": n.kind, "file": n.file, "line": n.line}))
             .collect();
-        Ok(CallToolResult::success(vec![Content::json(dead)?]))
+        Ok(CallToolResult::success(vec![Content::json(rows)?]))
+    }
+
+    #[tool(
+        description = "dead_code with TYPED assessments + provenance: every symbol lacking direct call evidence is classified as candidate / indirectly_referenced (callbacks, function values, macro & framework registration, FFI) / unknown (public exports, unclassifiable refs) / excluded, plus generation + freshness + evidence quality. Candidates are a LOWER BOUND on liveness knowledge — treat as leads, not verdicts."
+    )]
+    async fn dead_code_v2(&self, args: Parameters<LimitArgs>) -> Result<CallToolResult, McpError> {
+        let (store, freshness) = self.open_with_freshness()?;
+        let limit = args.0.limit.unwrap_or(50);
+        let (assessments, candidates) = tokio::task::block_in_place(|| {
+            let a = codegraph_services::DeadCodeService::assess(&store, limit)?;
+            let c = codegraph_services::DeadCodeService::candidates(&store, limit)?;
+            anyhow::Ok((a, c))
+        })
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let meta = Self::stamp_freshness(assessments.meta, freshness);
+        Ok(CallToolResult::success(vec![Content::json(
+            serde_json::json!({
+                "candidates": candidates.data,
+                "assessments": assessments.data,
+                "generation": meta.generation,
+                "freshness": meta.freshness,
+                "evidence": meta.evidence,
+            }),
+        )?]))
     }
 
     #[tool(
@@ -948,69 +1062,56 @@ impl CodeGraphServer {
         description = "Change-aware review: map the git diff (vs a base ref, default HEAD = uncommitted) to affected symbols with fan-in, test-gap flags, a risk tier, and co-change hints (files that usually change with this diff but aren't in it). Use to review a change's blast radius before committing/merging."
     )]
     async fn changes(&self, args: Parameters<ChangesArgs>) -> Result<CallToolResult, McpError> {
-        let store = self.open()?;
+        let (store, freshness) = self.open_with_freshness()?;
         let base = args.0.base.unwrap_or_else(|| "HEAD".to_string());
-        let out = std::process::Command::new("git")
-            .args([
-                "-C",
-                &self.root.to_string_lossy(),
-                "diff",
-                "--name-only",
+        // Shared application service — identical metrics/risk/git semantics to
+        // the CLI (previously this tool had its OWN name-based formula with
+        // silent .unwrap_or defaults and no git status check).
+        // block_in_place: spawns git + runs per-symbol SQLite queries.
+        let ans = tokio::task::block_in_place(|| {
+            codegraph_services::ReviewService::review(
+                &store,
+                &self.root,
                 &base,
-            ])
-            .output()
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let changed: Vec<String> = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(str::to_string)
-            .filter(|f| !f.is_empty())
-            .collect();
-        let mut symbols = Vec::new();
-        let mut hints: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
-        for f in &changed {
-            for sym in store
-                .symbols_in_file(f)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?
-            {
-                let fan_in = store.call_site_count(&sym.name).unwrap_or(0);
-                let tested = store.has_test_reference(&sym.name).unwrap_or(false);
-                let risk = match (fan_in, tested) {
-                    (f, false) if f >= 10 => "HIGH",
-                    (f, _) if f >= 10 => "MED",
-                    (f, false) if f >= 3 => "MED",
-                    _ => "low",
-                };
-                symbols.push(serde_json::json!({
-                    "name": sym.name, "file": sym.file_path, "line": sym.line_start,
-                    "fan_in": fan_in, "tested": tested, "risk": risk,
-                }));
-            }
-            for (other, n) in store.cochanges_for(f, 5).unwrap_or_default() {
-                if n >= 3 && !changed.contains(&other) {
-                    let e = hints.entry(other).or_insert(0);
-                    *e = (*e).max(n);
-                }
-            }
-        }
-        symbols.sort_by_key(|s| {
-            std::cmp::Reverse(
-                s["fan_in"].as_u64().unwrap_or(0)
-                    * if s["tested"].as_bool().unwrap_or(false) {
-                        1
-                    } else {
-                        3
-                    },
+                codegraph_core::is_code_path,
             )
-        });
-        symbols.truncate(40);
-        let co_change_hints: Vec<serde_json::Value> = hints
-            .into_iter()
+        })
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let review = &ans.data;
+        let rows: Vec<serde_json::Value> = review
+            .rows
+            .iter()
+            .take(40)
+            .map(|r| {
+                // v1.37 CONTRACT fields keep their exact types (fan_in: number,
+                // tested: bool, risk: tier string); the ID-based split arrives
+                // as ADDITIVE fields — never an in-place type change.
+                serde_json::json!({
+                    "name": r.name, "file": r.file, "line": r.line,
+                    "fan_in": r.fan_in_resolved,
+                    "tested": r.tested != codegraph_services::TestEvidence::None,
+                    "risk": r.tier,
+                    "fan_in_resolved": r.fan_in_resolved, "textual_sites": r.textual_sites,
+                    "tested_evidence": r.tested, "risk_score": format!("{:.1}", r.risk),
+                })
+            })
+            .collect();
+        let hints: Vec<serde_json::Value> = review
+            .co_change_hints
+            .iter()
             .map(|(f, n)| serde_json::json!({"file": f, "co_changed": n}))
             .collect();
+        let meta = Self::stamp_freshness(ans.meta.clone(), freshness);
         Ok(CallToolResult::success(vec![Content::json(
             serde_json::json!({
-                "base": base, "changed_files": changed, "affected_symbols": symbols,
-                "co_change_hints": co_change_hints,
+                "base": review.base, "changed_files": review.changed_files,
+                "affected_symbols": rows,
+                "base_only_symbols": review.base_only,
+                "unknown_files": review.unknown_files,
+                "co_change_hints": hints,
+                "generation": meta.generation,
+                "freshness": meta.freshness,
+                "evidence": meta.evidence,
             }),
         )?]))
     }
@@ -1019,7 +1120,7 @@ impl CodeGraphServer {
         description = "Graph query in Cypher-lite (read-only openCypher subset): 1-2 hop patterns like MATCH (a:Method)-[:Calls]->(b) WHERE b.name = 'save' RETURN a.name, a.file LIMIT 10. Relations: Calls, Tests, Inherits, Implements, HttpCalls, Defines. Props: name/file/line/label/language/id/pagerank. ALSO the tool for EXHAUSTIVE listings (all files/symbols matching a filter): MATCH (n) WHERE n.file CONTAINS 'x' RETURN n.file LIMIT 1000 — a complete filter, unlike search's ranked top-N. Unsupported syntax errors clearly — never a wrong answer."
     )]
     async fn graph_query(&self, args: Parameters<CypherArgs>) -> Result<CallToolResult, McpError> {
-        self.maybe_refresh();
+        self.maybe_refresh()?;
         let sql = codegraph_store::cypher::to_sql(&args.0.query)
             .map_err(|e| McpError::invalid_params(format!("cypher-lite: {e}"), None))?;
         let (cols, rows) = codegraph_store::query_readonly(&self.db_path, &sql, 500)
@@ -1337,9 +1438,155 @@ mod tests {
         let tools = CodeGraphServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            18,
+            19,
             "tool count changed — update README (both mentions) and this test: {:?}",
             tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
         );
+    }
+
+    use codegraph_core::{AnswerMetadata, EvidenceQuality, GraphFreshness, GraphGeneration};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Env-mutating freshness tests share one lock — never mutate the global
+    /// environment concurrently.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    static FAIL_CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn failing_refresh(_: &Path) -> anyhow::Result<()> {
+        FAIL_CALLS.fetch_add(1, Ordering::SeqCst);
+        anyhow::bail!("injected refresh failure")
+    }
+
+    static OK_CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn ok_refresh(_: &Path) -> anyhow::Result<()> {
+        OK_CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// A failed refresh must never advance the debounce: with stale opt-in
+    /// the SECOND call retries immediately (typed Stale both times), and
+    /// strict mode errors.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_refresh_is_stale_typed_and_retries_immediately() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let s = CodeGraphServer::with_refresh(
+            PathBuf::from("."),
+            PathBuf::from("/nonexistent/graph.db"),
+            Some(failing_refresh),
+        );
+        // strict default: error, debounce not advanced
+        FAIL_CALLS.store(0, Ordering::SeqCst);
+        assert!(s.maybe_refresh().is_err(), "strict mode must error");
+        assert_eq!(FAIL_CALLS.load(Ordering::SeqCst), 1);
+        // stale opt-in: typed Stale, and the next call RETRIES (no debounce)
+        std::env::set_var("CODEGRAPH_ALLOW_STALE", "1");
+        let f1 = s.maybe_refresh().unwrap();
+        let f2 = s.maybe_refresh().unwrap();
+        std::env::remove_var("CODEGRAPH_ALLOW_STALE");
+        assert!(matches!(f1, GraphFreshness::Stale { .. }), "{f1:?}");
+        assert!(matches!(f2, GraphFreshness::Stale { .. }), "{f2:?}");
+        assert_eq!(
+            FAIL_CALLS.load(Ordering::SeqCst),
+            3,
+            "a failing refresh must be retried on every call, never debounced"
+        );
+    }
+
+    /// A SUCCESSFUL refresh advances the debounce: the second call within 1s
+    /// serves without re-running the refresh, and both are typed Fresh.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn successful_refresh_advances_debounce() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let s = CodeGraphServer::with_refresh(
+            PathBuf::from("."),
+            PathBuf::from("/nonexistent/graph.db"),
+            Some(ok_refresh),
+        );
+        OK_CALLS.store(0, Ordering::SeqCst);
+        let f1 = s.maybe_refresh().unwrap();
+        let f2 = s.maybe_refresh().unwrap();
+        assert_eq!(f1, GraphFreshness::Fresh);
+        assert_eq!(f2, GraphFreshness::Fresh);
+        assert_eq!(
+            OK_CALLS.load(Ordering::SeqCst),
+            1,
+            "success must debounce the immediate follow-up"
+        );
+    }
+
+    /// Poisoned freshness state must be an ERROR — never a silent bypass of
+    /// the freshness contract.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn poisoned_freshness_state_is_an_error() {
+        let s = CodeGraphServer::with_refresh(
+            PathBuf::from("."),
+            PathBuf::from("/nonexistent/graph.db"),
+            Some(ok_refresh),
+        );
+        let m = s.last_fresh.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = m.lock().unwrap();
+            panic!("poison the freshness mutex");
+        })
+        .join();
+        let err = s.maybe_refresh().expect_err("poisoned state must error");
+        assert!(format!("{err:?}").contains("poisoned"), "{err:?}");
+    }
+
+    /// A DATABASE ERROR must surface as an error — never as the "empty
+    /// graph" refusal (which would convert an I/O failure into a confident
+    /// statement about the repo's size), and never as a clean empty answer.
+    #[test]
+    fn database_error_is_not_an_empty_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("graph.db");
+        std::fs::write(&db, b"this is not a sqlite database at all").unwrap();
+        let s = CodeGraphServer::new(db);
+        let err = match s.open() {
+            Ok(_) => panic!("corrupt db must error"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:?}");
+        assert!(
+            !msg.contains("EMPTY"),
+            "a database error must not be reported as an empty graph: {msg}"
+        );
+    }
+
+    /// Freshness and evidence are ORTHOGONAL: a stale serve of a lower-bound
+    /// answer carries BOTH, with generation preserved.
+    #[test]
+    fn stale_and_lower_bound_coexist() {
+        let meta = AnswerMetadata {
+            generation: Some(GraphGeneration(3)),
+            freshness: GraphFreshness::Fresh,
+            evidence: EvidenceQuality::LowerBound {
+                reason: "unresolved call sites exist".into(),
+            },
+            coverage: None,
+        };
+        let stamped = CodeGraphServer::stamp_freshness(
+            meta,
+            GraphFreshness::Stale {
+                reason: "refresh failed".into(),
+            },
+        );
+        assert!(matches!(stamped.freshness, GraphFreshness::Stale { .. }));
+        assert!(matches!(
+            stamped.evidence,
+            EvidenceQuality::LowerBound { .. }
+        ));
+        assert_eq!(stamped.generation, Some(GraphGeneration(3)));
+        // and a FRESH adapter verdict preserves provenance-derived freshness
+        let meta = AnswerMetadata {
+            generation: None,
+            freshness: GraphFreshness::Unknown {
+                reason: "legacy".into(),
+            },
+            evidence: EvidenceQuality::Exact,
+            coverage: None,
+        };
+        let stamped = CodeGraphServer::stamp_freshness(meta, GraphFreshness::Fresh);
+        assert!(matches!(stamped.freshness, GraphFreshness::Unknown { .. }));
     }
 }

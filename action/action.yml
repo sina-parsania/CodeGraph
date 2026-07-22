@@ -1,39 +1,90 @@
 name: 'CodeGraph Review'
-description: 'Risk-scored PR review from a resolved code graph (single 5MB binary, no pip/npm).'
+description: 'Risk-scored PR review from a resolved code graph (single self-contained binary, no pip/npm).'
+# Requirements (document in your workflow):
+#   permissions: { contents: read, pull-requests: write }   # PR comment upsert
+#   actions/checkout with fetch-depth: 0 (the base ref must exist locally)
 inputs:
   fail-on-high-risk:
-    description: 'Fail the job if any HIGH-risk symbol is in the diff.'
+    description: 'Fail the job if any HIGH-risk or UNKNOWN symbol is in the diff.'
     default: 'false'
   base:
     description: 'Base ref to diff against.'
     default: 'origin/main'
+  version:
+    description: 'CodeGraph release tag to install (pinned — never releases/latest).'
+    default: 'v1.39.0'
 runs:
   using: composite
   steps:
-    - name: Install codegraph
+    - name: Install codegraph (pinned, checksum-verified)
       shell: bash
+      env:
+        CG_VERSION: ${{ inputs.version }}
       run: |
-        curl -sL "https://github.com/sina-parsania/CodeGraph/releases/latest/download/codegraph-macos-arm64" -o /usr/local/bin/codegraph || true
-        chmod +x /usr/local/bin/codegraph 2>/dev/null || true
-        codegraph --version
+        set -euo pipefail
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)    ASSET=codegraph-linux-x64 ;;
+          Linux-ARM64)  ASSET=codegraph-linux-arm64 ;;
+          macOS-ARM64)  ASSET=codegraph-macos-arm64 ;;
+          macOS-X64)    ASSET=codegraph-macos-x64 ;;
+          Windows-X64)  ASSET=codegraph-windows-x64.exe ;;
+          *) echo "::error::unsupported runner: ${RUNNER_OS}-${RUNNER_ARCH}"; exit 1 ;;
+        esac
+        BASE_URL="https://github.com/sina-parsania/CodeGraph/releases/download/${CG_VERSION}"
+        curl -fsSL "${BASE_URL}/${ASSET}" -o "${RUNNER_TEMP}/${ASSET}"
+        curl -fsSL "${BASE_URL}/sha256sums.txt" -o "${RUNNER_TEMP}/sha256sums.txt"
+        cd "${RUNNER_TEMP}"
+        # checksum line MUST exist — a missing entry is a failure, never a skip
+        if ! grep -F "  ${ASSET}" sha256sums.txt > "${ASSET}.sha256"; then
+          echo "::error::no checksum entry for ${ASSET} in sha256sums.txt"; exit 1
+        fi
+        # portable verify: sha256sum (Linux/Git-Bash) or shasum (macOS)
+        if command -v sha256sum >/dev/null 2>&1; then
+          sha256sum -c "${ASSET}.sha256"
+        else
+          shasum -a 256 -c "${ASSET}.sha256"
+        fi
+        # Windows PATH lookup requires the .exe suffix
+        BIN_NAME=codegraph
+        if [ "${RUNNER_OS}" = "Windows" ]; then BIN_NAME=codegraph.exe; fi
+        install -m 0755 "${ASSET}" "${RUNNER_TEMP}/${BIN_NAME}"
+        echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
+        "${RUNNER_TEMP}/${BIN_NAME}" --version
     - name: Index + review
       shell: bash
+      env:
+        CG_BASE: ${{ inputs.base }}
       run: |
+        set -euo pipefail
+        # the base ref must exist (shallow checkouts silently miss it)
+        if ! git rev-parse --verify --quiet "${CG_BASE}^{commit}" >/dev/null; then
+          echo "::error::base ref '${CG_BASE}' not found — use actions/checkout with fetch-depth: 0 (or fetch the base branch)"
+          exit 1
+        fi
         codegraph index . >/dev/null
-        codegraph review --base "${{ inputs.base }}" --md > review.md
+        codegraph review --base "${CG_BASE}" --md > review.md
         cat review.md >> "$GITHUB_STEP_SUMMARY"
     - name: Sticky PR comment
       if: github.event_name == 'pull_request'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
+        PR: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
       run: |
-        # upsert by marker
-        PR=${{ github.event.pull_request.number }}
-        OLD=$(gh api "repos/${{ github.repository }}/issues/$PR/comments" --jq '.[] | select(.body | contains("<!-- codegraph-review -->")) | .id' | head -1)
-        if [ -n "$OLD" ]; then gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$OLD" -f body="$(cat review.md)" >/dev/null
-        else gh pr comment "$PR" --body-file review.md >/dev/null; fi
+        set -euo pipefail
+        OLD=$(gh api "repos/${REPO}/issues/${PR}/comments" \
+          --jq 'first(.[] | select(.body | contains("<!-- codegraph-review -->")) | .id) // empty')
+        if [ -n "$OLD" ]; then
+          gh api -X PATCH "repos/${REPO}/issues/comments/$OLD" -f body="$(cat review.md)" >/dev/null
+        else
+          gh pr comment "$PR" --body-file review.md >/dev/null
+        fi
     - name: Risk gate
       if: inputs.fail-on-high-risk == 'true'
       shell: bash
-      run: '! grep -q "| HIGH " review.md'
+      run: |
+        set -euo pipefail
+        # UNKNOWN rows (deleted/unindexed files) fail the gate too — passing
+        # on missing data is a false pass.
+        ! grep -qE "\| (HIGH |UNKNOWN)" review.md
